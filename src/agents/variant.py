@@ -932,6 +932,25 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     return {"messages": [AIMessage(content="\n".join(lines))]}
 
 
+# --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------
+async def ask_for_image(state: VariantState, config: RunnableConfig) -> VariantState:
+    """route_entry 'ask' 分支落点：首轮无图无母题无题组，催老师贴题图。
+
+    🔴 必须是真节点（不能直连 END）—— 否则首轮没有任何节点产消息，回复为空，
+    '没图催' 提示从未触发（PRD-C-009 G15 红的 root cause）。
+    """
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    "我还没看到题目图。请先贴一张题目图的 OSS URL，我才能开始举一反三。\n\n"
+                    "（贴图后我会读图、锚定年级/考点/题型，再按你要的数量出变式题。）"
+                )
+            )
+        ]
+    }
+
+
 # ---------------------------------------------------------------------------
 # 图（StateGraph）
 # ---------------------------------------------------------------------------
@@ -951,6 +970,7 @@ graph.add_node("exec_add", exec_add)
 graph.add_node("patch", patch)
 graph.add_node("ask_clarify", ask_clarify)
 graph.add_node("persist_to_bank", persist_to_bank)
+graph.add_node("ask_for_image", ask_for_image)
 
 graph.set_conditional_entry_point(
     route_entry,
@@ -958,9 +978,11 @@ graph.set_conditional_entry_point(
         "analyze": "analyze",
         "generate": "generate",
         "parse": "parse_instruction",
-        "ask": END,
+        # 🔴 'ask' 必落真节点（ask_for_image），不能直连 END —— 否则首轮无节点产消息，回复为空
+        "ask": "ask_for_image",
     },
 )
+graph.add_edge("ask_for_image", END)
 
 # analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → classify
 def after_analyze(state: VariantState) -> Literal["classify", "done"]:
