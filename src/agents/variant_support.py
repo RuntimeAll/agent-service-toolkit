@@ -8,12 +8,27 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
 import pymysql
 
 from core import settings
+
+
+def _head_keyword(coarse_kp: str) -> str | None:
+    """从 LLM 粗考点描述抽「头部考点词」，给全词 LIKE 落空时的降级匹配用。
+
+    LLM 常给「二次根式的定义与识别」这类释义式描述，库内规范名是「二次根式有意义的条件」
+    等叶子节点 —— 整句 LIKE 必落空。截到首个结构性虚词（的/与/及/和/或）前的实词头
+    （如「二次根式」），按它再 LIKE 一次（仍是纯 SQL 名匹配降级，bge-m3 向量召回 future）。
+    头部词须 ≥2 字且短于原串才有降级意义，否则返回 None（避免误命中无关节点）。
+    """
+    head = re.split(r"[的与及和或，,、（(]", coarse_kp, maxsplit=1)[0].strip()
+    if len(head) >= 2 and len(head) < len(coarse_kp):
+        return head
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +52,10 @@ def anchor_subject(coarse_kp: str, limit: int = 8) -> list[dict[str, Any]]:
     SQL 精确匹配优先，命中不足时退 LIKE 模糊（MVP 用名匹配，向量召回 future）。
     返回 [{id, code, name, grade_code(编码前4位)}...]，按相关度粗排（精确在前）。
     🔴 纯只读 SELECT，pymysql 同步（节点已在 asyncio.to_thread 包裹外或 def 节点里调）。
+
+    🔴 编码 = 主键 id 本身（DDL：id="层级数字编码，每3位一层；根=学段+学科"），
+       biz_subject 无独立 code 列（实际列 = id/parent_id/name/level/...）。
+       原 SQL 选不存在的 code 列 → execute 抛 unknown column → classify 吞错 → 锚定恒空。
     """
     coarse_kp = (coarse_kp or "").strip()
     if not coarse_kp:
@@ -53,7 +72,8 @@ def anchor_subject(coarse_kp: str, limit: int = 8) -> list[dict[str, Any]]:
                 if r["id"] in seen:
                     continue
                 seen.add(r["id"])
-                code = str(r.get("code") or "")
+                # id 即层级数字编码（无独立 code 列）→ code = str(id)
+                code = str(r.get("id") or "")
                 rows.append(
                     {
                         "id": r["id"],
@@ -65,15 +85,23 @@ def anchor_subject(coarse_kp: str, limit: int = 8) -> list[dict[str, Any]]:
 
         # 1) 精确名匹配
         _take(
-            "SELECT id, code, name FROM biz_subject WHERE name=%s LIMIT %s",
+            "SELECT id, name FROM biz_subject WHERE name=%s LIMIT %s",
             (coarse_kp, limit),
         )
-        # 2) LIKE 模糊补足
+        # 2) LIKE 模糊补足（整句）
         if len(rows) < limit:
             _take(
-                "SELECT id, code, name FROM biz_subject WHERE name LIKE %s LIMIT %s",
+                "SELECT id, name FROM biz_subject WHERE name LIKE %s LIMIT %s",
                 (f"%{coarse_kp}%", limit - len(rows)),
             )
+        # 3) 头部考点词降级 LIKE：整句释义落空时，截实词头再匹配（限叶子/节 level>=3，避顶层学科误命中）
+        if not rows:
+            head = _head_keyword(coarse_kp)
+            if head:
+                _take(
+                    "SELECT id, name FROM biz_subject WHERE name LIKE %s AND level >= 3 LIMIT %s",
+                    (f"%{head}%", limit),
+                )
         return rows
     finally:
         conn.close()
