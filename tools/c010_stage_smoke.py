@@ -23,6 +23,7 @@ async def main() -> int:
     body = {"message": f"帮我对这道题举一反三：{IMG}", "stream_tokens": True,
             "thread_id": "stage-smoke-001"}
     stages: list[str] = []
+    artifacts: list[dict] = []
     final = ""
     async with httpx.AsyncClient(timeout=300.0, trust_env=False) as c:
         async with c.stream("POST", URL, json=body) as r:
@@ -48,9 +49,13 @@ async def main() -> int:
                         continue
                     m = ev.get("content") or {}
                     if m.get("type") == "custom":
-                        st = (m.get("custom_data") or {}).get("stage") or {}
+                        cd = m.get("custom_data") or {}
+                        st = cd.get("stage") or {}
                         if st.get("key"):
                             stages.append(f"{st['key']}:{st.get('status')}({st.get('detail') or ''})")
+                        art = cd.get("artifact") or {}
+                        if art.get("items"):
+                            artifacts.append(art)
                     elif m.get("type") == "ai" and m.get("content"):
                         final = m["content"]
 
@@ -59,9 +64,18 @@ async def main() -> int:
         print("  ", s)
     keys = {s.split(":")[0] for s in stages}
     need = {"analyze", "classify", "generate", "gene_gate", "verify"}
-    ok = need.issubset(keys) and bool(final)
     print(f"覆盖关键节点 {sorted(keys)} (需含 {sorted(need)})")
-    print("OK" if ok else "MISSING STAGES OR NO FINAL MESSAGE")
+    # PRD-C-011: artifact 快照帧（右栏卡片栅数据源）
+    print(f"artifact 帧 {len(artifacts)} 条")
+    art_ok = bool(artifacts)
+    if artifacts:
+        last = artifacts[-1]
+        for it in last.get("items", []):
+            print(f"   #{it.get('index')} {it.get('qtype')} 难度{it.get('difficulty')} "
+                  f"verify={it.get('verify')} gene={it.get('gene')} persisted={it.get('persisted')}")
+        print(f"   header={last.get('header')}")
+    ok = need.issubset(keys) and bool(final) and art_ok
+    print("OK" if ok else "MISSING STAGES/ARTIFACT OR NO FINAL MESSAGE")
     return 0 if ok else 1
 
 

@@ -349,3 +349,274 @@ def test_persist_emits_warn_when_bank_unreachable(monkeypatch):
     out = asyncio.run(persist_to_bank(state, {}))
     assert "连不上题库服务" in out["messages"][0].content
     assert calls[-1] == ("persist", "入库", "warn", "连不上题库服务")
+
+
+# ---------------------------------------------------------------------------
+# artifact 快照帧（PRD-C-011 Bucket 3）：FE 题卡数据源
+# 契约：ChatMessage(role="custom", content=[{"artifact": {"items":[...], "header":{...}}}])
+# 发射点 = assemble 收尾 + persist_to_bank 成功后（persisted per-item 标）
+# ---------------------------------------------------------------------------
+
+
+def _capture_frames(monkeypatch):
+    """Monkeypatch get_stream_writer with a capturer; returns the frame list."""
+    captured: list = []
+    monkeypatch.setattr(variant_mod, "get_stream_writer", lambda: captured.append)
+    return captured
+
+
+def _artifact_frames(captured):
+    """Filter captured custom frames down to artifact payloads (skip stage frames)."""
+    out = []
+    for msg in captured:
+        assert isinstance(msg, ChatMessage) and msg.role == "custom"
+        assert isinstance(msg.content, list) and len(msg.content) == 1
+        if "artifact" in msg.content[0]:
+            out.append(msg.content[0]["artifact"])
+    return out
+
+
+_RICH_ITEM = {
+    "stem": "解方程 2x+1=5",
+    "answer": "x=2",
+    "solution": "移项得 2x=4，x=2",
+    "qtype": "解答",
+    "difficulty": 3,
+    "level": "normal",
+    "check": {"badge": "ok", "verify": "sympy_pass"},
+    "gene": {"gate": "pass"},
+}
+
+
+def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+    state = dict(
+        _FACTS_STATE,
+        items=[dict(_RICH_ITEM), dict(_RICH_ITEM, level="hard", difficulty=4)],
+        knobs={"count": 2},
+    )
+    out = asyncio.run(variant_mod.assemble(state, {}))
+    # 节点返回值不变：单条 AIMessage，artifact 走 writer 自定义通道不进 messages
+    assert len(out["messages"]) == 1
+    arts = _artifact_frames(captured)
+    assert len(arts) == 1
+    art = arts[0]
+    # items[0] 契约字段齐 + verify/gene 透传
+    assert art["items"][0] == {
+        "index": 1,
+        "stem": "解方程 2x+1=5",
+        "answer": "x=2",
+        "solution": "移项得 2x=4，x=2",
+        "qtype": "解答",
+        "difficulty": 3,
+        "level": "normal",
+        "verify": "sympy_pass",
+        "gene": "pass",
+        "persisted": False,
+    }
+    assert art["items"][1]["index"] == 2
+    assert art["items"][1]["level"] == "hard"
+    # header：recipe 来自 knobs_desc，kp/grade 来自 analysis
+    assert art["header"] == {"recipe": "2 道", "kp": "一元一次方程", "grade": "七年级上学期"}
+
+
+def test_artifact_verify_falls_back_to_review_for_proof_items(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+    # 证明类分支：check 只有 review（proof_needs_human），无 verify 键
+    item = dict(_RICH_ITEM, check={"badge": "warn", "review": "proof_needs_human"})
+    state = dict(_FACTS_STATE, items=[item])
+    asyncio.run(variant_mod.assemble(state, {}))
+    art = _artifact_frames(captured)[0]
+    assert art["items"][0]["verify"] == "proof_needs_human"
+    assert art["items"][0]["gene"] == "pass"
+
+
+def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+    # 裸 item（持久化旧线程存量题：无 check / 无 gene / 无 difficulty）+ 无 analysis/knobs
+    state = {"items": [{"stem": "裸题"}]}
+    asyncio.run(variant_mod.assemble(state, {}))
+    art = _artifact_frames(captured)[0]
+    assert art["items"][0] == {
+        "index": 1,
+        "stem": "裸题",
+        "answer": "",
+        "solution": "",
+        "qtype": "",
+        "difficulty": 0,
+        "level": "normal",
+        "verify": None,
+        "gene": None,
+        "persisted": False,
+    }
+    # 缺省哨兵值（未知考点/未知年级）→ None 化；空 knobs → recipe None
+    assert art["header"] == {"recipe": None, "kp": None, "grade": None}
+
+
+def test_persist_emits_artifact_with_per_item_persisted_flags(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+
+    async def fake_persist(items, facts, token=None):
+        return [
+            {"role": "mother", "ok": True, "id": 100},
+            {"ok": True, "id": 101},
+            {"ok": False, "error": "boom"},
+        ]
+
+    monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
+    state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM), dict(_RICH_ITEM)])
+    out = asyncio.run(persist_to_bank(state, {}))
+    assert "入库完成" in out["messages"][0].content
+    arts = _artifact_frames(captured)
+    assert len(arts) == 1
+    # 母题回执已滤掉：var_receipts[i] 与 items[i] 同序 → persisted [True, False]
+    assert [it["persisted"] for it in arts[0]["items"]] == [True, False]
+    assert arts[0]["items"][0]["verify"] == "sympy_pass"
+
+
+def test_persist_unreachable_path_emits_no_artifact(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+
+    async def fake_persist(items, facts, token=None):
+        raise RuntimeError("connect refused")
+
+    monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
+    state = dict(_FACTS_STATE, items=[{"stem": "a", "answer": "1"}])
+    asyncio.run(persist_to_bank(state, {}))
+    assert _artifact_frames(captured) == []  # 异常早退：items 未变，不发更新快照
+
+
+def test_emit_artifact_is_silent_noop_outside_runtime():
+    # 直调无 langgraph runnable context：get_stream_writer 抛 → 必须静默吞
+    state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM)])
+    assert variant_mod._emit_artifact(state) is None
+
+
+def test_emit_artifact_swallows_writer_exception(monkeypatch):
+    def boom(_msg):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(variant_mod, "get_stream_writer", lambda: boom)
+    # must not raise
+    variant_mod._emit_artifact(dict(_FACTS_STATE, items=[dict(_RICH_ITEM)]))
+
+
+def test_assemble_survives_raising_writer(monkeypatch):
+    """Real _emit_artifact + a writer that always raises: assemble still completes."""
+
+    def boom(_msg):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(variant_mod, "get_stream_writer", lambda: boom)
+    state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM)])
+    out = asyncio.run(variant_mod.assemble(state, {}))
+    assert "举一反三" in out["messages"][0].content
+
+
+# ---------------------------------------------------------------------------
+# persisted 簿记（PRD-C-011 G5 修复）：persist_to_bank 把回执写回 state.items，
+# 已收录的题在后续编辑轮快照不回退、二次入库被跳过、母题 id 回写 mother_dna。
+# ---------------------------------------------------------------------------
+
+
+def test_persist_writes_back_persisted_and_mother_id_to_state(monkeypatch):
+    _capture_frames(monkeypatch)
+
+    async def fake_persist(items, facts, token=None):
+        return [
+            {"role": "mother", "ok": True, "id": 100},
+            {"ok": True, "id": 101},
+            {"ok": False, "error": "boom"},
+        ]
+
+    monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
+    state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM), dict(_RICH_ITEM)])
+    out = asyncio.run(persist_to_bank(state, {}))
+    # 簿记进 state：per-item persisted 按回执
+    assert [it["persisted"] for it in out["items"]] == [True, False]
+    # 母题雪花 id 回写 mother_dna（重试不再重复建母题）
+    assert out["mother_dna"]["mother_question_id"] == 100
+    # 原 DNA 字段保留
+    assert out["mother_dna"]["stem"] == "母题题干"
+
+
+def test_persist_skips_already_persisted_items(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+    seen: list[list] = []
+
+    async def fake_persist(items, facts, token=None):
+        seen.append(list(items))
+        return [{"ok": True, "id": 200}]
+
+    monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
+    items = [
+        dict(_RICH_ITEM, stem="已收录的题", persisted=True),
+        dict(_RICH_ITEM, stem="还没入库的题"),
+    ]
+    state = dict(
+        _FACTS_STATE,
+        items=items,
+        mother_dna=dict(_FACTS_STATE["mother_dna"], mother_question_id=100),
+    )
+    out = asyncio.run(persist_to_bank(state, {}))
+    # 只把未收录的那道送去入库（绝不重复落行）
+    assert len(seen) == 1 and len(seen[0]) == 1
+    assert seen[0][0]["stem"] == "还没入库的题"
+    # 回写后两道都 persisted=True；快照帧同步
+    assert [it["persisted"] for it in out["items"]] == [True, True]
+    art = _artifact_frames(captured)[-1]
+    assert [it["persisted"] for it in art["items"]] == [True, True]
+    assert "跳过" in out["messages"][0].content
+
+
+def test_persist_all_already_persisted_is_noop(monkeypatch):
+    captured = _capture_frames(monkeypatch)
+    called = []
+
+    async def fake_persist(items, facts, token=None):
+        called.append(items)
+        return []
+
+    monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
+    state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM, persisted=True)])
+    out = asyncio.run(persist_to_bank(state, {}))
+    assert called == []  # 一道都不重发
+    assert "不会重复落库" in out["messages"][0].content
+    assert "items" not in out  # 状态不动
+    assert _artifact_frames(captured) == []
+
+
+def test_assemble_snapshot_keeps_persisted_from_state(monkeypatch):
+    """入库后编辑轮：assemble 重发快照读 item.persisted 簿记，徽章不回退。"""
+    captured = _capture_frames(monkeypatch)
+    state = dict(
+        _FACTS_STATE,
+        items=[dict(_RICH_ITEM, persisted=True), dict(_RICH_ITEM)],
+    )
+    asyncio.run(variant_mod.assemble(state, {}))
+    art = _artifact_frames(captured)[0]
+    assert [it["persisted"] for it in art["items"]] == [True, False]
+
+
+def test_patch_hard_anchor_emits_empty_artifact_snapshot(monkeypatch):
+    """patch 清 items 走 clarify/裸奔兜底不经 assemble → 必须先发空快照对齐右栏。"""
+    captured = _capture_frames(monkeypatch)
+    state = dict(
+        _FACTS_STATE,
+        items=[dict(_RICH_ITEM)],
+        pending={"mother_correction": {"grade": "八年级"}},
+    )
+    out = asyncio.run(variant_mod.patch(state, {}))
+    assert out["items"] == []
+    arts = _artifact_frames(captured)
+    assert len(arts) == 1
+    assert arts[0]["items"] == []
+
+
+def test_patch_no_field_does_not_emit_artifact(monkeypatch):
+    """没拿到可 patch 字段（退化回问，items 仍在）→ 不发快照、不动右栏。"""
+    captured = _capture_frames(monkeypatch)
+    state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM)], pending={"mother_correction": {}})
+    out = asyncio.run(variant_mod.patch(state, {}))
+    assert "items" not in out
+    assert _artifact_frames(captured) == []

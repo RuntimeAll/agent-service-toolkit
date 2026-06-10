@@ -45,7 +45,23 @@ _TRANSFORMATIONS = standard_transformations + (
 
 # Charset whitelist for a single (no '=') math expression. Anything outside
 # (Chinese prose, punctuation, '?', ':', ...) is treated as non-math -> degrade.
-_EXPR_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_+\-*/^(). \t]+$")
+# 逗号放行 = 支持多参函数 Min(3,-4) / Max / Abs（2026-06-10 真机踩坑：比大小类载荷
+# 全被逗号挡成 degrade）；配套下面的函数名白名单，不会放进任意 sympy 调用。
+_EXPR_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_+\-*/^(),. \t]+$")
+
+# 函数/名字白名单：多字母标识符只认这些（单字母一律视作变量）。挡两类东西：
+# ① extractor 偶发吐的 Python 语法（if/else 三元、列表推导、len/range）→ degrade；
+# ② sympy 命名空间里的重型函数（factorial/integrate…）→ degrade（防 CPU 炸弹，
+#    复杂度护栏管不到"小字面量大计算"的调用类载荷）。
+_ALLOWED_FUNCS = {
+    "sqrt": sp.sqrt,
+    "abs": sp.Abs, "Abs": sp.Abs,
+    "min": sp.Min, "Min": sp.Min,
+    "max": sp.Max, "Max": sp.Max,
+}
+_ALLOWED_NAMES = set(_ALLOWED_FUNCS) | {"pi"}
+_PY_TOKEN_RE = re.compile(r"\b(if|else|elif|for|in|lambda|len|range|and|or|not|while|def|import|True|False|None)\b")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 _DEFAULT_TOL = 1e-6
 
@@ -115,16 +131,25 @@ def _parse(value: Any) -> sp.Expr:
         raise _DegradeError(f"expression too long ({len(text)} > {_MAX_EXPR_LEN} chars)")
     if not _EXPR_ALLOWED_RE.fullmatch(text):
         raise _DegradeError(f"expression contains non-math characters: {text!r}")
+    if _PY_TOKEN_RE.search(text):
+        raise _DegradeError(f"python syntax is not a math expression: {text!r}")
+    for ident in _IDENT_RE.findall(text):
+        if len(ident) > 1 and ident not in _ALLOWED_NAMES:
+            raise _DegradeError(f"function/name not in whitelist: {ident!r}")
     # Two-phase parse (anti-hang): evaluate=False keeps integer powers unevaluated
     # so the complexity guard can reject 9**9**9-style payloads BEFORE sympy is
     # asked to actually compute them with evaluate=True.
     try:
-        unevaluated = parse_expr(text, transformations=_TRANSFORMATIONS, evaluate=False)
+        unevaluated = parse_expr(
+            text, transformations=_TRANSFORMATIONS, evaluate=False, local_dict=_ALLOWED_FUNCS
+        )
     except Exception as exc:
         raise _DegradeError(f"sympy cannot parse {text!r}: {exc}") from exc
     _complexity_guard(unevaluated)
     try:
-        return parse_expr(text, transformations=_TRANSFORMATIONS, evaluate=True)
+        return parse_expr(
+            text, transformations=_TRANSFORMATIONS, evaluate=True, local_dict=_ALLOWED_FUNCS
+        )
     except Exception as exc:
         raise _DegradeError(f"sympy cannot parse {text!r}: {exc}") from exc
 

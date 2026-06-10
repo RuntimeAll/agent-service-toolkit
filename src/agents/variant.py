@@ -378,6 +378,70 @@ def _emit_stage(key: str, title: str, status: str, detail: str | None = None) ->
 
 
 # ---------------------------------------------------------------------------
+# artifact 快照帧（PRD-C-011 Bucket 3）：FE 题卡数据源 = 本帧，不 parse markdown。
+# 契约（BE/FE 严格一致）：ChatMessage(role="custom", content=[{"artifact": {
+#   "items": [{index/stem/answer/solution/qtype/difficulty/level/verify/gene/persisted}],
+#   "header": {recipe/kp/grade}}}])
+# 发射点：assemble 收尾（每轮题组变化必过）+ persist_to_bank 成功后（persisted=true 更新）。
+# 🔴 独立函数、不复用 _emit_stage（test_variant_stage 对 _emit_stage 调用序列精确断言）；
+#    同 _emit_stage 双层静默吞：无 runtime context / writer 抛 → 绝不影响主流程。
+# ---------------------------------------------------------------------------
+def _artifact_payload(
+    state: VariantState, persisted_flags: list[bool] | None = None
+) -> dict[str, Any]:
+    """纯组帧（零 IO 可单测）：state.items/check/gene/knobs/analysis → artifact 契约 dict。"""
+    items = state.get("items") or []
+    facts = _mother_facts(state)
+    out_items: list[dict[str, Any]] = []
+    for i, it in enumerate(items):
+        chk = it.get("check") or {}
+        out_items.append(
+            {
+                "index": i + 1,
+                "stem": str(it.get("stem") or ""),
+                "answer": str(it.get("answer") or ""),
+                "solution": str(it.get("solution") or ""),
+                "qtype": str(it.get("qtype") or ""),
+                "difficulty": _to_int(it.get("difficulty")) or 0,
+                "level": str(it.get("level") or "normal"),
+                # 🔴 verify 与 review 互斥不同键：证明类只有 review（proof_needs_human）
+                "verify": chk.get("verify") or chk.get("review") or None,
+                "gene": (it.get("gene") or {}).get("gate") or None,
+                # persisted：flags 优先（persist 节点按回执现算）；否则读 item 簿记
+                # （persist_to_bank 成功后回写 state.items[i].persisted → 后续编辑轮
+                #  assemble 重发快照时「已收录」徽章不回退，G5 二次入库不重复落行）
+                "persisted": (
+                    bool(persisted_flags[i])
+                    if persisted_flags is not None and i < len(persisted_flags)
+                    else bool(it.get("persisted"))
+                ),
+            }
+        )
+    return {
+        "items": out_items,
+        "header": {
+            "recipe": knobs_desc(state.get("knobs")) or None,
+            "kp": facts["kp_name"] if facts["kp_name"] != "未知考点" else None,
+            "grade": facts["grade"] if facts["grade"] != "未知年级" else None,
+        },
+    }
+
+
+def _emit_artifact(
+    state: VariantState, persisted_flags: list[bool] | None = None
+) -> None:
+    """发 artifact 快照帧（FE 题卡数据源）。任何异常静默吞，artifact 是增强不是关卡。"""
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001 — 无 runtime context（单测直调节点）→ 静默 no-op
+        return
+    try:
+        writer(ChatMessage(content=[{"artifact": _artifact_payload(state, persisted_flags)}], role="custom"))
+    except Exception:  # noqa: BLE001 — 发送失败绝不炸节点
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Router（入口分诊：有图? 在途母题? 库内母题跳 analyze/classify）
 # ---------------------------------------------------------------------------
 def route_entry(state: VariantState) -> Literal["analyze", "parse", "generate", "ask"]:
@@ -1072,7 +1136,12 @@ EXTRACT_PROMPT = """你是数学验算载荷抽取器。把下面这道题的「
 题面标准答案(待验算的 claimed): {answer}
 参考·另一次独立解答(仅帮助你理解答案格式，不是验算对象): {solved_answer}
 
-载荷契约（kind 四选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）：
+载荷契约（kind 四选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）。
+🔴 表达式硬边界（违反 = 程序直接拒收变 degrade，浪费一次验算机会）：
+- 只允许这些函数：sqrt / Abs / Min / Max（比大小、最值题用 Min(...)/Max(...)，绝对值用 Abs()）。
+- **禁止任何 Python 语法**：不许 if/else 三元、列表推导、len()/range()、布尔 True/False、比较式（< > ==）。
+- 选项/claimed 必须是**可算出的数值或表达式**（如 "-sqrt(25)"、"7/2"），不是真假陈述；某选项本身不是数值（如文字判断、区间）→ 整题输出 kind:none。
+- 计数类问题（"有几个是…"）若每项判定都是数值比较可写成 Min/Max/Abs 组合才抽，否则 kind:none——不要发明 Piecewise/Eq/逻辑与。
 1. 方程求解: {{"kind":"equation_solve","equations":["x**2-5*x+6=0"],"unknowns":["x"],"claimed":["2","3"]}}
    （claimed = 标准答案申报的全部解；只支持单未知数。🔴 程序按"解集完全相等"判：若题目含舍根/取值范围
    约束——如分式方程验增根后舍去、几何/应用题边长必须为正——标答只保留部分解时，**不要用本 kind**
@@ -1659,6 +1728,8 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
         + "\n\n旋钮可拨：数量 / 数字 / 场景 / 难度 / 题型(可配比) / 解法。说「这组可以了」即入库。\n\n---\n"
     )
     body = "\n".join(_fmt_item(i + 1, it) for i, it in enumerate(items))
+    # artifact 快照帧（PRD-C-011）：每轮题组变化都过 assemble → FE 题卡每轮拿最新快照
+    _emit_artifact(state)
     return {"messages": [AIMessage(content=head + body)]}
 
 
@@ -2106,6 +2177,10 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
         }
 
     # 🔴 改了硬锚 → 清 items + mother_confirmed，触发重锚(classify)+重造(generate)
+    # artifact 同步快照（PRD-C-011）：items 已清，但后续若走 clarify（重锚置信不足）或
+    # generate 裸奔兜底（无 items）会绕开 assemble 不再发帧 → 先发空快照让 FE 右栏回
+    # 空态，避免老师对着 agent 端已不存在的旧题组卡片点「第N题重出」（UI/状态错位）。
+    _emit_artifact({**state, "items": [], "analysis": analysis})
     return {
         "analysis": analysis,
         "items": [],
@@ -2147,12 +2222,24 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     if not items:
         return {"messages": [AIMessage(content="当前没有可入库的变式题。先贴图举一反三吧。")]}
 
+    # 🔴 入库簿记（PRD-C-011 G5）：persisted=true 的题跳过——入库后继续编辑再说「入库」、
+    # 或部分失败后重试「全部入库」时，只补未收录项，绝不把已落库的题重复 POST 落行。
+    pending_idx = [i for i, it in enumerate(items) if not it.get("persisted")]
+    if not pending_idx:
+        return {
+            "messages": [
+                AIMessage(content="这组变式之前都已入库过了，没有需要补录的题（不会重复落库）。可以继续编辑或换一批。")
+            ]
+        }
+    pending_items = [items[i] for i in pending_idx]
+    n_skipped = len(items) - len(pending_items)
+
     # 🔴 身份透传：book-ui 经 agent_config 透传登录老师 access_token（config.configurable.ruoyi_token）
     # → 入库 owner = 该老师本人（后端 LoginHelper 取 token 身份），而非 .env 服务账号。
     token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
-    _emit_stage("persist", "入库", "running", f"{len(items)} 道")
+    _emit_stage("persist", "入库", "running", f"{len(pending_items)} 道")
     try:
-        receipts = await persist_items(items, facts, token=token)
+        receipts = await persist_items(pending_items, facts, token=token)
     except Exception as e:  # noqa: BLE001 — 登录/网络整体失败 → 友好兜底，不崩
         _emit_stage("persist", "入库", "warn", "连不上题库服务")
         return {
@@ -2171,8 +2258,24 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
         "done" if not fail else "warn",
         f"成功 {len(ok)} 道" + (f"，失败 {len(fail)} 道" if fail else ""),
     )
+    # 🔴 簿记回写 state（不是只发快照帧）：persisted 标进 items、母题雪花 id 进 mother_dna。
+    # 不回写的话，下一编辑轮 assemble 重发快照 persisted 全 false → 「已收录」徽章整组回退、
+    # 「全部入库」重新可点 → 二次入库整组重复落行（G5 破）；图母题也会再落一份（双份血缘）。
+    new_items = [dict(it) for it in items]
+    for j, r in zip(pending_idx, var_receipts):
+        new_items[j]["persisted"] = bool(r.get("ok"))
+    update: VariantState = {"items": new_items}
+    if mother and mother.get("ok") and mother.get("id") is not None:
+        # persist_items 的 mother_question_id 回填发生在局部 facts 副本上 → 这里落回 state，
+        # 重试/后续入库走「母题已在库」分支，不再重复建母题
+        update["mother_dna"] = dict(state.get("mother_dna") or {}, mother_question_id=mother.get("id"))
 
-    lines = [f"## 入库完成 · 变式 {len(items)} 道，成功 {len(ok)} 道"]
+    # artifact 更新快照（PRD-C-011）：按回写后的 items 组帧（_artifact_payload 读 item.persisted）
+    _emit_artifact({**state, "items": new_items})
+
+    lines = [f"## 入库完成 · 变式 {len(pending_items)} 道，成功 {len(ok)} 道"]
+    if n_skipped:
+        lines.append(f"（另有 {n_skipped} 道此前已收录，本次跳过、未重复入库。）")
     # 母题(原题)入库回执：图母题不在库 → 先落原题挂血缘
     if mother and mother.get("ok"):
         lines.append(f"📌 原题(母题)已一并入库，ID：{mother.get('id')}，变式都挂在它名下（血缘可追）。")
@@ -2185,8 +2288,10 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
         lines.append(f"\n⚠ {len(fail)} 道变式入库失败：")
         for i, r in enumerate(fail, 1):
             lines.append(f"  {i}. {r.get('error')}")
+        lines.append("失败的题再说一次「入库」即可只补这几道（已成功的不会重复落库）。")
     lines.append("\n可回平台「我的题库」找题、组卷、导出 PDF。")
-    return {"messages": [AIMessage(content="\n".join(lines))]}
+    update["messages"] = [AIMessage(content="\n".join(lines))]
+    return update
 
 
 # --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------

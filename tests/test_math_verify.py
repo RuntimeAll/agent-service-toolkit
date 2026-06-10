@@ -383,3 +383,63 @@ def test_equiv_form_caret_power():
     # '^' accepted as power via convert_xor
     res = _v({"kind": "expr_equiv", "expr_a": "x^2+2x+1", "expr_b": "(x+1)**2"})
     assert res["verdict"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-10 widened parser: Min/Max/Abs/sqrt + comma allowed; python syntax
+# and non-whitelisted functions -> degrade (real-machine gap: comparison /
+# smallest-number payloads were all degraded by the comma-less charset)
+# ---------------------------------------------------------------------------
+
+def test_numeric_min_with_abs_sqrt_pass():
+    # the exact real-machine case: smallest of -sqrt(25), -(-4), -|3|, -7/2
+    res = _v({
+        "kind": "numeric",
+        "expr": "Min(-sqrt(25), -(-4), -Abs(3), -7/2)",
+        "claimed": "-5",
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_numeric_min_wrong_claimed_fail():
+    res = _v({
+        "kind": "numeric",
+        "expr": "Min(-sqrt(25), -(-4), -Abs(3), -7/2)",
+        "claimed": "-4",
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_numeric_lowercase_min_abs_aliases_pass():
+    res = _v({"kind": "numeric", "expr": "min(3, -4, abs(-2))", "claimed": "-4"})
+    assert res["verdict"] == "pass"
+
+
+def test_choice_min_ground_pass():
+    res = _v({
+        "kind": "choice",
+        "ground": {"kind": "numeric", "expr": "Min(-Abs(-2), -sqrt(9), -2.5, 0)", "claimed": "-3"},
+        "options": {"A": "-Abs(-2)", "B": "-sqrt(9)", "C": "-2.5", "D": "0"},
+        "claimed_correct": "B",
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_python_comprehension_degrades():
+    res = _v({
+        "kind": "numeric",
+        "expr": "len([n for n in range(-100,101)])",
+        "claimed": "201",
+    })
+    assert res["verdict"] == "degrade"
+
+
+def test_python_ternary_degrades():
+    res = _v({"kind": "numeric", "expr": "(1 if x else 0)", "claimed": "1"})
+    assert res["verdict"] == "degrade"
+
+
+def test_non_whitelisted_function_degrades():
+    # factorial parses in raw sympy but is outside our function whitelist
+    res = _v({"kind": "numeric", "expr": "factorial(20)", "claimed": "1"})
+    assert res["verdict"] == "degrade"
