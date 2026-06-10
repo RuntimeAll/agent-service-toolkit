@@ -143,6 +143,23 @@ class Settings(BaseSettings):
     MONGO_PASSWORD: SecretStr | None = None
     MONGO_AUTH_SOURCE: str | None = None
 
+    # === PRD-C-009 举一反三 agent 专用配置 ===
+    # 只读图谱 SQL：dev 库 miskt_data2 @ :3307（口令从 .env 读，别明文散落）
+    VARIANT_DB_HOST: str = "127.0.0.1"
+    VARIANT_DB_PORT: int = 3307
+    VARIANT_DB_USER: str = "root"
+    VARIANT_DB_PASSWORD: SecretStr | None = None
+    VARIANT_DB_NAME: str = "miskt_data2"
+    # RuoYi 底座（C 线 book-server :8090）入库用，双头鉴权
+    RUOYI_BASE_URL: str = "http://localhost:8090"
+    RUOYI_USERNAME: str = "teacher001"
+    RUOYI_PASSWORD: SecretStr | None = None
+    RUOYI_CLIENT_ID: str = "e5cd7e4891bf95d1d19206ce24a7b32e"
+    RUOYI_TENANT_ID: str = "000000"
+    RUOYI_TOKEN: str | None = None
+    # 思考型模型读图建议 max_tokens（≥4096）
+    VARIANT_MAX_TOKENS: int = 4096
+
     # Azure OpenAI Settings
     AZURE_OPENAI_API_KEY: SecretStr | None = None
     AZURE_OPENAI_ENDPOINT: str | None = None
