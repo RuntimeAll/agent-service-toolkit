@@ -36,20 +36,31 @@ CREATE TABLE IF NOT EXISTS conv_llm_trace (
   thread_id         VARCHAR(64) NULL     COMMENT '会话 id',
   source            VARCHAR(32) NULL     COMMENT 'variant/chat/...哪个服务/agent',
   label             VARCHAR(32) NULL     COMMENT 'analyze/generate/solve/...哪个 prompt',
-  model             VARCHAR(64) NULL,
+  model             VARCHAR(64) NULL     COMMENT '实际模型名(如 gemini-3-flash-preview)',
+  relay             VARCHAR(64) NULL     COMMENT '实际成交中转站名(PRD-C-011)',
   request           MEDIUMTEXT NULL      COMMENT '填充后完整 prompt(JSON messages, 多模态含图URL)',
   response          MEDIUMTEXT NULL      COMMENT '模型返回 content',
   reasoning         MEDIUMTEXT NULL      COMMENT '思考型 reasoning_content(可空)',
   prompt_tokens     INT NULL,
   completion_tokens INT NULL,
+  cost_yuan         DECIMAL(12,6) NULL   COMMENT '实际消费¥=token×价表(PRD-C-011),无价表则NULL',
+  fallback_count    INT NOT NULL DEFAULT 0 COMMENT '中转站转移次数,0=主站一次成功(PRD-C-011)',
   duration_ms       INT NULL,
   retried           TINYINT(1) NOT NULL DEFAULT 0,
   error             VARCHAR(512) NULL,
   KEY idx_teacher_thread_ts (teacher_id, thread_id, ts),
   KEY idx_thread_ts (thread_id, ts),
   KEY idx_source_label (source, label)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='LLM对话往返记录·优化基础数据源(PRD-C-009)'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='LLM对话往返记录·优化基础数据源(PRD-C-009/011)'
 """
+
+# PRD-C-011 加列：老表（PRD-C-009 建的）补 relay/cost_yuan/fallback_count。
+# MySQL 不支持 ADD COLUMN IF NOT EXISTS，逐条 ALTER + 吞重复列错误（best-effort 幂等）。
+_MIGRATE = [
+    "ALTER TABLE conv_llm_trace ADD COLUMN relay VARCHAR(64) NULL AFTER model",
+    "ALTER TABLE conv_llm_trace ADD COLUMN cost_yuan DECIMAL(12,6) NULL AFTER completion_tokens",
+    "ALTER TABLE conv_llm_trace ADD COLUMN fallback_count INT NOT NULL DEFAULT 0 AFTER cost_yuan",
+]
 
 
 def _conn() -> pymysql.connections.Connection:
@@ -117,13 +128,23 @@ def write(
     duration_ms: int,
     retried: bool = False,
     error: str | None = None,
+    relay: str | None = None,
+    fallback_count: int = 0,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    cost_yuan: float | None = None,
 ) -> None:
-    """落一条 LLM 往返到 conv_trace.conv_llm_trace。best-effort，永不抛。"""
+    """落一条 LLM 往返到 conv_trace.conv_llm_trace。best-effort，永不抛。
+
+    PRD-C-011：relay/fallback_count/cost_yuan 由调用方（relay_pool 路径）传入；
+    prompt_tokens/completion_tokens 优先用传入值，缺省再从 response_raw 兜底解析。
+    """
     if not _ENABLED:
         return
     global _table_ready
     try:
-        pt, ct = _usage_tokens(response_raw)
+        if prompt_tokens is None and completion_tokens is None:
+            prompt_tokens, completion_tokens = _usage_tokens(response_raw)
         req_text = (
             request if isinstance(request, str) else json.dumps(request, ensure_ascii=False, default=str)
         )
@@ -132,12 +153,18 @@ def write(
             cur = conn.cursor()
             if not _table_ready:
                 cur.execute(_DDL)
+                for stmt in _MIGRATE:
+                    try:
+                        cur.execute(stmt)
+                    except Exception:
+                        pass  # 列已存在 → 忽略（幂等）
                 _table_ready = True
             cur.execute(
                 """INSERT INTO conv_llm_trace
-                   (ts, teacher_id, thread_id, source, label, model, request, response,
-                    reasoning, prompt_tokens, completion_tokens, duration_ms, retried, error)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   (ts, teacher_id, thread_id, source, label, model, relay, request, response,
+                    reasoning, prompt_tokens, completion_tokens, cost_yuan, fallback_count,
+                    duration_ms, retried, error)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                     teacher_id,
@@ -145,11 +172,14 @@ def write(
                     source,
                     label,
                     model,
+                    relay,
                     req_text,
                     response,
                     _reasoning(response_raw),
-                    pt,
-                    ct,
+                    prompt_tokens,
+                    completion_tokens,
+                    cost_yuan,
+                    int(fallback_count or 0),
                     duration_ms,
                     1 if retried else 0,
                     (error or None) and str(error)[:512],

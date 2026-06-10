@@ -160,6 +160,17 @@ class Settings(BaseSettings):
     # 思考型模型读图建议 max_tokens（≥4096）
     VARIANT_MAX_TOKENS: int = 4096
 
+    # === PRD-C-011 Block B：LLM 出口多中转站主备 + 熔断转移 ===
+    # RELAY_POOL = JSON 数组（主→备有序）：[{"name","base_url","api_key","model"}]
+    # 留空 → 从 COMPATIBLE_* 派生单中转站（名字取 RELAY_NAME）。
+    RELAY_POOL: str | None = None
+    RELAY_NAME: str = "lk888"  # 单中转站时的展示名（也是 conv_trace.relay 列默认值）
+    RELAY_FAIL_THRESHOLD: int = 3  # 连续失败 N 次 → 熔断器 trip
+    RELAY_COOLDOWN_S: float = 30.0  # 熔断冷却秒数（之后 half-open 探活）
+    # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
+    # 用于算 conv_trace.cost_yuan（实际消费）。留空 → cost 记 NULL（不瞎猜价）。
+    RELAY_PRICES: str | None = None
+
     # Azure OpenAI Settings
     AZURE_OPENAI_API_KEY: SecretStr | None = None
     AZURE_OPENAI_ENDPOINT: str | None = None

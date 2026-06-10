@@ -232,7 +232,18 @@ REL_VARIANT = "AI-数值变式"  # 变式题默认 variant_relation
 
 # 🔴 PRD-C-009 轻量打标：举一反三入库即 AI 已标（label_status=1），打标人 = agent/模型标识。
 LABEL_STATUS_AI = 1
-LABELED_BY = "举一反三/gemini-3-flash-preview"
+
+
+def _labeled_by() -> str:
+    """打标人标识 = 举一反三/<当前配置模型>。动态读 settings（换模型不再标错来源；
+    多站 failover 下记的是配置默认站，逐次成交站已在 conv_trace/llm_trace 留痕）。"""
+    try:
+        from core import settings
+
+        model = settings.COMPATIBLE_MODEL or str(settings.DEFAULT_MODEL or "")
+    except Exception:
+        model = ""
+    return f"举一反三/{model or 'unknown'}"
 
 
 def _map_qtype(qtype: Any) -> int:
@@ -292,7 +303,7 @@ def _apply_labels(
 
     # 轻量打标
     bo["labelStatus"] = LABEL_STATUS_AI
-    bo["labeledBy"] = LABELED_BY
+    bo["labeledBy"] = _labeled_by()
     conf = _clamp_conf(facts.get("kp_confidence"))
     if conf is not None:
         bo["labelConfidence"] = conf

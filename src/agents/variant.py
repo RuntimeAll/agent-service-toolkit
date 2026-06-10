@@ -30,14 +30,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, ChatMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import ensure_config
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, MessagesState, StateGraph
 
 from agents import conv_trace, math_verify
 from agents.variant_support import anchor_subject, persist_items
-from core import get_model, settings
+from core import get_model, relay_pool, settings
 
 # DNA 三锚高置信门槛
 CONF_GATE = 0.75
@@ -97,6 +98,13 @@ class VariantState(MessagesState, total=False):
     history: list[dict[str, Any]]
     # 交互层：parse_instruction 的解析结果（intent/ops/knobs/...），路由后各分支消费并清空
     pending: dict[str, Any] | None
+    # 🔴 首轮配方旋钮（设计 §5 五旋钮的"首轮接线"）：None=还没抽过；{}=抽过但老师没提(走默认)。
+    # {"count": int, "difficulty_plan": "increasing"|str, "qtype_dist": {"选择":2,...}, "note": str}
+    # analyze（新母题轮）负责抽取/重置：新图新要求 → 重抽覆盖；同图重贴无新要求 → 保留；
+    # 新图无要求 → 重置 {}（旧母题配方绝不泄漏到新母题）。generate 仅对库内母题路径兜底抽。
+    knobs: dict[str, Any] | None
+    # generate 的代码级配方校验缺陷清单（整组 retry 1 次后仍不符 → assemble 头部外显 ⚠）
+    shape_defects: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +143,7 @@ _LLM_TRACE_SEQ = 0  # 进程内自增序号（同一进程内调用顺序）
 # prompt 内容前缀 → 标签（哪个 prompt）。新增/造同含「基于母题 DNA」，先判 add 再判 generate。
 _TRACE_MARKERS: list[tuple[str, str]] = [
     ("看这张题目图", "analyze"),
+    ("出题配方", "knobs"),
     ("数学验算载荷抽取器", "extract"),
     ("平行题基因比对器", "gene_judge"),
     ("独立解出的答案与题面标答不一致", "regen"),
@@ -196,6 +205,7 @@ def _trace_llm(
     duration_ms: int,
     error: str | None = None,
     retried: bool = False,
+    model: str | None = None,
 ) -> None:
     if not _LLM_TRACE_ENABLED:
         return
@@ -206,7 +216,8 @@ def _trace_llm(
             "seq": _LLM_TRACE_SEQ,
             "ts": datetime.now(timezone.utc).isoformat(),
             "label": label,
-            "model": settings.DEFAULT_MODEL,
+            # 🔴 与 conv_trace 同源：实际成交中转站的 model（不再写 DEFAULT_MODEL 枚举名）
+            "model": model or settings.COMPATIBLE_MODEL,
             "duration_ms": duration_ms,
             "retried": retried,
             "request": _serialize_request(messages),
@@ -227,31 +238,44 @@ async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
 
     🔴 每次调用落 JSONL 往返记录（_trace_llm）：发送的完整 prompt + 原始返回。
     """
-    model = _model().bind(max_tokens=settings.VARIANT_MAX_TOKENS)
     label = _trace_label(messages)
     # 用户级/会话级归属：从 graph config 取 thread_id + ruoyi_token(→teacher_id)
     conf = (ensure_config() or {}).get("configurable", {}) or {}
     thread_id = conf.get("thread_id")
     teacher_id = conv_trace.teacher_id_from_token(conf.get("ruoyi_token"))
+    max_tokens = settings.VARIANT_MAX_TOKENS
     t0 = time.monotonic()
+    relay = settings.RELAY_NAME
+    model_used = settings.COMPATIBLE_MODEL
+    fallback = 0
     try:
-        resp = await model.ainvoke(messages)
+        # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数
+        #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
+        resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
+            messages, max_tokens=max_tokens
+        )
         text = _content_text(resp).strip()
         retried = False
         if not text and retry:
             retried = True
-            resp = await model.ainvoke(messages)
+            resp, relay, model_used, fb2 = await relay_pool.ainvoke_failover(
+                messages, max_tokens=max_tokens
+            )
+            fallback += fb2
             text = _content_text(resp).strip()
     except Exception as e:  # noqa: BLE001 — 记下失败往返后照常抛
         dur = int((time.monotonic() - t0) * 1000)
-        _trace_llm(label, messages, "", None, dur, error=str(e))
+        _trace_llm(label, messages, "", None, dur, error=str(e), model=model_used)
         conv_trace.write(
             teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
-            model=settings.DEFAULT_MODEL, request=_serialize_request(messages),
+            model=model_used, relay=relay, fallback_count=fallback,
+            request=_serialize_request(messages),
             response="", response_raw=None, duration_ms=dur, error=str(e),
         )
         raise
     dur = int((time.monotonic() - t0) * 1000)
+    pt, ct = relay_pool.usage_tokens(resp)
+    cost = relay_pool.cost_yuan(model_used, pt, ct)
     # 原始返回：content（思考型可能是 parts list）+ reasoning/usage 等附加信息（best-effort）
     raw: dict[str, Any] = {}
     try:
@@ -260,14 +284,18 @@ async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
             raw["additional_kwargs"] = resp.additional_kwargs
         if getattr(resp, "response_metadata", None):
             raw["response_metadata"] = resp.response_metadata
+        if getattr(resp, "usage_metadata", None):
+            raw["usage_metadata"] = resp.usage_metadata  # 🔴 token 取数主源
     except Exception:
         raw = {"content": str(getattr(resp, "content", ""))}
-    _trace_llm(label, messages, text, raw, dur, retried=retried)
+    _trace_llm(label, messages, text, raw, dur, retried=retried, model=model_used)
     # 🔴 用户级对话持久化（优化基础数据源）→ 独立解耦库 conv_trace
     conv_trace.write(
         teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
-        model=settings.DEFAULT_MODEL, request=_serialize_request(messages),
+        model=model_used, relay=relay, fallback_count=fallback,
+        request=_serialize_request(messages),
         response=text, response_raw=raw, duration_ms=dur, retried=retried,
+        prompt_tokens=pt, completion_tokens=ct, cost_yuan=cost,
     )
     return text
 
@@ -311,6 +339,11 @@ def _extract_image_url(text: str) -> str | None:
     return m.group(0) if m else None
 
 
+def _strip_urls(text: str) -> str:
+    """去掉文本里所有 URL（首轮"图 URL + 人话要求"里把人话剥出来给 knobs 抽取）。"""
+    return _URL_RE.sub("", text or "").strip()
+
+
 def _conf_ok(analysis: dict[str, Any]) -> bool:
     """三锚（年级/考点/题型）任一低置信 → 闸不过。"""
     for k in ("grade", "kp", "qtype"):
@@ -318,6 +351,30 @@ def _conf_ok(analysis: dict[str, Any]) -> bool:
         if float(node.get("confidence", 0) or 0) < CONF_GATE:
             return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# 思维外放（stage 思路条事件）：langgraph custom 通道 → service stream_mode=custom
+# → SSE 帧 {"type":"message","content":{"type":"custom","custom_data":{"stage":{...}}}}
+# → FE（book-ui variant 页）按 key 更新/追加紫色思路条。
+# 🔴 stage 是增强不是关卡（G5）：runtime 外调用（单测直调节点无 runnable context →
+#    get_stream_writer 抛 RuntimeError）/ writer 发送失败，一律静默吞，绝不影响主流程。
+# 🔴 必须包成 role="custom" 的 ChatMessage 且 content 是单元素 list ——
+#    service utils.langchain_to_chat_message 只认这个形状，裸 dict 会变成 error 帧。
+# ---------------------------------------------------------------------------
+def _emit_stage(key: str, title: str, status: str, detail: str | None = None) -> None:
+    """发思路条 stage 事件（key/title/status/detail 契约与 FE 严格一致）。"""
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001 — 无 runtime context（单测直调节点）→ 静默 no-op
+        return
+    stage: dict[str, Any] = {"key": key, "title": title, "status": status}
+    if detail:
+        stage["detail"] = detail
+    try:
+        writer(ChatMessage(content=[{"stage": stage}], role="custom"))
+    except Exception:  # noqa: BLE001 — 发送失败绝不炸节点
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -363,14 +420,17 @@ ANALYZE_PROMPT = """你是浙教版初中数学命题专家。看这张题目图
 
 async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
     """① 分析：multimodal 读图 → 年级/学科/粗考点/题型 + 题干/答案/难度/结构 + 几图几题 + 各锚置信。"""
-    url = state.get("image_url") or _extract_image_url(
-        _latest_human_text(state.get("messages", []))
+    # 🔴 本轮消息里的 URL 优先（跨轮新图 = 新母题，必须分析新图）；无则沿用在途母题图。
+    #   旧序（state 优先）会让同 thread 第二张图被静默忽略、永远重分析第一张。
+    url = _extract_image_url(_latest_human_text(state.get("messages", []))) or state.get(
+        "image_url"
     )
     if not url:
         return {
             "messages": [AIMessage(content="请先贴一张题目图的 OSS URL，我才能开始举一反三。")]
         }
 
+    _emit_stage("analyze", "读图分析", "running")
     # 🔴 多模态走 LangChain HumanMessage(content=[text, image_url]) → model.ainvoke
     msg = HumanMessage(
         content=[
@@ -382,6 +442,7 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
     data = _parse_json(text) or {}
 
     if data.get("is_question_image") is False:
+        _emit_stage("analyze", "读图分析", "warn", "未识别为题目图")
         return {
             "image_url": url,
             "messages": [
@@ -402,12 +463,26 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
         "structure": data.get("structure"),
         "solution_skeleton": data.get("solution_skeleton"),
     }
+    _emit_stage("analyze", "读图分析", "done")
+    # 🔴 旋钮跨母题防泄漏 + clarify 迂回防丢：
+    #   - 本轮人话抽出新配方 → 覆盖旧配方（新母题新要求，跨轮第二张图的文字不再被丢）；
+    #   - 没抽出新配方：同图重贴（clarify 迂回/澄清应答）→ 保留首轮已抽配方；
+    #     新图 → 重置 {}（旧母题的「5道递增」绝不错套到新母题上）。
+    # shape_defects 一并清零（上一母题的缺陷外显不带进新母题轮）。
+    user_text = _strip_urls(_latest_human_text(state.get("messages", [])))
+    new_knobs = await _extract_knobs(state) if user_text else {}
+    if not new_knobs and url == state.get("image_url") and state.get("knobs") is not None:
+        knobs = state.get("knobs")  # 同图重贴且本轮无新配方 → 保留
+    else:
+        knobs = new_knobs
     return {
         "image_url": url,
         "images_count": int(data.get("images_count") or 1),
         "questions_in_image": int(data.get("questions_in_image") or 1),
         "analysis": analysis,
         "mother_dna": mother_dna,
+        "knobs": knobs,
+        "shape_defects": [],
         "messages": [],
     }
 
@@ -448,6 +523,16 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             analysis["grade"] = grade_node
 
     confirmed = _conf_ok(analysis)
+    kp_name = (analysis.get("kp") or {}).get("value") or "?"
+    grade_name = (analysis.get("grade") or {}).get("value") or (
+        analysis.get("grade") or {}
+    ).get("code") or "?"
+    _emit_stage(
+        "classify",
+        "锚定考点",
+        "done" if confirmed else "warn",
+        f"考点「{kp_name}」·年级「{grade_name}」",
+    )
     return {
         "analysis": analysis,
         "mother_confirmed": bool(confirmed),
@@ -526,27 +611,316 @@ def _mother_facts(state: VariantState) -> dict:
     }
 
 
-async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
-    """③ 造题：默认 3 = 2 普通 + 1 难。🔴 入口断言 mother_confirmed 或三锚高置信（防裸奔）。"""
-    if not (state.get("mother_confirmed") or _conf_ok(state.get("analysis") or {})):
-        # DNA 闸未过却走到 generate（多入口兜底）→ 拒造，回 clarify 语义
+# ---------------------------------------------------------------------------
+# 首轮配方旋钮（修 bug：首轮带图附带的文字要求被整条丢弃 → 旋钮成一等公民）
+# 链路：generate 入口（knobs 为 None 时）一次受约束 LLM 抽取（KNOBS_PROMPT）
+#   → 纯函数 normalize_knobs 钳制 → 存回 state（跨轮保留）
+#   → recipe_from_knobs 驱动 GENERATE_PROMPT 配方段
+#   → 代码级 shape_check（数量/题型分布/递增单调）不符整组 retry 1 次，仍不符 → 头部 ⚠ 外显
+#   → 闸A 对齐：gene_judge_knobs_spec 注入 judge prompt（递增难度不被基因闸误判回炉）。
+# 🔴 抽取失败/解析失败 → knobs={} 回落默认，绝不卡死出题（G5）。
+# ---------------------------------------------------------------------------
+KNOBS_PROMPT = """你是举一反三 agent 的出题配方抽取器（受约束抽取：只抽老师明说的，绝不脑补）。老师贴题目图时附带了下面这句话，请从中抽出出题配方旋钮。
+
+老师的话：
+{utterance}
+
+只输出一个 JSON（不要解释、不要 markdown fence）：
+{{
+  "count": null,            // 要出几道题（正整数，1~8）；没说填 null
+  "difficulty_plan": null,  // 难度安排："increasing"=难度递增/越来越难/一道比一道难；没提难度安排填 null；其它难度要求把老师原话填进来（如"都出难题"）
+  "qtype_dist": null,       // 题型配比，如 {{"选择":2,"填空":2,"解答":1}}；题型只能用 选择/填空/解答 三类（应用题/计算题/证明题等都归"解答"）；没说填 null
+  "note": ""                // 其余装不进上面旋钮的自由要求原话（如"贴近生活场景"、"数字简单点"）；没有填 ""
+}}
+
+硬约束：
+- 只抽老师明确说了的；没说的旋钮一律 null/""，绝不脑补默认值。
+- qtype_dist 的值必须是正整数；如与 count 看似矛盾也如实抽取，程序会做最终校验。"""
+
+# 题型归一表（normalize_knobs 用）：只认 选择/填空/解答 三类
+_QTYPE_ALIAS: dict[str, str] = {
+    "选择": "选择",
+    "选择题": "选择",
+    "单选": "选择",
+    "单选题": "选择",
+    "填空": "填空",
+    "填空题": "填空",
+    "解答": "解答",
+    "解答题": "解答",
+    "计算": "解答",
+    "计算题": "解答",
+    "应用": "解答",
+    "应用题": "解答",
+    "证明": "解答",
+    "证明题": "解答",
+    "大题": "解答",
+}
+# 归一后要在 note 里保留语义的原始题型词（应用题 → 解答 + note "应用场景"）
+_QTYPE_NOTE_HINTS: dict[str, str] = {"应用": "应用场景", "应用题": "应用场景"}
+KNOBS_COUNT_MIN, KNOBS_COUNT_MAX = 1, 8
+PLAN_INCREASING = "increasing"
+_PLAN_INCREASING_WORDS = ("increasing", "递增", "越来越难", "逐题变难", "一道比一道难")
+DIFFICULTY_CAP = 5  # 难度封顶（递增计划逐题 +1 的上限）
+
+
+def normalize_knobs(parsed: Any) -> dict[str, Any]:
+    """🔴 纯函数钳制（零 LLM/零 IO，可单测）：LLM 抽取产物 → 受约束 knobs dict。
+
+    规则：
+    - 非 dict/解析失败 → {}（回落默认配方）。
+    - count：宽容转 int，钳到 [1, 8]；非法 → 丢弃。
+    - qtype_dist：键过 _QTYPE_ALIAS 归一（应用题/计算题/证明题→解答，且"应用"在 note 保留
+      「应用场景」语义）；不认识的题型键丢弃；值须为正整数；同义键合并求和。
+    - dist 总和同样钳到 KNOBS_COUNT_MAX（按点名顺序累计到上限封口，截断写进 note 外显）——
+      防失控护栏对 dist 路径同等生效，不被「逐项点名」绕过。
+    - dist 总和与 count 不一致 → 以 dist 总和为准，且把「数量从 X 调整为 Y」写进 note 外显
+      （assemble 头部可见，不静默吞老师的数）。
+    - difficulty_plan：命中递增词 → "increasing"；"default"/空 → 丢弃；其余原话保留。
+    - note：strip 后非空才保留。
+    - 全空 → {}。
+    """
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, Any] = {}
+
+    cnt = _to_int(parsed.get("count"))
+    if cnt is not None:
+        out["count"] = max(KNOBS_COUNT_MIN, min(cnt, KNOBS_COUNT_MAX))
+
+    note_bits: list[str] = []
+    raw_dist = parsed.get("qtype_dist")
+    if isinstance(raw_dist, dict):
+        dist: dict[str, int] = {}
+        for k, v in raw_dist.items():
+            qt = _QTYPE_ALIAS.get(str(k or "").strip())
+            n = _to_int(v)
+            if not qt or n is None or n <= 0:
+                continue
+            dist[qt] = dist.get(qt, 0) + n
+            hint = _QTYPE_NOTE_HINTS.get(str(k or "").strip())
+            if hint and hint not in note_bits:
+                note_bits.append(hint)
+        if dist:
+            total = sum(dist.values())
+            if total > KNOBS_COUNT_MAX:
+                # 🔴 防失控护栏（与 count 钳制/ADD_COUNT_MAX 同哲学）：按点名顺序累计到上限封口
+                clipped: dict[str, int] = {}
+                budget = KNOBS_COUNT_MAX
+                for qt, n in dist.items():
+                    if budget <= 0:
+                        break
+                    take = min(n, budget)
+                    clipped[qt] = take
+                    budget -= take
+                note_bits.append(
+                    f"题型配比共 {total} 道超单轮上限，已截到 {KNOBS_COUNT_MAX} 道"
+                )
+                dist = clipped
+                total = KNOBS_COUNT_MAX
+            out["qtype_dist"] = dist
+            if out.get("count") != total:
+                if out.get("count") is not None:
+                    # count 与配比总和冲突 → dist 为准，但调整必须外显（不静默吞老师的数）
+                    note_bits.append(f"按题型配比把数量从 {out['count']} 调整为 {total}")
+                out["count"] = total  # dist 总和为准（含 count 缺失时补齐）
+
+    plan = str(parsed.get("difficulty_plan") or "").strip()
+    if plan and plan.lower() != "default":
+        if any(w in plan.lower() for w in _PLAN_INCREASING_WORDS):
+            out["difficulty_plan"] = PLAN_INCREASING
+        else:
+            out["difficulty_plan"] = plan  # 自由难度要求原话保留（generate/闸A 原样注入）
+
+    note = str(parsed.get("note") or "").strip()
+    if note:
+        note_bits.append(note)
+    if note_bits:
+        out["note"] = "；".join(note_bits)
+
+    return out
+
+
+def recipe_from_knobs(knobs: dict[str, Any] | None, mother_difficulty: Any = None) -> dict[str, Any]:
+    """🔴 纯函数：knobs → generate 配方（n/n_normal/n_hard + 老师配方段 spec + 递增预期档位）。
+
+    knobs 空 → 与旧默认完全等价：n=3、2 普 1 难、spec=""（行为不变的回归锚点）。
+    递增计划：从母题难度起逐题 +1、封顶 DIFFICULTY_CAP。expected_difficulties 只用于
+    prompt 文案 + n_hard 推算；闸A/代码闸的同尺判据 = generate 落在 item 级的
+    expected_difficulty 印记 + shape_check(mother_difficulty) 现算（二者公式一致）。
+    """
+    knobs = knobs or {}
+    if not knobs:
+        n_normal, n_hard = DEFAULT_SHAPE["normal"], DEFAULT_SHAPE["hard"]
         return {
-            "messages": [
-                AIMessage(content="母题 DNA 还没确认，我先不造题。请确认年级/考点/题型。")
-            ]
+            "n": n_normal + n_hard,
+            "n_normal": n_normal,
+            "n_hard": n_hard,
+            "spec": "",
+            "expected_difficulties": None,
         }
 
-    facts = _mother_facts(state)
-    n_normal, n_hard = DEFAULT_SHAPE["normal"], DEFAULT_SHAPE["hard"]
-    n = n_normal + n_hard
-    prompt = GENERATE_PROMPT.format(
-        n=n, n_normal=n_normal, n_hard=n_hard, **facts
+    dist = knobs.get("qtype_dist") or {}
+    n = knobs.get("count") or (sum(dist.values()) if dist else 0) or (
+        DEFAULT_SHAPE["normal"] + DEFAULT_SHAPE["hard"]
     )
-    text = await _ainvoke_text([HumanMessage(content=prompt)])
+    md = _to_int(mother_difficulty) or 3
+    plan = knobs.get("difficulty_plan")
+    expected: list[int] | None = None
+
+    lines = [f"- 共 {n} 道（必须恰好 {n} 道，不多不少）。"]
+    if dist:
+        dist_s = "、".join(f"{k}×{v}" for k, v in dist.items())
+        lines.append(f"- 题型配比：{dist_s}（每道题的 qtype 严格按此配比给）。")
+    if plan == PLAN_INCREASING:
+        expected = [min(md + i, DIFFICULTY_CAP) for i in range(n)]
+        d_s = ",".join(str(d) for d in expected)
+        lines.append(
+            f"- 难度计划：递增 —— 从母题难度({md})起逐题升一档、封顶 {DIFFICULTY_CAP}；"
+            f"各题 difficulty 依次为 {d_s}；难度高于母题的填 level=\"hard\"，否则 \"normal\"。"
+        )
+    elif plan:
+        lines.append(f"- 难度要求（老师原话，best-effort 满足）：{plan}")
+    if knobs.get("note"):
+        lines.append(f"- 其他要求（best-effort 吸收，撞主考点/年级硬守恒的忽略）：{knobs['note']}")
+
+    spec = "\n\n老师指定配方（🔴 优先于上面的默认配方，必须严格满足）：\n" + "\n".join(lines)
+    if expected:
+        n_hard = sum(1 for d in expected if d > md)
+    else:
+        n_hard = 1 if n >= 2 else 0
+    return {
+        "n": n,
+        "n_normal": n - n_hard,
+        "n_hard": n_hard,
+        "spec": spec,
+        "expected_difficulties": expected,
+    }
+
+
+def shape_check(
+    items: list[dict[str, Any]],
+    knobs: dict[str, Any] | None,
+    mother_difficulty: Any = None,
+) -> list[str]:
+    """🔴 纯函数·代码级配方校验：返回缺陷清单（空 = 合格）。knobs 空 → 永远 []（旧行为）。
+
+    规则表：
+    - S1 数量：knobs 给了 count（或 dist 推得）→ len(items) 必须相等。
+    - S2 题型分布：knobs 给了 qtype_dist → 各题 qtype（过 _QTYPE_ALIAS 归一）计数须逐项相等。
+    - S3 递增：difficulty_plan=increasing 时与闸A 同一把尺 —— 给了 mother_difficulty →
+      逐项比对预期档 min(md+i, DIFFICULTY_CAP)（让整组 retry 有机会一次修对，而不是代码闸
+      放行后闸A 必 warn 且回炉结构性修不动）；母题难度未知 → 退化为单调不减（缺难度按违规算）。
+    """
+    knobs = knobs or {}
+    if not knobs:
+        return []
+    defects: list[str] = []
+
+    want_n = knobs.get("count")
+    if want_n and len(items) != want_n:
+        defects.append(f"数量不符：要求 {want_n} 道，实出 {len(items)} 道")
+
+    dist = knobs.get("qtype_dist") or {}
+    if dist:
+        got: dict[str, int] = {}
+        for it in items:
+            qt = _QTYPE_ALIAS.get(str(it.get("qtype") or "").strip(), str(it.get("qtype") or "").strip())
+            got[qt] = got.get(qt, 0) + 1
+        if any(got.get(k, 0) != v for k, v in dist.items()):
+            want_s = "、".join(f"{k}×{v}" for k, v in dist.items())
+            got_s = "、".join(f"{k}×{v}" for k, v in got.items()) or "(空)"
+            defects.append(f"题型分布不符：要求 {want_s}，实出 {got_s}")
+
+    if knobs.get("difficulty_plan") == PLAN_INCREASING and len(items) >= 2:
+        diffs = [_to_int(it.get("difficulty")) for it in items]
+        md = _to_int(mother_difficulty)
+        if md is not None:
+            # 与闸A/GENERATE_PROMPT 同一把尺：逐项比对预期档
+            expected = [min(md + i, DIFFICULTY_CAP) for i in range(len(items))]
+            if diffs != expected:
+                defects.append(
+                    "要求难度递增但实出难度档与计划不符："
+                    f"预期 {','.join(str(d) for d in expected)}，"
+                    f"实出 {','.join(str(d) for d in diffs)}"
+                )
+        else:
+            mono = all(
+                a is not None and b is not None and b >= a for a, b in zip(diffs, diffs[1:])
+            )
+            if not mono:
+                defects.append(
+                    "要求难度递增但实出难度非单调不减：" + ",".join(str(d) for d in diffs)
+                )
+    return defects
+
+
+def knobs_desc(knobs: dict[str, Any] | None) -> str:
+    """纯函数：knobs → 题组头部人话描述（如「5 道·难度递增·2选择+2填空+1解答」）。空 → ""。"""
+    knobs = knobs or {}
+    bits: list[str] = []
+    if knobs.get("count"):
+        bits.append(f"{knobs['count']} 道")
+    plan = knobs.get("difficulty_plan")
+    if plan == PLAN_INCREASING:
+        bits.append("难度递增")
+    elif plan:
+        bits.append(f"难度「{plan}」")
+    dist = knobs.get("qtype_dist") or {}
+    if dist:
+        bits.append("+".join(f"{v}{k}" for k, v in dist.items()))
+    if knobs.get("note"):
+        bits.append(str(knobs["note"]))
+    return "·".join(bits)
+
+
+def gene_judge_knobs_spec(
+    knobs: dict[str, Any] | None, expected_difficulty: Any = None
+) -> str | None:
+    """🔴 纯函数·闸A 配方对齐段：knobs 非空时注入 GENE_JUDGE_PROMPT 尾部，改判标准跟老师配方走。
+
+    🔴 只对**产生该配方那一轮**生成的题注入（item 带 from_recipe 印记，gene_gate 把关）——
+    编辑轮（再来2道简单的）新增的题不受旧配方改判，老师点名的简单补题不会被旧递增计划误警。
+
+    - qtype_match：按老师指定题型集合判（属于配比内任一题型即 match），不再要求与母题题型一致；
+    - difficulty_match：递增计划按该题 item 级 expected_difficulty 印记判（generate 落印，
+      跟题走 —— remove 位移/add 追加都不会错档），不再按列表下标现算；
+    - knobs 没碰题型/难度（如只给 count/note）→ 返回 None（判别标准保持现状）。
+    """
+    knobs = knobs or {}
+    if not knobs:
+        return None
+    lines: list[str] = []
+
+    dist = knobs.get("qtype_dist") or {}
+    if dist:
+        allowed = "/".join(dist.keys())
+        lines.append(
+            f"- qtype_match 改判：老师指定了题型配比（{'、'.join(f'{k}×{v}' for k, v in dist.items())}），"
+            f"变式题型属于 {{{allowed}}} 之一即算 match（不再要求与母题题型一致；配比总量由程序另行校验）。"
+        )
+
+    plan = knobs.get("difficulty_plan")
+    if plan == PLAN_INCREASING:
+        exp = _to_int(expected_difficulty)
+        if exp is not None:
+            lines.append(
+                f"- difficulty_match 改判：老师要求难度递增，该题预期难度档 = {exp}"
+                "（该题难度为预期档即算 match，不再按 level=normal/hard 对母题判）。"
+            )
+    elif plan:
+        lines.append(f"- difficulty_match 改判：按老师难度要求「{plan}」判，符合该要求即算 match。")
+
+    if not lines:
+        return None
+    return "老师指定配方（🔴 优先于上面的判别标准）：\n" + "\n".join(lines)
+
+
+def _parse_generated_items(text: str, facts: dict) -> list[dict[str, Any]]:
+    """generate/重试共用：LLM 返回文本 → 规整 items（check 待 solve_explain 填）。"""
     data = _parse_json(text)
     if not isinstance(data, list):
         data = (data or {}).get("items") if isinstance(data, dict) else None
-    items = []
+    items: list[dict[str, Any]] = []
     for it in data or []:
         if not isinstance(it, dict):
             continue
@@ -562,7 +936,110 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
                 # check 待 solve_explain 填（无 check 不许进 assemble）
             }
         )
-    return {"items": items, "messages": []}
+    return items
+
+
+async def _extract_knobs(state: VariantState) -> dict[str, Any]:
+    """首轮配方旋钮抽取：去掉图 URL 后的人话非空(len>3) → 一次受约束 LLM 抽取 + normalize 钳制。
+
+    🔴 任何失败（LLM 异常/解析失败）→ {} 回落默认配方，绝不卡死出题（G5）。
+    """
+    user_text = _strip_urls(_latest_human_text(state.get("messages", [])))
+    # 🔴 只过滤真空串：「出5道」「来5道」恰好 3 字也是完整数量指令，阈值高了会静默吞掉；
+    #   抽取失败本身有 {} 兜底，不靠长度预筛。
+    if not user_text:
+        return {}
+    try:
+        text = await _ainvoke_text(
+            [HumanMessage(content=KNOBS_PROMPT.format(utterance=user_text))]
+        )
+    except Exception:  # noqa: BLE001 — 旋钮抽取是增强不是关卡
+        return {}
+    return normalize_knobs(_parse_json(text))
+
+
+async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
+    """③ 造题：配方由首轮旋钮(knobs)驱动，无旋钮走旧默认 3 = 2 普通 + 1 难。
+
+    🔴 入口断言 mother_confirmed 或三锚高置信（防裸奔）。
+    🔴 代码级配方校验 shape_check：不符带缺陷反馈整组 retry 1 次，仍不符 → 接受 +
+       shape_defects 外显到题组头部（不卡死，G5）。
+    """
+    if not (state.get("mother_confirmed") or _conf_ok(state.get("analysis") or {})):
+        # DNA 闸未过却走到 generate（多入口兜底）→ 拒造，回 clarify 语义
+        return {
+            "messages": [
+                AIMessage(content="母题 DNA 还没确认，我先不造题。请确认年级/考点/题型。")
+            ]
+        }
+
+    # 🔴 旋钮：新母题轮 analyze 已抽好随 state 来；库内母题直进 generate（不经 analyze）→ 此处兜底抽
+    knobs = state.get("knobs")
+    if knobs is None:
+        knobs = await _extract_knobs(state)
+    _emit_stage(
+        "knobs", "解析配方", "done", knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
+    )
+
+    facts = _mother_facts(state)
+    mother_d = (state.get("mother_dna") or {}).get("difficulty")
+    recipe = recipe_from_knobs(knobs, mother_d)
+    _emit_stage("generate", "生成题目", "running", f"{recipe['n']} 道")
+    prompt = (
+        GENERATE_PROMPT.format(
+            n=recipe["n"], n_normal=recipe["n_normal"], n_hard=recipe["n_hard"], **facts
+        )
+        + recipe["spec"]
+    )
+    text = await _ainvoke_text([HumanMessage(content=prompt)])
+    items = _parse_generated_items(text, facts)
+
+    # 🔴 代码级配方校验（数量/题型分布/递增档位）：不符 → 带缺陷反馈整组 retry 1 次。
+    #   含首稿解析为空（items=[] 时「要求N道实出0道」也是明确缺陷，值得一次重试）。
+    defects = shape_check(items, knobs, mother_d)
+    if defects:
+        feedback = (
+            "\n\n[配方校验反馈] 你上一稿不满足老师指定配方："
+            + "；".join(defects)
+            + "。请整组重出，严格满足配方（数量/题型配比/难度计划逐项核对后再输出）。"
+        )
+        try:
+            retry_text = await _ainvoke_text([HumanMessage(content=prompt + feedback)])
+            retry_items = _parse_generated_items(retry_text, facts)
+        except Exception:  # noqa: BLE001 — 重试失败保留首稿（绝不卡死）
+            retry_items = []
+        if retry_items:
+            items = retry_items
+            defects = shape_check(items, knobs, mother_d)
+
+    if not items:
+        # 两稿皆空/解析失败 → 友好失败收尾（after_generate 走 done→END），绝不静默空轮
+        _emit_stage("generate", "生成题目", "warn", "0 道（解析失败）")
+        return {
+            "items": [],
+            "knobs": knobs,
+            "shape_defects": defects,
+            "messages": [
+                AIMessage(
+                    content="这一轮我没能产出可用的变式题（模型输出解析失败）。"
+                    "请再发一次指令（可换种说法），或重贴题目图重试。"
+                )
+            ],
+        }
+
+    # 🔴 配方印记落 item 级（闸A 改判段只作用于产生该配方的这一轮生成的题）：
+    #   from_recipe = 本轮按老师配方生成；expected_difficulty = 递增计划该题预期档（跟题走，
+    #   remove 位移/add 追加不会错档；编辑轮新增题无印记 → 不被旧计划误改判）。
+    if knobs:
+        md_i = _to_int(mother_d) or 3
+        increasing = knobs.get("difficulty_plan") == PLAN_INCREASING
+        for i, it in enumerate(items):
+            it["from_recipe"] = True
+            if increasing:
+                it["expected_difficulty"] = min(md_i + i, DIFFICULTY_CAP)
+
+    _emit_stage("generate", "生成题目", "done", f"{len(items)} 道")
+    return {"items": items, "knobs": knobs, "shape_defects": defects, "messages": []}
 
 
 SOLVE_PROMPT = """你是严谨的数学阅卷老师。真解下面这道题（不看给定答案，独立算一遍）。
@@ -782,11 +1259,13 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
     items = list(state.get("items") or [])
     out: list[dict] = []
 
-    for it in items:
+    for i, it in enumerate(items):
         item = dict(it)
         if item.get("check"):  # 已定状态（如自愈过的补题再次流经）→ 不重复
             out.append(item)
             continue
+
+        _emit_stage("verify", "程序验算", "running", f"第 {i + 1}/{len(items)} 道")
 
         # ── 闸B·题型分流：证明/开放/作图 → 不进 sympy，软校验 + 人审标记 ──
         if _is_proof_like(item.get("qtype") or facts["qtype"], item.get("stem")):
@@ -828,6 +1307,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
             # sympy 判定标答真错 → 既有回炉机制重生 1 次，computed/detail 注回 prompt
             healed = None
             if MAX_HEAL >= 1:
+                _emit_stage("verify", "程序验算", "warn", f"第 {i + 1} 道回炉重生中")
                 feedback = (
                     f"程序(sympy)验算判定该题题面标答错误：程序算得 computed={res.get('computed')}；"
                     f"详情：{res.get('detail')}。请重新出一道题面与标答自洽、经得起程序验算的等价变式。"
@@ -889,6 +1369,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
         # 独立解 ≠ 标答（LLM 自检）→ 既有自愈：重生 1 次 → 重解 + 守恒
         healed = None
         if MAX_HEAL >= 1:
+            _emit_stage("verify", "程序验算", "warn", f"第 {i + 1} 道回炉重生中")
             draft = await _regen_once(item, facts)
             if draft:
                 resolved = await _solve_one(draft.get("stem", ""))
@@ -926,6 +1407,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
             _append_card_note(item, NOTE_UNVERIFIED)
             out.append(item)
 
+    _emit_stage("verify", "程序验算", "done")
     return {"items": out, "messages": []}
 
 
@@ -1007,8 +1489,13 @@ def _gene_feedback(judge: dict) -> str:
     )
 
 
-async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
-    """一次轻量 LLM 基因比对（受约束 JSON）。调用失败/解析失败返 None（调用方按 skipped 放行）。"""
+def _gene_judge_prompt(item: dict, facts: dict) -> str:
+    """组装基因比对 prompt（纯函数，可单测格式化不炸）。
+
+    🔴 闸A·配方对齐：facts 带 knobs_spec（gene_gate 按 state.knobs + 题序注入）时追加
+    「老师指定配方」改判段 —— qtype 按老师指定题型集合判、difficulty 按递增计划预期档位判，
+    否则递增难度的合法变式会被按母题基准误判 rework。knobs 为空 → 无此段，判别标准保持现状。
+    """
     prompt = GENE_JUDGE_PROMPT.format(
         kp_name=facts["kp_name"],
         grade=facts["grade"],
@@ -1021,8 +1508,16 @@ async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
         v_difficulty=item.get("difficulty") or "?",
         variant_stem=_clip(item.get("stem"), 300),
     )
+    spec = facts.get("knobs_spec")
+    if spec:
+        prompt += "\n\n" + str(spec)
+    return prompt
+
+
+async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
+    """一次轻量 LLM 基因比对（受约束 JSON）。调用失败/解析失败返 None（调用方按 skipped 放行）。"""
     try:
-        text = await _ainvoke_text([HumanMessage(content=prompt)])
+        text = await _ainvoke_text([HumanMessage(content=_gene_judge_prompt(item, facts))])
     except Exception:  # noqa: BLE001 — 闸A是增强不是关卡：judge 异常绝不外抛卡死出题（G5）
         return None
     data = _parse_json(text)
@@ -1042,15 +1537,26 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
     """
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
+    # 🔴 闸A·配方对齐：只对带 from_recipe 印记的题（产生该配方那一轮生成的）注入改判段，
+    #   递增预期档读 item 级 expected_difficulty（generate 落印，跟题走不随下标位移）。
+    #   编辑轮 add 的新题无印记 → 按默认标准判，绝不被旧配方（如「5道递增」）误改判。
+    knobs = state.get("knobs") or {}
     out: list[dict] = []
 
-    for it in items:
+    for i, it in enumerate(items):
         item = dict(it)
         if item.get("gene"):  # 已判过 → 不重判（旧题预算保护）
             out.append(item)
             continue
 
-        judge = await _gene_judge_one(item, facts)
+        facts_i = facts
+        if knobs and item.get("from_recipe"):
+            spec = gene_judge_knobs_spec(knobs, item.get("expected_difficulty"))
+            if spec:
+                facts_i = dict(facts, knobs_spec=spec)
+
+        _emit_stage("gene_gate", "平行度比对", "running", f"第 {i + 1}/{len(items)} 道")
+        judge = await _gene_judge_one(item, facts_i)
         if judge is None:
             item["gene"] = {"gate": GENE_GATE_SKIPPED}
             out.append(item)
@@ -1062,9 +1568,10 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
             continue
 
         # rework：既有回炉重生 1 次（基因反馈注回 prompt）→ 重生版再判一次
-        draft = await _regen_once(item, facts, feedback=_gene_feedback(judge))
+        _emit_stage("gene_gate", "平行度比对", "warn", f"第 {i + 1} 道回炉重生中")
+        draft = await _regen_once(item, facts_i, feedback=_gene_feedback(judge))
         if draft:
-            re_judge = await _gene_judge_one(draft, facts)
+            re_judge = await _gene_judge_one(draft, facts_i)
             if re_judge is not None and gene_gate_decision(re_judge) == "pass":
                 # 🔴 重生稿接受前仍须过**代码级**守恒闸（主考点+年级硬守恒贯穿"重生"，
                 # 不能只采信 LLM re_judge）：破守恒 → 丢弃重生稿，落下方"保留原版打 warn"。
@@ -1083,6 +1590,7 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
         }
         out.append(item)
 
+    _emit_stage("gene_gate", "平行度比对", "done")
     return {"items": out, "messages": []}
 
 
@@ -1130,14 +1638,21 @@ def _fmt_item(idx: int, it: dict) -> str:
 
 
 async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
-    """题组快照：每题带 solution 解析 + check ✓/⚠（状态已定）+ 外显默认配方 + 变更摘要。"""
+    """题组快照：每题带 solution 解析 + check ✓/⚠（状态已定）+ 外显配方（老师指定/默认）+ 变更摘要。"""
     items = state.get("items") or []
     facts = _mother_facts(state)
     n_ok = sum(1 for it in items if (it.get("check") or {}).get("badge") == "ok")
     n_warn = len(items) - n_ok
 
+    # 配方外显：有 knobs → "按你的要求: ..."；无 → 旧默认文案（行为不变）
+    desc = knobs_desc(state.get("knobs"))
+    recipe_s = f"按你的要求：{desc}" if desc else "配方：默认 3 = 2 普通 + 1 难"
+    # 代码级配方校验缺陷（generate 整组 retry 1 次后仍不符）→ 头部外显 ⚠，不拦截
+    defects = state.get("shape_defects") or []
+    defect_s = ("\n\n⚠ 配方未完全满足：" + "；".join(defects)) if defects else ""
+
     head = (
-        f"## 举一反三 · {len(items)} 道变式（配方：默认 3 = 2 普通 + 1 难）\n\n"
+        f"## 举一反三 · {len(items)} 道变式（{recipe_s}）{defect_s}\n\n"
         f"**母题 DNA**：考点「{facts['kp_name']}」· 年级「{facts['grade']}」· 题型「{facts['qtype']}」（硬守恒）\n\n"
         f"**状态**：{n_ok} 道 ✓ 通过自检"
         + (f"，{n_warn} 道 ⚠ 需老师重点看" if n_warn else "")
@@ -1411,7 +1926,9 @@ async def exec_remove(state: VariantState, config: RunnableConfig) -> VariantSta
             except (TypeError, ValueError):
                 pass
     kept = [it for i, it in enumerate(items) if i not in drop]
-    return {"items": kept, "pending": None, "messages": []}
+    # 🔴 shape_defects 只属于 generate 当轮：老师显式编辑 = 对配方的人工接管，旧缺陷清单
+    #   不再陈旧外显（且不在 assemble 重算 —— 那会把老师主动删/换题误报为缺陷）。
+    return {"items": kept, "pending": None, "shape_defects": [], "messages": []}
 
 
 # --- 编辑·regenerate：改造指定题 → 过 solve_explain（清 check 触发重判） ----------
@@ -1454,7 +1971,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
         regen = _parse_json(regen_text)
         if isinstance(regen, dict) and regen.get("stem"):
             # 🔴 新题清 check → 必过 solve_explain 才能进 assemble（不变量）
-            items[t] = {
+            new_item: dict[str, Any] = {
                 "stem": regen.get("stem"),
                 "answer": regen.get("answer"),
                 "solution": regen.get("solution"),
@@ -1463,7 +1980,13 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                 "level": regen.get("level") or old.get("level") or "normal",
                 "injected_kp": regen.get("injected_kp"),
             }
-    return {"items": items, "pending": None, "messages": []}
+            # 配方印记跟题走（与 difficulty 同理：重出仍占原计划槽位，闸A 改判段不丢）
+            for k in ("from_recipe", "expected_difficulty"):
+                if old.get(k) is not None:
+                    new_item[k] = old[k]
+            items[t] = new_item
+    # 🔴 编辑轮清陈旧缺陷外显（同 exec_remove 注释）
+    return {"items": items, "pending": None, "shape_defects": [], "messages": []}
 
 
 # --- 编辑·add：生成 N 道新题（吸收软约束/旋钮）→ 过 solve_explain ----------------
@@ -1540,9 +2063,11 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
                 "difficulty": it.get("difficulty"),
                 "level": it.get("level") or "normal",
                 "injected_kp": it.get("injected_kp") or None,
+                # 不落 from_recipe 印记：补题轮的题不受首轮配方（递增/题型配比）改判
             }
         )
-    return {"items": items, "pending": None, "messages": []}
+    # 🔴 编辑轮清陈旧缺陷外显（同 exec_remove 注释）
+    return {"items": items, "pending": None, "shape_defects": [], "messages": []}
 
 
 # --- 修正：patch 母题字段 → 只重算受影响下游（设计 §6 中途修正） ----------------
@@ -1625,9 +2150,11 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     # 🔴 身份透传：book-ui 经 agent_config 透传登录老师 access_token（config.configurable.ruoyi_token）
     # → 入库 owner = 该老师本人（后端 LoginHelper 取 token 身份），而非 .env 服务账号。
     token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
+    _emit_stage("persist", "入库", "running", f"{len(items)} 道")
     try:
         receipts = await persist_items(items, facts, token=token)
     except Exception as e:  # noqa: BLE001 — 登录/网络整体失败 → 友好兜底，不崩
+        _emit_stage("persist", "入库", "warn", "连不上题库服务")
         return {
             "messages": [
                 AIMessage(content=f"入库时连不上题库服务（book-server :8090 是否在跑？）：{e}")
@@ -1638,6 +2165,12 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     var_receipts = [r for r in receipts if r.get("role") != "mother"]
     ok = [r for r in var_receipts if r.get("ok")]
     fail = [r for r in var_receipts if not r.get("ok")]
+    _emit_stage(
+        "persist",
+        "入库",
+        "done" if not fail else "warn",
+        f"成功 {len(ok)} 道" + (f"，失败 {len(fail)} 道" if fail else ""),
+    )
 
     lines = [f"## 入库完成 · 变式 {len(items)} 道，成功 {len(ok)} 道"]
     # 母题(原题)入库回执：图母题不在库 → 先落原题挂血缘

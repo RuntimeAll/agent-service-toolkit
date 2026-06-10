@@ -1,0 +1,79 @@
+# -*- coding: utf-8 -*-
+"""Unit tests for relay_pool failover semantics (PRD-C-011 Block B hardening):
+
+- single-relay deployments must NEVER be fail-fasted by their own breaker
+  (an open breaker with no backup only reduces availability: 30s of guaranteed
+  RuntimeError("no relay available") while the relay may already be healthy);
+- ainvoke_failover returns the *transacted* relay's per-relay model so
+  conv_trace / llm_trace / cost attribution never misreport under failover.
+
+Zero LLM / zero network: _chat is monkeypatched.
+"""
+
+import asyncio
+import time
+
+import core.relay_pool as rp
+from core.relay_pool import Relay, _Breaker, ainvoke_failover
+
+
+class _FakeChat:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def bind(self, **_kw):
+        return self
+
+    async def ainvoke(self, _messages):
+        if isinstance(self._resp, Exception):
+            raise self._resp
+        return self._resp
+
+
+def _wire(monkeypatch, relays, responses):
+    """responses: dict relay_name -> resp object or Exception."""
+    monkeypatch.setattr(rp, "_relays", lambda: relays)
+    monkeypatch.setattr(rp, "_chat", lambda relay: _FakeChat(responses[relay.name]))
+    rp._breakers.clear()
+
+
+def test_single_relay_open_breaker_still_attempts(monkeypatch):
+    relay = Relay(name="main", base_url="http://x", api_key="k", model="m-main")
+    _wire(monkeypatch, [relay], {"main": "RESP"})
+    # trip the breaker wide open
+    rp._breakers["main"] = _Breaker(fails=9, open_until=time.monotonic() + 999)
+
+    resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert resp == "RESP" and name == "main" and model == "m-main"
+    assert fallback == 0
+    assert rp._breakers["main"].open_until == 0.0  # success resets the breaker
+
+
+def test_multi_relay_failover_returns_backup_per_relay_model(monkeypatch):
+    main = Relay(name="main", base_url="http://a", api_key="k", model="m-main")
+    backup = Relay(name="backup", base_url="http://b", api_key="k", model="m-backup")
+    _wire(monkeypatch, [main, backup], {"main": RuntimeError("down"), "backup": "RESP"})
+
+    resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert resp == "RESP"
+    assert name == "backup" and model == "m-backup"  # cost/trace attribution source
+    assert fallback == 1
+
+
+def test_multi_relay_open_main_is_skipped(monkeypatch):
+    main = Relay(name="main", base_url="http://a", api_key="k", model="m-main")
+    backup = Relay(name="backup", base_url="http://b", api_key="k", model="m-backup")
+    calls = []
+
+    def chat(relay):
+        calls.append(relay.name)
+        return _FakeChat("RESP")
+
+    monkeypatch.setattr(rp, "_relays", lambda: [main, backup])
+    monkeypatch.setattr(rp, "_chat", chat)
+    rp._breakers.clear()
+    rp._breakers["main"] = _Breaker(fails=3, open_until=time.monotonic() + 999)
+
+    resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert calls == ["backup"]  # open main skipped (breaker semantics intact with a backup)
+    assert name == "backup" and model == "m-backup" and fallback == 1
