@@ -30,7 +30,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents.variant_support import anchor_subject
+from agents.variant_support import anchor_subject, persist_items
 from core import get_model, settings
 
 # DNA 三锚高置信门槛
@@ -56,6 +56,8 @@ class VariantState(MessagesState, total=False):
     #        injected_kp?, check:{badge:ok|warn, solved_answer}}]
     items: list[dict[str, Any]]
     history: list[dict[str, Any]]
+    # 交互层：parse_instruction 的解析结果（intent/ops/knobs/...），路由后各分支消费并清空
+    pending: dict[str, Any] | None
 
 
 # ---------------------------------------------------------------------------
@@ -144,14 +146,18 @@ def _conf_ok(analysis: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 # Router（入口分诊：有图? 在途母题? 库内母题跳 analyze/classify）
 # ---------------------------------------------------------------------------
-def route_entry(state: VariantState) -> Literal["analyze", "generate", "ask"]:
+def route_entry(state: VariantState) -> Literal["analyze", "parse", "generate", "ask"]:
+    url = _extract_image_url(_latest_human_text(state.get("messages", [])))
+    # 跨轮新图 = 视作新母题（设计 §6：重走 analyze，覆盖在途状态）
+    if url:
+        return "analyze"
+    # 老会话·纯文字（已出过题组）→ parse 分诊 5 意图（设计 §3 mermaid G0）
+    if state.get("items"):
+        return "parse"
     # 库内母题（已确认 DNA）→ 直接造（跳 analyze/classify）
     if state.get("mother_confirmed") and state.get("mother_dna"):
         return "generate"
-    url = _extract_image_url(_latest_human_text(state.get("messages", [])))
-    if url:
-        return "analyze"
-    # 没图、无在途母题 → 催图（设计 §6 输入边界兜底）
+    # 没图、无在途母题、无题组 → 催图（设计 §6 输入边界兜底）
     return "ask"
 
 
@@ -322,12 +328,16 @@ def _mother_facts(state: VariantState) -> dict:
     analysis = state.get("analysis") or {}
     dna = state.get("mother_dna") or {}
     kp = analysis.get("kp") or {}
+    anchored = kp.get("anchored") or {}
     return {
         "kp_name": kp.get("value") or "未知考点",
         "grade": (analysis.get("grade") or {}).get("value") or "未知年级",
         "qtype": (analysis.get("qtype") or {}).get("value") or "解答",
         "stem": dna.get("stem") or "",
         "skeleton": dna.get("solution_skeleton") or dna.get("answer") or "",
+        # 入库用：锚定到的真实节点编码 + 母题 id（图母题 MVP 无 id）
+        "subject_id": anchored.get("code"),
+        "mother_question_id": dna.get("mother_question_id"),
     }
 
 
@@ -527,6 +537,401 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     return {"messages": [AIMessage(content=head + body)]}
 
 
+# ===========================================================================
+# 交互层（设计 §6）：多轮 WAIT → parse 判 5 意图 → 三层漏斗分诊
+#   修正 / 编辑(remove·regenerate·add) / 确认 / 答疑 / clarify
+# ===========================================================================
+PARSE_PROMPT = """你是举一反三 agent 的指令解析器。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
+
+母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
+- 主考点: {kp_name}
+- 年级: {grade}
+
+老师最新一句话：
+{utterance}
+
+把它解析成一个 JSON（只输出 JSON，不要解释）：
+{{
+  "intent": "修正|编辑|确认|答疑|clarify",   // 5 选 1
+  "ops": [                                  // intent=编辑 时的操作列表（其余为空数组）
+    {{"action":"remove|regenerate|add", "index": 1, "count": 1, "note":"自由约束/旋钮说明"}}
+  ],
+  "knobs": {{"count":null, "number":null, "scene":null, "difficulty":null, "qtype":null, "method":null}},
+  "comp": "可被旋钮吸收的软约束(超旋钮但 best-effort 能顺的)，没有填 null",
+  "extra_constraints": ["其余自由约束句"],
+  "mother_correction": {{"grade":null, "kp":null}},  // intent=修正 时老师纠正的年级/考点，否则全 null
+  "confidence": 0.0~1.0
+}}
+
+判定规则：
+- "为什么第N题…/这题怎么解/讲讲" = 答疑（只问不改题）。
+- "第N题删掉/不要第N题" = 编辑 remove(index=N)。
+- "第N题重出/换一道/改一下第N题" = 编辑 regenerate(index=N)。
+- "再来2道/多出几道难的/加道选择题" = 编辑 add(count=N)。
+- "这是八年级/考点应该是X/我说错了是…" = 修正（填 mother_correction）。
+- "这组可以了/入库/就这些/保存" = 确认。
+- 撞守恒(要改主考点为别的考点 / 超出该年级) 或 真说不清 = clarify。
+- index 从 1 起；拿不准 index 时 ops 留空、intent 取 clarify。"""
+
+
+def _items_brief(items: list[dict]) -> str:
+    """给 parse / answer 当上下文：每题 index + 题干前 80 字。"""
+    lines = []
+    for i, it in enumerate(items):
+        stem = (it.get("stem") or "").replace("\n", " ")[:80]
+        lines.append(f"第{i + 1}题: {stem}")
+    return "\n".join(lines)
+
+
+async def parse_instruction(state: VariantState, config: RunnableConfig) -> VariantState:
+    """WAIT 下一句 → 判 5 意图 + 三层漏斗参数。本节点只解析、不改 items（路由后各分支执行）。
+
+    解析结果塞 state['pending']（含 intent/ops/knobs/comp/extra_constraints/mother_correction）。
+    """
+    utterance = _latest_human_text(state.get("messages", []))
+    facts = _mother_facts(state)
+    items = state.get("items") or []
+    prompt = PARSE_PROMPT.format(
+        n=len(items),
+        kp_name=facts["kp_name"],
+        grade=facts["grade"],
+        utterance=utterance or "(空)",
+    )
+    text = await _ainvoke_text([HumanMessage(content=prompt)])
+    parsed = _parse_json(text) or {}
+    intent = parsed.get("intent")
+    if intent not in {"修正", "编辑", "确认", "答疑", "clarify"}:
+        intent = "clarify"
+    pending = {
+        "intent": intent,
+        "ops": parsed.get("ops") or [],
+        "knobs": parsed.get("knobs") or {},
+        "comp": parsed.get("comp"),
+        "extra_constraints": parsed.get("extra_constraints") or [],
+        "mother_correction": parsed.get("mother_correction") or {},
+        "confidence": parsed.get("confidence"),
+        "utterance": utterance,
+    }
+    return {"pending": pending, "messages": []}
+
+
+def route_after_parse(
+    state: VariantState,
+) -> Literal["patch", "dispatch", "answer", "save", "ask_clarify"]:
+    """parse 后分诊（设计 §3 mermaid）：修正→patch / 编辑→dispatch / 确认→save / 答疑→answer / clarify。"""
+    intent = (state.get("pending") or {}).get("intent")
+    if intent == "修正":
+        return "patch"
+    if intent == "编辑":
+        return "dispatch"
+    if intent == "确认":
+        return "save"
+    if intent == "答疑":
+        return "answer"
+    return "ask_clarify"
+
+
+def dispatch(state: VariantState) -> Literal["remove", "regenerate", "add", "ask_clarify"]:
+    """三层漏斗收口：硬旋钮命中 → remove/regenerate/add；ops 空/说不清 → clarify。"""
+    ops = (state.get("pending") or {}).get("ops") or []
+    actions = {str(op.get("action")) for op in ops if isinstance(op, dict)}
+    # 优先级：remove > regenerate > add（同句多操作时分步走，下游回 ASM 再 WAIT）
+    if "remove" in actions:
+        return "remove"
+    if "regenerate" in actions:
+        return "regenerate"
+    if "add" in actions:
+        return "add"
+    return "ask_clarify"
+
+
+# --- 答疑：只问不改（🔴 物理上 return 不含 items） -----------------------------
+ANSWER_PROMPT = """你是数学老师，老师对下面这组变式题的某道有疑问，请耐心解惑（讲思路/为什么这么解）。
+
+题组：
+{brief}
+
+各题答案/解析摘要：
+{detail}
+
+老师的问题：{question}
+
+直接用人话回答（可含 LaTeX）。只解惑，不要改题、不要重出题。"""
+
+
+async def answer_question(state: VariantState, config: RunnableConfig) -> VariantState:
+    """答疑侧循环（设计 §6）：解老师对解析的疑问 → 回等待。
+
+    🔴 代码层物理不写 state.items：return 的 update 不含 'items' 键，即便 parse 误判进此分支也改不了题。
+    """
+    items = state.get("items") or []
+    question = (state.get("pending") or {}).get("utterance") or _latest_human_text(
+        state.get("messages", [])
+    )
+    detail = "\n".join(
+        f"第{i + 1}题 答案:{(it.get('answer') or '')[:60]} 解析:{(it.get('solution') or '')[:120]}"
+        for i, it in enumerate(items)
+    )
+    text = await _ainvoke_text(
+        [
+            HumanMessage(
+                content=ANSWER_PROMPT.format(
+                    brief=_items_brief(items), detail=detail, question=question or "(空)"
+                )
+            )
+        ]
+    )
+    # 🔴 只返回 messages（绝不含 items），并清空 pending
+    return {"messages": [AIMessage(content=text or "我没太理解你的疑问，可以再说具体点吗？")], "pending": None}
+
+
+# --- 编辑·remove：删 + 重编号（删完的题不再过 solve，直接 ASM） -----------------
+async def exec_remove(state: VariantState, config: RunnableConfig) -> VariantState:
+    items = list(state.get("items") or [])
+    ops = (state.get("pending") or {}).get("ops") or []
+    drop = set()
+    for op in ops:
+        if isinstance(op, dict) and op.get("action") == "remove":
+            idx = op.get("index")
+            try:
+                drop.add(int(idx) - 1)  # 1-based → 0-based
+            except (TypeError, ValueError):
+                pass
+    kept = [it for i, it in enumerate(items) if i not in drop]
+    return {"items": kept, "pending": None, "messages": []}
+
+
+# --- 编辑·regenerate：改造指定题 → 过 solve_explain（清 check 触发重判） ----------
+async def exec_regenerate(state: VariantState, config: RunnableConfig) -> VariantState:
+    """改造某道（按 note 软约束）→ 该题清 check 重入 solve_explain（每题状态须重新定）。"""
+    facts = _mother_facts(state)
+    items = list(state.get("items") or [])
+    ops = (state.get("pending") or {}).get("ops") or []
+    targets = []
+    notes: dict[int, str] = {}
+    for op in ops:
+        if isinstance(op, dict) and op.get("action") == "regenerate":
+            try:
+                t = int(op.get("index")) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= t < len(items):
+                targets.append(t)
+                if op.get("note"):
+                    notes[t] = str(op.get("note"))
+
+    for t in targets:
+        old = items[t]
+        regen_text = await _ainvoke_text(
+            [
+                HumanMessage(
+                    content=REGEN_PROMPT.format(
+                        kp_name=facts["kp_name"],
+                        grade=facts["grade"],
+                        stem=(old.get("stem") or "")
+                        + (f"\n额外要求：{notes[t]}" if t in notes else ""),
+                        level=old.get("level") or "normal",
+                        qtype=old.get("qtype") or facts["qtype"],
+                        difficulty=old.get("difficulty") or 3,
+                        injected_kp=json.dumps(old.get("injected_kp"), ensure_ascii=False),
+                    )
+                )
+            ]
+        )
+        regen = _parse_json(regen_text)
+        if isinstance(regen, dict) and regen.get("stem"):
+            # 🔴 新题清 check → 必过 solve_explain 才能进 assemble（不变量）
+            items[t] = {
+                "stem": regen.get("stem"),
+                "answer": regen.get("answer"),
+                "solution": regen.get("solution"),
+                "qtype": regen.get("qtype") or old.get("qtype") or facts["qtype"],
+                "difficulty": regen.get("difficulty") or old.get("difficulty"),
+                "level": regen.get("level") or old.get("level") or "normal",
+                "injected_kp": regen.get("injected_kp"),
+            }
+    return {"items": items, "pending": None, "messages": []}
+
+
+# --- 编辑·add：生成 N 道新题（吸收软约束/旋钮）→ 过 solve_explain ----------------
+ADD_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA，**新增** {n} 道举一反三变式。
+
+母题 DNA：
+- 主考点(硬守恒): {kp_name}
+- 年级(硬守恒): {grade}
+- 题型(默认): {qtype}
+- 母题题干: {stem}
+- 母题答案/解法骨架: {skeleton}
+
+老师的补充要求（best-effort 吸收，撞守恒的忽略）：{extra}
+
+铁律：每道仍考「{kp_name}」、仍在「{grade}」；只换数字/场景（除非老师明确要改难度/题型）。
+
+只输出 JSON 数组(不要解释)，每元素：
+{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}"""
+
+
+async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
+    """补题（设计 §5 三层漏斗②：超旋钮软约束 best-effort 吸收 + 外显）→ 追加 → 过 solve_explain。"""
+    facts = _mother_facts(state)
+    items = list(state.get("items") or [])
+    pending = state.get("pending") or {}
+    ops = pending.get("ops") or []
+    n = 0
+    notes = []
+    for op in ops:
+        if isinstance(op, dict) and op.get("action") == "add":
+            try:
+                n += int(op.get("count") or 1)
+            except (TypeError, ValueError):
+                n += 1
+            if op.get("note"):
+                notes.append(str(op.get("note")))
+    if n <= 0:
+        n = 1
+    n = min(n, 5)  # 单轮补题上限，防失控
+
+    extra_bits = notes + list(pending.get("extra_constraints") or [])
+    if pending.get("comp"):
+        extra_bits.append(str(pending["comp"]))
+    extra = "；".join(extra_bits) or "无"
+
+    text = await _ainvoke_text(
+        [
+            HumanMessage(
+                content=ADD_PROMPT.format(
+                    n=n,
+                    kp_name=facts["kp_name"],
+                    grade=facts["grade"],
+                    qtype=facts["qtype"],
+                    stem=facts["stem"],
+                    skeleton=facts["skeleton"],
+                    extra=extra,
+                )
+            )
+        ]
+    )
+    data = _parse_json(text)
+    if not isinstance(data, list):
+        data = (data or {}).get("items") if isinstance(data, dict) else None
+    for it in data or []:
+        if not isinstance(it, dict):
+            continue
+        # 🔴 新题不带 check → 下游 solve_explain 必判
+        items.append(
+            {
+                "stem": it.get("stem"),
+                "answer": it.get("answer"),
+                "solution": it.get("solution"),
+                "qtype": it.get("qtype") or facts["qtype"],
+                "difficulty": it.get("difficulty"),
+                "level": it.get("level") or "normal",
+                "injected_kp": it.get("injected_kp") or None,
+            }
+        )
+    return {"items": items, "pending": None, "messages": []}
+
+
+# --- 修正：patch 母题字段 → 只重算受影响下游（设计 §6 中途修正） ----------------
+async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
+    """老师纠正年级/考点 → patch analysis；改年级/考点 → 清 items 触发重锚+重造（route_after_patch）。
+
+    粒度 = 步边界：改年级/考点 = 重走 classify→generate（清 items + mother_confirmed）；
+    其余（如只是补充场景偏好）= 当软约束，留待下次编辑指令，不在此重造。
+    """
+    analysis = dict(state.get("analysis") or {})
+    corr = (state.get("pending") or {}).get("mother_correction") or {}
+    changed = False
+
+    if corr.get("grade"):
+        g = dict(analysis.get("grade") or {})
+        g["value"] = corr["grade"]
+        g["confidence"] = 0.9  # 老师明示 → 高置信
+        g.pop("code", None)  # 清旧编码，重锚时再填
+        analysis["grade"] = g
+        changed = True
+    if corr.get("kp"):
+        k = dict(analysis.get("kp") or {})
+        k["value"] = corr["kp"]
+        k["confidence"] = 0.9
+        k.pop("anchored", None)  # 清旧锚定，classify 会重锚
+        analysis["kp"] = k
+        changed = True
+
+    if not changed:
+        # 没拿到可 patch 的字段 → 退化为 clarify 回问（不空转）
+        return {
+            "messages": [
+                AIMessage(content="我没听准你要修正什么（年级还是考点？），可以再说一次吗？")
+            ],
+            "pending": None,
+        }
+
+    # 🔴 改了硬锚 → 清 items + mother_confirmed，触发重锚(classify)+重造(generate)
+    return {
+        "analysis": analysis,
+        "items": [],
+        "mother_confirmed": False,
+        "pending": None,
+        "messages": [AIMessage(content="收到修正，我按新的年级/考点重锚并重出这组变式。")],
+    }
+
+
+async def ask_clarify(state: VariantState, config: RunnableConfig) -> VariantState:
+    """三层漏斗第③层 / 答非所问兜底：撞守恒 / 说不清 → 回问（设计 §6，不改 items）。"""
+    pending = state.get("pending") or {}
+    utterance = pending.get("utterance") or ""
+    facts = _mother_facts(state)
+    body = (
+        "我没完全 get 到你的意思（也可能撞到了不能改的硬守恒）。\n\n"
+        f"这组变式的硬守恒是：考点「{facts['kp_name']}」+ 年级「{facts['grade']}」——这两项不能改"
+        "（要换考点/年级等于换一道母题，请重新贴图）。\n\n"
+        "你可以这样说：\n"
+        "- 删/重出/再加题（如「第 2 题重出」「再来 2 道难的」）\n"
+        "- 拨旋钮（数字 / 场景 / 难度 / 题型配比）\n"
+        "- 问解析（如「第 1 题为什么这么解」）\n"
+        "- 「这组可以了」入库"
+    )
+    if utterance:
+        body += f"\n\n（你刚说的是：「{utterance}」）"
+    return {"messages": [AIMessage(content=body)], "pending": None}
+
+
+# --- 确认入库（设计 §7）：变式+解析经 RuoYi 写老师个人题库，只写不判 -----------
+async def persist_to_bank(state: VariantState, config: RunnableConfig) -> VariantState:
+    """④ 入库：老师"这组可以了" → 逐题 POST /teacher/question/create（teacher token 定 owner）。
+
+    🔴 只写不再判（质量门已在 solve_explain 闭合）。入库回执（入库 N 道 + 失败标注）。
+    🔴 owner 由后端 LoginHelper 定，body 绝不传 createBy。
+    """
+    items = state.get("items") or []
+    facts = _mother_facts(state)
+    if not items:
+        return {"messages": [AIMessage(content="当前没有可入库的变式题。先贴图举一反三吧。")]}
+
+    try:
+        receipts = await persist_items(items, facts)
+    except Exception as e:  # noqa: BLE001 — 登录/网络整体失败 → 友好兜底，不崩
+        return {
+            "messages": [
+                AIMessage(content=f"入库时连不上题库服务（book-server :8090 是否在跑？）：{e}")
+            ]
+        }
+
+    ok = [r for r in receipts if r.get("ok")]
+    fail = [r for r in receipts if not r.get("ok")]
+    lines = [f"## 入库完成 · 共 {len(items)} 道，成功 {len(ok)} 道"]
+    if ok:
+        ids = [str(r.get("id")) for r in ok if r.get("id") is not None]
+        lines.append("已落入你的个人题库（来源标记 AI-Orchestrator）。" + (f"题目 ID：{', '.join(ids)}" if ids else ""))
+    if fail:
+        lines.append(f"\n⚠ {len(fail)} 道入库失败：")
+        for i, r in enumerate(fail, 1):
+            lines.append(f"  {i}. {r.get('error')}")
+    lines.append("\n可回平台「我的题库」找题、组卷、导出 PDF。")
+    return {"messages": [AIMessage(content="\n".join(lines))]}
+
+
 # ---------------------------------------------------------------------------
 # 图（StateGraph）
 # ---------------------------------------------------------------------------
@@ -537,10 +942,24 @@ graph.add_node("clarify", clarify)
 graph.add_node("generate", generate)
 graph.add_node("solve_explain", solve_explain)
 graph.add_node("assemble", assemble)
+# 交互层节点（多轮 WAIT 后的下一句）
+graph.add_node("parse_instruction", parse_instruction)
+graph.add_node("answer_question", answer_question)
+graph.add_node("exec_remove", exec_remove)
+graph.add_node("exec_regenerate", exec_regenerate)
+graph.add_node("exec_add", exec_add)
+graph.add_node("patch", patch)
+graph.add_node("ask_clarify", ask_clarify)
+graph.add_node("persist_to_bank", persist_to_bank)
 
 graph.set_conditional_entry_point(
     route_entry,
-    {"analyze": "analyze", "generate": "generate", "ask": END},
+    {
+        "analyze": "analyze",
+        "generate": "generate",
+        "parse": "parse_instruction",
+        "ask": END,
+    },
 )
 
 # analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → classify
@@ -570,6 +989,68 @@ graph.add_conditional_edges(
 )
 graph.add_edge("solve_explain", "assemble")
 graph.add_edge("assemble", END)
+
+# --- 交互层路由（设计 §3 mermaid：WAIT → parse → 5 意图分诊） ----------------
+graph.add_conditional_edges(
+    "parse_instruction",
+    route_after_parse,
+    {
+        "patch": "patch",
+        "dispatch": "dispatch",  # 编辑意图 → 三层漏斗节点收口（remove/regenerate/add）
+        "answer": "answer_question",
+        "save": "persist_to_bank",
+        "ask_clarify": "ask_clarify",
+    },
+)
+
+
+# 三层漏斗：编辑意图 → 选 remove/regenerate/add（route_after_parse 的 "dispatch" 实由本函数收口）
+def route_dispatch(
+    state: VariantState,
+) -> Literal["exec_remove", "exec_regenerate", "exec_add", "ask_clarify"]:
+    target = dispatch(state)
+    return {
+        "remove": "exec_remove",
+        "regenerate": "exec_regenerate",
+        "add": "exec_add",
+        "ask_clarify": "ask_clarify",
+    }[target]
+
+
+# 编辑意图先经 dispatch 漏斗：把 route_after_parse 的 "dispatch" 桥到三原语。
+# 用一个轻量调度节点统一收口（避免 route_after_parse 直连 exec_remove 误派）。
+graph.add_node("dispatch", lambda state: {"messages": []})
+graph.add_conditional_edges(
+    "dispatch",
+    route_dispatch,
+    {
+        "exec_remove": "exec_remove",
+        "exec_regenerate": "exec_regenerate",
+        "exec_add": "exec_add",
+        "ask_clarify": "ask_clarify",
+    },
+)
+
+# remove/regenerate/add 三原语 → 过 solve_explain（凡进 items 的题一律重判）→ assemble
+graph.add_edge("exec_remove", "solve_explain")
+graph.add_edge("exec_regenerate", "solve_explain")
+graph.add_edge("exec_add", "solve_explain")
+
+# 答疑/clarify → END（不改 items，回等待下一句）
+graph.add_edge("answer_question", END)
+graph.add_edge("ask_clarify", END)
+graph.add_edge("persist_to_bank", END)
+
+
+# patch：改了硬锚（清 items + mother_confirmed=False）→ 重锚重造走 classify；
+#        没改（仅回问消息，items 仍在）→ END 等下一句。
+def after_patch(state: VariantState) -> Literal["classify", "done"]:
+    if state.get("mother_confirmed") is False and not state.get("items"):
+        return "classify"
+    return "done"
+
+
+graph.add_conditional_edges("patch", after_patch, {"classify": "classify", "done": END})
 
 # 🔴 不在此 compile checkpointer：service lifespan 注入 saver（按 thread_id 持久 state）
 variant = graph.compile()

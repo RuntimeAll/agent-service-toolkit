@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 import pymysql
@@ -95,7 +95,7 @@ class RuoyiClient:
     """
 
     def __init__(self) -> None:
-        self._token: Optional[str] = settings.RUOYI_TOKEN or None
+        self._token: str | None = settings.RUOYI_TOKEN or None
         self._client = httpx.AsyncClient(
             base_url=settings.RUOYI_BASE_URL, timeout=30.0, trust_env=False
         )
@@ -140,7 +140,7 @@ class RuoyiClient:
         }
 
     async def teacher_post(
-        self, path: str, body: Optional[dict] = None, _retry: bool = True
+        self, path: str, body: dict | None = None, _retry: bool = True
     ) -> Any:
         """调 /teacher/** 接口，解 envelope（code==1 取 response）。401 自动重登一次。"""
         await self._ensure_token()
@@ -158,7 +158,7 @@ class RuoyiClient:
             raise RuoyiError(f"{path} 非 code==1: code={data.get('code')} msg={msg}")
         return data.get("response")
 
-    async def lazy_tree(self, body: Optional[dict] = None) -> Any:
+    async def lazy_tree(self, body: dict | None = None) -> Any:
         return await self.teacher_post("/teacher/question/lazyTree", body or {})
 
     async def create_question(self, body: dict) -> Any:
@@ -167,3 +167,108 @@ class RuoyiClient:
         🔴 设计 §7：接口 /teacher/question/create（ruoyi-book），与 admin 解耦。
         """
         return await self.teacher_post("/teacher/question/create", body)
+
+
+# ---------------------------------------------------------------------------
+# 入库 BO 构造 + 逐题落库（设计 §7：变式+解析经 RuoYi HTTP 写老师个人题库，只写不判）
+# ---------------------------------------------------------------------------
+# 题型中文 → CreateQuestionBo.questionType（1=选择 / 4=填空 / 5=简答；misikt 真实 3 种）
+QTYPE_MAP: dict[str, int] = {
+    "选择": 1,
+    "选择题": 1,
+    "填空": 4,
+    "填空题": 4,
+    "解答": 5,
+    "解答题": 5,
+    "简答": 5,
+    "简答题": 5,
+    "计算": 5,
+    "计算题": 5,
+    "证明": 5,
+    "证明题": 5,
+}
+DEFAULT_QTYPE = 5  # 拿不准 → 简答（最宽容）
+DEFAULT_IMPORT_SOURCE = "AI-Orchestrator"  # 设计 §7 默认来源标记
+
+
+def _map_qtype(qtype: Any) -> int:
+    s = str(qtype or "").strip()
+    if s.isdigit():
+        return int(s)
+    return QTYPE_MAP.get(s, DEFAULT_QTYPE)
+
+
+def _clamp_difficult(difficulty: Any) -> int | None:
+    """item.difficulty(1~5) → biz_question.difficult(1~4 星)；越界夹紧，缺则不传。"""
+    try:
+        d = int(difficulty)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(4, d))
+
+
+def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    """单道变式 item + 母题 facts → CreateQuestionBo camelCase body。
+
+    🔴 只放契约允许的字段；createBy/createUser/status/id 绝不放（后端强制，传了也忽略）。
+    题型映射成整数；难度夹 1~4；带 AI 血缘三件套（母题/变式关系/来源）。
+    """
+    bo: dict[str, Any] = {
+        "questionType": _map_qtype(item.get("qtype") or facts.get("qtype")),
+        "stem": item.get("stem") or "",
+        "importSource": DEFAULT_IMPORT_SOURCE,
+        "variantRelation": item.get("variant_relation") or "AI-数值变式",
+    }
+    answer = item.get("answer")
+    if answer:
+        bo["answer"] = answer
+    analyze = item.get("solution") or item.get("analyze")
+    if analyze:
+        bo["analyze"] = analyze
+    difficult = _clamp_difficult(item.get("difficulty"))
+    if difficult is not None:
+        bo["difficult"] = difficult
+
+    # 知识点编码：classify 锚定到的真实节点 code（落 subjectId）
+    subject_id = facts.get("subject_id")
+    if subject_id:
+        bo["subjectId"] = str(subject_id)
+
+    # 母题血缘（库内母题时才有 id；图母题 MVP 无 id → 不传）
+    mother_id = facts.get("mother_question_id")
+    if mother_id:
+        try:
+            bo["motherQuestionId"] = int(mother_id)
+        except (TypeError, ValueError):
+            pass
+    return bo
+
+
+async def persist_items(
+    items: list[dict[str, Any]], facts: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """逐题落库（设计 §7：只写不判，质量门已在 solve_explain 闭合）。
+
+    一个 RuoyiClient（teacher token 登录定身份）；逐题 POST /teacher/question/create。
+    返回回执 [{ok, id?, error?}...]（部分失败不中断后续，回执如实标）。
+    """
+    client = RuoyiClient()
+    receipts: list[dict[str, Any]] = []
+    try:
+        for item in items:
+            bo = build_create_bo(item, facts)
+            try:
+                resp = await client.create_question(bo)
+                # 后端回 question.getId()（雪花，回填后随 envelope.response 返回；
+                # 形态可能是裸 id / {id:...} / {questionId:...}，宽容取）
+                new_id = None
+                if isinstance(resp, dict):
+                    new_id = resp.get("id") or resp.get("questionId")
+                elif resp is not None:
+                    new_id = resp
+                receipts.append({"ok": True, "id": new_id})
+            except Exception as e:  # noqa: BLE001 — 单题失败如实记，不拖垮整组
+                receipts.append({"ok": False, "error": str(e)})
+    finally:
+        await client.aclose()
+    return receipts
