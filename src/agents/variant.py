@@ -35,7 +35,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import ensure_config
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents import conv_trace
+from agents import conv_trace, math_verify
 from agents.variant_support import anchor_subject, persist_items
 from core import get_model, settings
 
@@ -45,6 +45,38 @@ CONF_GATE = 0.75
 MAX_HEAL = 1
 # 默认配方：3 道 = 2 普通 + 1 难（设计 §5）
 DEFAULT_SHAPE = {"normal": 2, "hard": 1}
+
+# ---------------------------------------------------------------------------
+# 闸B（PRD-C-010）：sympy 程序验算 + 题型分流的标记值
+# —— 落 item.check.verify / item.check.review，入库时 _apply_labels 透传进 auxTags。
+# 🔴 判决只读 math_verify.verify() 的 verdict（pass/fail/degrade），永不采信 LLM 自评。
+# ---------------------------------------------------------------------------
+VERIFY_SYMPY_PASS = "sympy_pass"  # 程序验算通过（入库可查的抓手）
+# 🔴 验算墙钟预算（G5 反挂死）：sympy 对病态载荷（如 9**9**9 / 超高次方程）可能无界计算，
+# _machine_verify 用 asyncio.wait_for 包 to_thread —— 超时按 degrade 降级（线程不可杀但流程解锁）。
+VERIFY_TIMEOUT_S = 10.0
+VERIFY_FAIL_AFTER_REGEN = "fail_after_regen"  # 验算 fail 且回炉 1 次后仍不过
+VERIFY_UNVERIFIED = "unverified"  # degrade：sympy 吃不下 → 退回 LLM 自检 fallback
+REVIEW_PROOF = "proof_needs_human"  # 证明/开放/作图类：不进 sympy，转人审
+
+# 题卡可见文本（追加在 item.solution 尾部 → assemble/_fmt_item 渲染 + 入库 analyze 字段同步可见）
+NOTE_VERIFY_FAIL = "⚠ 程序验算未通过，请老师核对。"
+NOTE_UNVERIFIED = "⚠ 未经程序验算。"
+NOTE_PROOF_REVIEW = "⚠ 证明/开放类题不做程序验算，请老师人工审核。"
+
+# ---------------------------------------------------------------------------
+# 闸A·基因闸（验"是不是平行题"，与闸B"答案对不对"正交。依据 12-题目DNA方法论 §2/§5）：
+# 骨架基因(题型/难度/结构=解法骨架)必须 match —— 一变就不是平行题；
+# 皮肤变量(数字/场景)必须换 —— 没换 = 复读母题，也不算平行题。
+# 判决 = 一次轻量 LLM 比对(受约束 JSON) + 纯函数 gene_gate_decision；
+# rework → 既有 REGEN 回炉 1 次再判；仍不过 → gene_gate:"warn" 只警示不硬拦(v1)；
+# judge 调用/解析失败 → 按 pass 放行标 "skipped"（闸A是增强不是关卡，绝不卡死流程，G5）。
+# 标记落 item.gene.gate → 入库透传 auxTags.gene_gate（_apply_labels）+ 题卡 _fmt_item 可见。
+# ---------------------------------------------------------------------------
+GENE_GATE_PASS = "pass"  # 基因比对通过（平行题）
+GENE_GATE_WARN = "warn"  # 回炉 1 次后仍不过 → 警示不拦截
+GENE_GATE_SKIPPED = "skipped"  # judge 调用失败/JSON 解析失败 → 放行留痕
+NOTE_GENE_WARN = "⚠ 与母题平行度存疑"
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +90,9 @@ class VariantState(MessagesState, total=False):
     analysis: dict[str, Any]
     mother_dna: dict[str, Any]
     mother_confirmed: bool
-    # items[{stem, answer, solution, qtype, difficulty, level,
-    #        injected_kp?, check:{badge:ok|warn, solved_answer}}]
+    # items[{stem, answer, solution, qtype, difficulty, level, injected_kp?,
+    #        check:{badge:ok|warn, solved_answer}  ← 闸B(solve_explain)填,
+    #        gene:{gate:pass|warn|skipped, reason?} ← 闸A(gene_gate)填}]
     items: list[dict[str, Any]]
     history: list[dict[str, Any]]
     # 交互层：parse_instruction 的解析结果（intent/ops/knobs/...），路由后各分支消费并清空
@@ -102,6 +135,8 @@ _LLM_TRACE_SEQ = 0  # 进程内自增序号（同一进程内调用顺序）
 # prompt 内容前缀 → 标签（哪个 prompt）。新增/造同含「基于母题 DNA」，先判 add 再判 generate。
 _TRACE_MARKERS: list[tuple[str, str]] = [
     ("看这张题目图", "analyze"),
+    ("数学验算载荷抽取器", "extract"),
+    ("平行题基因比对器", "gene_judge"),
     ("独立解出的答案与题面标答不一致", "regen"),
     ("你是严谨的数学阅卷老师", "solve"),
     ("举一反三 agent 的指令解析器", "parse"),
@@ -549,6 +584,118 @@ REGEN_PROMPT = """下面这道变式题，独立解出的答案与题面标答�
 {{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp}}}"""
 
 
+# ---------------------------------------------------------------------------
+# 闸B·程序验算（PRD-C-010）：LLM 只负责"人话题 → 结构化载荷"的有界抽取，
+# pass/fail 判决只读 math_verify.verify()（纯 sympy，零 LLM）的 verdict。
+# ---------------------------------------------------------------------------
+EXTRACT_PROMPT = """你是数学验算载荷抽取器。把下面这道题的「题干 + 题面标准答案」抽成可被 sympy 程序验算的结构化载荷 JSON（验算对象 claimed = 题面标准答案）。
+
+题型: {qtype}
+题干: {stem}
+题面标准答案(待验算的 claimed): {answer}
+参考·另一次独立解答(仅帮助你理解答案格式，不是验算对象): {solved_answer}
+
+载荷契约（kind 四选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）：
+1. 方程求解: {{"kind":"equation_solve","equations":["x**2-5*x+6=0"],"unknowns":["x"],"claimed":["2","3"]}}
+   （claimed = 标准答案申报的全部解；只支持单未知数。🔴 程序按"解集完全相等"判：若题目含舍根/取值范围
+   约束——如分式方程验增根后舍去、几何/应用题边长必须为正——标答只保留部分解时，**不要用本 kind**
+   （claimed 会少于裸方程全部解被误判 fail）：能数值验保留解就改用 kind 3 numeric，否则输出 kind:none）
+2. 表达式等价(化简/展开/因式分解): {{"kind":"expr_equiv","expr_a":"题面原式","expr_b":"标准答案给的结果式"}}
+3. 数值计算: {{"kind":"numeric","expr":"3*7/2","claimed":"10.5","tol":1e-6}}
+4. 选择题: {{"kind":"choice","ground":{{上述1/2/3任一子载荷}},"options":{{"A":"2","B":"3"}},"claimed_correct":"B"}}
+   （options 的值 = 各选项的数学值；ground = 由题干建立的真值载荷；claimed_correct = 标准答案的选项字母）
+
+抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ 只输出 {{"kind":"none","reason":"原因"}}。
+只输出 JSON（不要解释）。"""
+
+_PAYLOAD_KINDS = {"equation_solve", "expr_equiv", "numeric", "choice"}
+
+# 题型分流（分流键=题型；题干骨架词兜底）：证明/开放/作图类不进 sympy
+_PROOF_QTYPE_RE = re.compile(r"(证明|求证|开放|作图|画图)")
+_PROOF_STEM_RE = re.compile(r"(求证|请证明|证明[:：]|尺规作图)")
+# 软校验骨架（代码正则级）：证明类题面应含"已知/求证/证明/作图"类结构
+_PROOF_SKELETON_RE = re.compile(r"(已知|求证|证明|作图)")
+
+
+def _is_proof_like(qtype: Any, stem: Any) -> bool:
+    """闸B 分流键：题型含 证明/开放/作图 或 题干带求证骨架 → 不进 sympy，走软校验+人审。"""
+    return bool(
+        _PROOF_QTYPE_RE.search(str(qtype or "")) or _PROOF_STEM_RE.search(str(stem or ""))
+    )
+
+
+def _proof_struct_ok(stem: Any) -> bool:
+    """轻量结构软校验：题面是否含「已知/求证/证明」类骨架（不验数学，只验结构）。"""
+    s = str(stem or "")
+    return len(s) >= 10 and bool(_PROOF_SKELETON_RE.search(s))
+
+
+def _append_card_note(item: dict, note: str) -> None:
+    """把验算标记行追加到题卡可见文本字段(solution)尾部 → UI 渲染 + 入库 analyze 同步可见。"""
+    sol = str(item.get("solution") or "").rstrip()
+    item["solution"] = f"{sol}\n\n> {note}" if sol else f"> {note}"
+
+
+async def _extract_payload(
+    stem: Any, answer: Any, solved_answer: Any, qtype: Any
+) -> dict | None:
+    """LLM 有界抽取：题干+标答 → 验算载荷 JSON。解析失败带错误反馈 retry，总共最多 2 次。
+
+    返回 None = 抽不成/LLM 异常 → 调用方按 degrade 处理（绝不外抛，G5）。
+    """
+    base = EXTRACT_PROMPT.format(
+        qtype=str(qtype or "解答"),
+        stem=str(stem or ""),
+        answer=str(answer or ""),
+        solved_answer=str(solved_answer or "(无)"),
+    )
+    feedback = ""
+    for _ in range(2):
+        try:
+            text = await _ainvoke_text([HumanMessage(content=base + feedback)])
+        except Exception:  # noqa: BLE001 — 抽取层异常不许逃逸炸 solve_explain → degrade
+            return None
+        data = _parse_json(text)
+        if isinstance(data, dict):
+            kind = data.get("kind")
+            if kind in _PAYLOAD_KINDS:
+                return data
+            if kind == "none":
+                return None  # LLM 明确说抽不成 → degrade，不浪费重试
+        feedback = (
+            "\n\n[错误反馈] 上次输出不是合法载荷 JSON（kind 必须是 "
+            "equation_solve/expr_equiv/numeric/choice/none 之一，且为合法 JSON）。"
+            "请严格按契约重新只输出 JSON。\n上次输出(截断)：" + (text or "")[:300]
+        )
+    return None
+
+
+async def _machine_verify(item: dict, solved_answer: Any) -> dict:
+    """程序验算一道题：抽载荷 → math_verify.verify（纯 sympy）。永不抛异常。
+
+    返回 {"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}。
+    """
+    payload = await _extract_payload(
+        item.get("stem"), item.get("answer"), solved_answer, item.get("qtype")
+    )
+    if payload is None:
+        return {"verdict": math_verify.DEGRADE, "detail": "载荷抽取失败/抽不成", "computed": None}
+    try:
+        # sympy solve/simplify 偶有耗时 → 丢线程池，不卡事件循环；
+        # 🔴 wait_for 墙钟预算（G5 反挂死）：病态载荷把 sympy 拖入无界计算时按 degrade 解锁流程
+        return await asyncio.wait_for(
+            asyncio.to_thread(math_verify.verify, payload), timeout=VERIFY_TIMEOUT_S
+        )
+    except TimeoutError:  # py3.11: asyncio.TimeoutError == TimeoutError
+        return {
+            "verdict": math_verify.DEGRADE,
+            "detail": f"验算超时（>{VERIFY_TIMEOUT_S}s），按未验算降级",
+            "computed": None,
+        }
+    except Exception as e:  # noqa: BLE001 — verify 自身永不抛，此处纯保险
+        return {"verdict": math_verify.DEGRADE, "detail": f"验算执行异常: {e}", "computed": None}
+
+
 def _norm(s: Any) -> str:
     return re.sub(r"\s+", "", str(s or "")).strip().lower()
 
@@ -567,15 +714,69 @@ def _conservation_ok(solved_kp: str, solved_grade: str, facts: dict) -> bool:
 
 
 async def _solve_one(stem: str) -> dict:
-    text = await _ainvoke_text([HumanMessage(content=SOLVE_PROMPT.format(stem=stem or ""))])
+    """真解一道题。🔴 LLM 调用异常吞掉返 {}（与 _extract_payload/_gene_judge_one 契约对齐）：
+    瞬时网关抖动绝不外抛炸掉 solve_explain/gene_gate 节点（G5），调用方按"没解出来"降级。"""
+    try:
+        text = await _ainvoke_text([HumanMessage(content=SOLVE_PROMPT.format(stem=stem or ""))])
+    except Exception:  # noqa: BLE001
+        return {}
     return _parse_json(text) or {}
 
 
-async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantState:
-    """④ solve 即验收 + 自愈1次。每题真解→产解析；解出≠标答→重生1次重解；
+async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> dict | None:
+    """REGEN 回炉一次：返回不带 check 的重生草稿（解析失败/LLM 异常返 None）。
 
-    🔴 重生版仍须过主考点+年级守恒（破则丢弃重生保留原版打⚠）；仍不过→check.badge=warn。
-    🔴 凡进 items 的题一律过本节点，无 check 不许进 assemble。
+    feedback（如 sympy 的 computed/detail）注回 prompt 的题干段，告诉 LLM 错在哪。
+    🔴 LLM 调用异常吞掉返 None（G5）：回炉是增强不是关卡，网关抖动时调用方按
+    "重生失败 → 保留原版打 ⚠/warn" 的既有降级路径走，绝不炸掉整轮出题。
+    """
+    stem = str(item.get("stem") or "")
+    if feedback:
+        stem = f"{stem}\n\n[程序验算反馈] {feedback}"
+    try:
+        regen_text = await _ainvoke_text(
+            [
+                HumanMessage(
+                    content=REGEN_PROMPT.format(
+                        kp_name=facts["kp_name"],
+                        grade=facts["grade"],
+                        stem=stem,
+                        level=item.get("level") or "normal",
+                        qtype=item.get("qtype") or facts["qtype"],
+                        difficulty=item.get("difficulty") or 3,
+                        injected_kp=json.dumps(item.get("injected_kp"), ensure_ascii=False),
+                    )
+                )
+            ]
+        )
+    except Exception:  # noqa: BLE001 — 回炉 LLM 异常 → 视同重生失败（G5）
+        return None
+    regen = _parse_json(regen_text)
+    if isinstance(regen, dict) and regen.get("stem"):
+        return {
+            "stem": regen.get("stem"),
+            "answer": regen.get("answer"),
+            "solution": regen.get("solution"),
+            "qtype": regen.get("qtype") or item.get("qtype"),
+            "difficulty": regen.get("difficulty") or item.get("difficulty"),
+            "level": regen.get("level") or item.get("level"),
+            "injected_kp": regen.get("injected_kp"),
+        }
+    return None
+
+
+async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantState:
+    """④ solve + 闸B 程序验算（PRD-C-010）。每题真解产解析 → 题型分流 → sympy 判决：
+
+    - 证明/开放/作图类（分流键=题型，题干骨架兜底）→ 不进 sympy，正则级结构软校验，
+      标 check.review=proof_needs_human 转人审（G3/FP2，不误杀）。
+    - 其余（计算/解答/填空/选择）→ LLM 抽验算载荷 → math_verify.verify（纯 sympy）：
+      pass → check.verify=sympy_pass 照常；
+      fail → 既有 REGEN 回炉 1 次（computed/detail 注回 prompt）→ 重生版再验（须 pass+守恒），
+             仍不过 → 保留原版 badge=warn + verify=fail_after_regen + 题卡尾追加可见提示；
+      degrade → 保留原有「LLM 独立解 + _norm 比对」自检作 fallback，verify=unverified + 可见提示。
+    🔴 判决只读 verify() 的 verdict，永不采信 LLM 自评；任何验算环节失败均降级继续，绝不抛（G5）。
+    🔴 凡进 items 的题一律过本节点，无 check 不许进 assemble（remove 后旧题带 check 原样通过）。
     """
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
@@ -587,66 +788,300 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
             out.append(item)
             continue
 
+        # ── 闸B·题型分流：证明/开放/作图 → 不进 sympy，软校验 + 人审标记 ──
+        if _is_proof_like(item.get("qtype") or facts["qtype"], item.get("stem")):
+            struct_ok = _proof_struct_ok(item.get("stem"))
+            item["check"] = {
+                "badge": "ok" if struct_ok else "warn",
+                "solved_answer": None,
+                "review": REVIEW_PROOF,
+            }
+            note = NOTE_PROOF_REVIEW
+            if not struct_ok:
+                note += "（题面缺「已知/求证/证明」类结构，请重点看）"
+            _append_card_note(item, note)
+            out.append(item)
+            continue
+
         solved = await _solve_one(item.get("stem", ""))
         solved_answer = solved.get("solved_answer")
         # solve 产出解析（给老师当判题依据；优先用阅卷解析）
         if solved.get("solution"):
             item["solution"] = solved.get("solution")
 
-        match = _norm(solved_answer) == _norm(item.get("answer"))
-        if match:
-            item["check"] = {"badge": "ok", "solved_answer": solved_answer}
+        # ── 闸B·程序验算：判决只读 verdict（G1/G2），不再用字符串比对自判 ──
+        res = await _machine_verify(item, solved_answer)
+        verdict = res.get("verdict")
+
+        if verdict == math_verify.PASS:
+            item["check"] = {
+                "badge": "ok",
+                "solved_answer": solved_answer,
+                "verify": VERIFY_SYMPY_PASS,
+                "verify_detail": res.get("detail"),
+                "computed": res.get("computed"),
+            }
             out.append(item)
             continue
 
-        # 解出 ≠ 标答 → 自愈：重生 1 次 → 重解
+        if verdict == math_verify.FAIL:
+            # sympy 判定标答真错 → 既有回炉机制重生 1 次，computed/detail 注回 prompt
+            healed = None
+            if MAX_HEAL >= 1:
+                feedback = (
+                    f"程序(sympy)验算判定该题题面标答错误：程序算得 computed={res.get('computed')}；"
+                    f"详情：{res.get('detail')}。请重新出一道题面与标答自洽、经得起程序验算的等价变式。"
+                )
+                draft = await _regen_once(item, facts, feedback=feedback)
+                if draft:
+                    resolved = await _solve_one(draft.get("stem", ""))
+                    if resolved.get("solution"):
+                        draft["solution"] = resolved.get("solution")
+                    # 🔴 重生版仍须过守恒校验 + 程序验算双闸
+                    cons = _conservation_ok(
+                        resolved.get("kp_name", ""), resolved.get("grade", ""), facts
+                    )
+                    r_res = await _machine_verify(draft, resolved.get("solved_answer"))
+                    if cons and r_res.get("verdict") == math_verify.PASS:
+                        draft["check"] = {
+                            "badge": "ok",
+                            "solved_answer": resolved.get("solved_answer"),
+                            "verify": VERIFY_SYMPY_PASS,
+                            "verify_detail": r_res.get("detail"),
+                            "computed": r_res.get("computed"),
+                        }
+                        # 🔴 闸A 标记随愈合保留（healed 整体替换不丢 gene → 入库 auxTags.gene_gate
+                        # 不断档 + 后续编辑轮 gene_gate 不重判/不静默换题）；原版无 gene（如持久化
+                        # 旧线程存量题）→ 按既有 skipped 语义留痕（闸A 没判过，REGEN 锁同骨架）。
+                        draft["gene"] = item.get("gene") or {
+                            "gate": GENE_GATE_SKIPPED,
+                            "reason": "healed-in-solve",
+                        }
+                        healed = draft
+            if healed:
+                out.append(healed)
+            else:
+                # 回炉后仍不过 → 保留原版标 ⚠，不拦截流程
+                item["check"] = {
+                    "badge": "warn",
+                    "solved_answer": solved_answer,
+                    "verify": VERIFY_FAIL_AFTER_REGEN,
+                    "verify_detail": res.get("detail"),
+                    "computed": res.get("computed"),
+                }
+                _append_card_note(item, NOTE_VERIFY_FAIL)
+                out.append(item)
+            continue
+
+        # ── degrade：sympy 吃不下（载荷抽不成/超范围）→ 保留既有 LLM 自检 fallback ──
+        match = _norm(solved_answer) == _norm(item.get("answer"))
+        if match:
+            item["check"] = {
+                "badge": "ok",
+                "solved_answer": solved_answer,
+                "verify": VERIFY_UNVERIFIED,
+                "verify_detail": res.get("detail"),
+            }
+            _append_card_note(item, NOTE_UNVERIFIED)
+            out.append(item)
+            continue
+
+        # 独立解 ≠ 标答（LLM 自检）→ 既有自愈：重生 1 次 → 重解 + 守恒
         healed = None
         if MAX_HEAL >= 1:
-            regen_text = await _ainvoke_text(
-                [
-                    HumanMessage(
-                        content=REGEN_PROMPT.format(
-                            kp_name=facts["kp_name"],
-                            grade=facts["grade"],
-                            stem=item.get("stem", ""),
-                            level=item.get("level") or "normal",
-                            qtype=item.get("qtype") or facts["qtype"],
-                            difficulty=item.get("difficulty") or 3,
-                            injected_kp=json.dumps(item.get("injected_kp"), ensure_ascii=False),
-                        )
-                    )
-                ]
-            )
-            regen = _parse_json(regen_text)
-            if isinstance(regen, dict) and regen.get("stem"):
-                resolved = await _solve_one(regen.get("stem", ""))
+            draft = await _regen_once(item, facts)
+            if draft:
+                resolved = await _solve_one(draft.get("stem", ""))
                 r_answer = resolved.get("solved_answer")
-                r_match = _norm(r_answer) == _norm(regen.get("answer"))
+                r_match = _norm(r_answer) == _norm(draft.get("answer"))
                 # 🔴 重生版仍须过守恒校验
                 cons = _conservation_ok(
                     resolved.get("kp_name", ""), resolved.get("grade", ""), facts
                 )
                 if r_match and cons:
-                    healed = {
-                        "stem": regen.get("stem"),
-                        "answer": regen.get("answer"),
-                        "solution": resolved.get("solution") or regen.get("solution"),
-                        "qtype": regen.get("qtype") or item.get("qtype"),
-                        "difficulty": regen.get("difficulty") or item.get("difficulty"),
-                        "level": regen.get("level") or item.get("level"),
-                        "injected_kp": regen.get("injected_kp"),
-                        "check": {"badge": "ok", "solved_answer": r_answer},
+                    draft["solution"] = resolved.get("solution") or draft.get("solution")
+                    draft["check"] = {
+                        "badge": "ok",
+                        "solved_answer": r_answer,
+                        "verify": VERIFY_UNVERIFIED,
                     }
+                    _append_card_note(draft, NOTE_UNVERIFIED)
+                    # 🔴 闸A 标记随愈合保留（同 FAIL 自愈路径：不丢 gene、不被编辑轮重判）
+                    draft["gene"] = item.get("gene") or {
+                        "gate": GENE_GATE_SKIPPED,
+                        "reason": "healed-in-solve",
+                    }
+                    healed = draft
 
         if healed:
             out.append(healed)
         else:
-            # 守恒破 或 重生仍不过 → 保留原版打 ⚠
+            # 守恒破 或 重生仍不过 → 保留原版打 ⚠（仍属未经程序验算）
             item["check"] = {
                 "badge": "warn",
                 "solved_answer": solved_answer,
+                "verify": VERIFY_UNVERIFIED,
+                "verify_detail": res.get("detail"),
             }
+            _append_card_note(item, NOTE_UNVERIFIED)
             out.append(item)
+
+    return {"items": out, "messages": []}
+
+
+# ---------------------------------------------------------------------------
+# 闸A·基因闸（验"是不是平行题"）：generate / exec_regenerate / exec_add 产出新变式后、
+# solve_explain 之前过本闸。与闸B（答案对不对）正交：本闸只比 DNA 基因，不验数学。
+# 🔴 宏观控制流仍是确定性 DAG —— 闸A是图上固定节点，LLM 只产 judge JSON，
+#    pass/rework 判决 = 纯函数 gene_gate_decision（可单测），不采信 LLM 自评流程走向。
+# ---------------------------------------------------------------------------
+GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下面这道变式是否是母题的「平行题」：骨架基因(题型/难度/解法结构)必须一致，皮肤(数字/场景)必须已换。
+
+母题摘要：
+- 主考点: {kp_name} / 年级: {grade}
+- 题型: {qtype} / 难度: {difficulty}
+- 解法骨架: {skeleton}
+- 题干: {mother_stem}
+
+变式题（申报 level={level} / 题型 {v_qtype} / 难度 {v_difficulty}）：
+{variant_stem}
+
+判别标准：
+- qtype_match: 变式题型与母题一致。
+- difficulty_match: level=normal 应与母题难度相同；level=hard 允许且应当比母题高一档（恰高一档算 match；高两档以上或反而变简单不算）。
+- structure_match: 解法主结构/骨架与母题一致（难题在主骨架外综合一个相邻考点不算破坏结构）。
+- surface_swapped: 数字/场景至少一类已换；与母题题面几乎相同(只是复读) = false。
+
+只输出一个 JSON（不要解释）：
+{{"qtype_match": true/false, "difficulty_match": true/false, "structure_match": true/false, "surface_swapped": true/false, "reason": "一句话依据"}}"""
+
+# 骨架基因键（必须全 match）；皮肤键（必须 swapped）
+_GENE_SKELETON_KEYS = ("qtype_match", "difficulty_match", "structure_match")
+
+
+def _clip(s: Any, n: int = 300) -> str:
+    """截断长文本（控制 judge prompt 预算：只给摘要+题干，不塞全解析）。"""
+    t = str(s or "")
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def _gene_bool(v: Any) -> bool:
+    """宽容布尔：LLM 偶发吐字符串 "true"/"false" 也能吃；其余非真值一律 False（偏保守→rework）。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "是")
+    if isinstance(v, (int, float)):
+        return bool(v)
+    return False
+
+
+def gene_gate_decision(judge: dict) -> Literal["pass", "rework"]:
+    """🔴 闸A 纯函数判决（零 LLM / 零 IO，可单测）。
+
+    - 骨架基因（题型/难度/结构）任一不 match → rework（一变就不是平行题）；
+    - surface_swapped=False → rework（皮肤没换 = 复读母题）；
+    - 键缺失/类型怪 → 按 False 处理（保守偏 rework，绝不静默放行）。
+    """
+    skeleton_ok = all(_gene_bool(judge.get(k)) for k in _GENE_SKELETON_KEYS)
+    surface_ok = _gene_bool(judge.get("surface_swapped"))
+    return "pass" if (skeleton_ok and surface_ok) else "rework"
+
+
+def _gene_feedback(judge: dict) -> str:
+    """rework 时给 REGEN 回炉的人话反馈：点名哪条基因不过 + LLM 的 reason。"""
+    fails = []
+    if not _gene_bool(judge.get("qtype_match")):
+        fails.append("题型变了")
+    if not _gene_bool(judge.get("difficulty_match")):
+        fails.append("难度档不对")
+    if not _gene_bool(judge.get("structure_match")):
+        fails.append("解法结构变了")
+    if not _gene_bool(judge.get("surface_swapped")):
+        fails.append("皮肤没换(数字/场景照抄母题)")
+    reason = str(judge.get("reason") or "").strip()
+    return (
+        "基因闸判定与母题平行度不足：" + ("、".join(fails) or "未知")
+        + (f"（{reason}）" if reason else "")
+        + "。请重出一道：题型/难度档/解法结构与母题保持一致，只换数字与场景。"
+    )
+
+
+async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
+    """一次轻量 LLM 基因比对（受约束 JSON）。调用失败/解析失败返 None（调用方按 skipped 放行）。"""
+    prompt = GENE_JUDGE_PROMPT.format(
+        kp_name=facts["kp_name"],
+        grade=facts["grade"],
+        qtype=facts["qtype"],
+        difficulty=facts.get("mother_difficulty") or "?",
+        skeleton=_clip(facts.get("skeleton"), 200),
+        mother_stem=_clip(facts.get("stem"), 300),
+        level=item.get("level") or "normal",
+        v_qtype=item.get("qtype") or "?",
+        v_difficulty=item.get("difficulty") or "?",
+        variant_stem=_clip(item.get("stem"), 300),
+    )
+    try:
+        text = await _ainvoke_text([HumanMessage(content=prompt)])
+    except Exception:  # noqa: BLE001 — 闸A是增强不是关卡：judge 异常绝不外抛卡死出题（G5）
+        return None
+    data = _parse_json(text)
+    return data if isinstance(data, dict) else None
+
+
+async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState:
+    """闸A 节点：对每道**未判过基因**的变式做母题基因比对。
+
+    - pass → item.gene={gate:"pass"}；
+    - rework → 带 reason 走既有 _regen_once 回炉 1 次 → 重生版再判：
+        re_judge 过 **且 代码级 _conservation_ok 守恒校验过**（主考点+年级硬守恒贯穿重生，
+          不只采信 LLM）→ 换用重生版（gene=pass，🔴 不带 check → 下游 solve_explain 闸B 必判，正交不破）；
+        仍不过/守恒破/重生失败 → 保留原版 gene={gate:"warn", reason}（v1 只警示不硬拦）；
+    - judge 失败 → gene={gate:"skipped"} 放行。
+    🔴 已带 gene 的题（exec_add 追加时的旧题等）原样通过，不重判不重复花预算。
+    """
+    facts = _mother_facts(state)
+    items = list(state.get("items") or [])
+    out: list[dict] = []
+
+    for it in items:
+        item = dict(it)
+        if item.get("gene"):  # 已判过 → 不重判（旧题预算保护）
+            out.append(item)
+            continue
+
+        judge = await _gene_judge_one(item, facts)
+        if judge is None:
+            item["gene"] = {"gate": GENE_GATE_SKIPPED}
+            out.append(item)
+            continue
+
+        if gene_gate_decision(judge) == "pass":
+            item["gene"] = {"gate": GENE_GATE_PASS}
+            out.append(item)
+            continue
+
+        # rework：既有回炉重生 1 次（基因反馈注回 prompt）→ 重生版再判一次
+        draft = await _regen_once(item, facts, feedback=_gene_feedback(judge))
+        if draft:
+            re_judge = await _gene_judge_one(draft, facts)
+            if re_judge is not None and gene_gate_decision(re_judge) == "pass":
+                # 🔴 重生稿接受前仍须过**代码级**守恒闸（主考点+年级硬守恒贯穿"重生"，
+                # 不能只采信 LLM re_judge）：破守恒 → 丢弃重生稿，落下方"保留原版打 warn"。
+                resolved = await _solve_one(draft.get("stem", ""))
+                if _conservation_ok(
+                    resolved.get("kp_name", ""), resolved.get("grade", ""), facts
+                ):
+                    draft["gene"] = {"gate": GENE_GATE_PASS}
+                    out.append(draft)  # 不带 check → solve_explain（闸B）必判
+                    continue
+
+        # 回炉仍不过 → 保留原版打 warn（不拦截入库，aux_tags + 题卡可见警示）
+        item["gene"] = {
+            "gate": GENE_GATE_WARN,
+            "reason": str(judge.get("reason") or "").strip() or None,
+        }
+        out.append(item)
 
     return {"items": out, "messages": []}
 
@@ -659,13 +1094,38 @@ def _fmt_item(idx: int, it: dict) -> str:
     inj_s = f"（综合相邻考点：{inj}）" if inj else ""
     warn_s = ""
     if badge != "ok":
-        sa = (it.get("check") or {}).get("solved_answer")
-        warn_s = f"\n> ⚠ 我没算准（独立解得「{sa}」与标答不一致），老师重点看。"
+        chk = it.get("check") or {}
+        # 🔴 防双写：solve_explain 已把对应 NOTE_* 追加进 solution（_append_card_note，
+        # 随入库 analyze 持久），题卡渲染时同义警示只出一遍 —— solution 已含则跳过 warn_s。
+        sol = str(it.get("solution") or "")
+        if chk.get("review") == REVIEW_PROOF:
+            if NOTE_PROOF_REVIEW not in sol:
+                warn_s = f"\n> {NOTE_PROOF_REVIEW}"
+        elif chk.get("verify") == VERIFY_FAIL_AFTER_REGEN:
+            if NOTE_VERIFY_FAIL not in sol:
+                computed = chk.get("computed")
+                warn_s = (
+                    f"\n> ⚠ 程序验算未通过（sympy 算得「{computed}」与标答不符，回炉一次仍未过），请老师核对。"
+                )
+        else:
+            if NOTE_UNVERIFIED not in sol:
+                sa = chk.get("solved_answer")
+                warn_s = f"\n> ⚠ 我没算准（独立解得「{sa}」与标答不一致），老师重点看。"
+    # 闸A·基因闸警示（与闸B 正交：badge=ok 的题也可能平行度存疑）
+    gene_s = ""
+    gene = it.get("gene") or {}
+    if gene.get("gate") == GENE_GATE_WARN:
+        g_reason = gene.get("reason")
+        gene_s = (
+            f"\n> {NOTE_GENE_WARN}"
+            + (f"（{g_reason}）" if g_reason else "（题型/难度/解法结构或换皮程度与母题不平行）")
+            + "，请老师确认。"
+        )
     return (
         f"### 第 {idx} 题 {mark}（{lvl}·{it.get('qtype', '')}·难度{it.get('difficulty', '?')}）{inj_s}\n\n"
         f"{it.get('stem', '')}\n\n"
         f"**答案**：{it.get('answer', '')}\n\n"
-        f"**解析**：{it.get('solution', '')}{warn_s}\n"
+        f"**解析**：{it.get('solution', '')}{warn_s}{gene_s}\n"
     )
 
 
@@ -691,7 +1151,17 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
 # 交互层（设计 §6）：多轮 WAIT → parse 判 5 意图 → 三层漏斗分诊
 #   修正 / 编辑(remove·regenerate·add) / 确认 / 答疑 / clarify
 # ===========================================================================
-PARSE_PROMPT = """你是举一反三 agent 的指令解析器。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
+# --- 受约束分类器（PRD-C-010 G4/FP4）：intent 闭集枚举 + 物理护栏 validate_instruction ---
+INTENT_REVISE = "修正"  # 任务口径里的 revise
+INTENT_EDIT = "编辑"  # remove/regenerate/add 细分在 ops.action（任务口径 remove|regenerate|add）
+INTENT_CONFIRM = "确认"  # 任务口径里的 confirm
+INTENT_QA = "答疑"  # 任务口径里的 qa
+INTENT_CLARIFY = "clarify"
+VALID_INTENTS = {INTENT_REVISE, INTENT_EDIT, INTENT_CONFIRM, INTENT_QA, INTENT_CLARIFY}
+EDIT_ACTIONS = {"remove", "regenerate", "add"}
+ADD_COUNT_MAX = 5  # 与 exec_add 单轮上限同口径（min(n,5)），护栏在源头就钳掉
+
+PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类器：intent 只能从 5 个枚举值里选 1 个，禁止发明新值）。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
 
 母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
 - 主考点: {kp_name}
@@ -700,7 +1170,16 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器。老师正在看�
 老师最新一句话：
 {utterance}
 
-把它解析成一个 JSON（只输出 JSON，不要解释）：
+【分类标准】逐条对照，命中哪条选哪条；都不命中选 "clarify"（其中"编辑"细分 3 种 action）：
+1. "答疑" —— 判别：只是在问某题怎么解/为什么，不要求改动任何题。例：「为什么第3题选B？」
+2. "编辑"+remove —— 判别：点名删掉某道题，且能给出 1~{n} 内的题号。例：「第2题删掉」→ ops=[{{"action":"remove","index":2}}]
+3. "编辑"+regenerate —— 判别：点名重出/换掉/改造某道题，且能给出 1~{n} 内的题号。例：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
+4. "编辑"+add —— 判别：要求再加 N 道题（N 为正整数，单轮最多 5）。例：「再来2道难的」→ ops=[{{"action":"add","count":2,"note":"难的"}}]
+5. "修正" —— 判别：老师纠正的是母题的年级或考点本身（不是改某道变式）。例：「这其实是八年级的题」→ mother_correction={{"grade":"八年级","kp":null}}
+6. "确认" —— 判别：老师对这组题满意，要入库/保存/结束。例：「这组可以了，入库吧」
+7. "clarify" —— 判别：撞硬守恒（要换主考点/改年级）、题号给不出或超出 1~{n}、或意图真说不清。例：「改成考函数的题」（撞守恒）
+
+只输出一个 JSON（不要解释、不要 markdown fence）：
 {{
   "intent": "修正|编辑|确认|答疑|clarify",   // 5 选 1
   "ops": [                                  // intent=编辑 时的操作列表（其余为空数组）
@@ -713,15 +1192,11 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器。老师正在看�
   "confidence": 0.0~1.0
 }}
 
-判定规则：
-- "为什么第N题…/这题怎么解/讲讲" = 答疑（只问不改题）。
-- "第N题删掉/不要第N题" = 编辑 remove(index=N)。
-- "第N题重出/换一道/改一下第N题" = 编辑 regenerate(index=N)。
-- "再来2道/多出几道难的/加道选择题" = 编辑 add(count=N)。
-- "这是八年级/考点应该是X/我说错了是…" = 修正（填 mother_correction）。
-- "这组可以了/入库/就这些/保存" = 确认。
-- 撞守恒(要改主考点为别的考点 / 超出该年级) 或 真说不清 = clarify。
-- index 从 1 起；拿不准 index 时 ops 留空、intent 取 clarify。"""
+硬约束（违反任何一条，程序护栏会把你的输出整体降级为 clarify）：
+- intent 只能是上述 5 个枚举值之一；ops.action 只能是 remove/regenerate/add。
+- remove/regenerate 的 index 从 1 起、必须 ≤ {n}；拿不准题号时 ops 留空、intent 取 "clarify"。
+- add 的 count 必须是正整数；intent=答疑/确认/修正/clarify 时 ops 必须为空数组。
+- 解析不出来 = "clarify"，绝不猜成删题。"""
 
 
 def _items_brief(items: list[dict]) -> str:
@@ -731,6 +1206,103 @@ def _items_brief(items: list[dict]) -> str:
         stem = (it.get("stem") or "").replace("\n", " ")[:80]
         lines.append(f"第{i + 1}题: {stem}")
     return "\n".join(lines)
+
+
+def _to_int(v: Any) -> int | None:
+    """宽容转 int（str/float 可转则转），失败返 None。bool 不算数字。"""
+    if isinstance(v, bool):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]:
+    """🔴 物理护栏（PRD-C-010 G4/FP4）：把 LLM 分类器输出钳成受约束载荷。
+
+    纯函数（零 LLM、零 IO，可单测）。输入 = _parse_json 的产物（可能为 None/非 dict），
+    输出 = 规整后的 pending 雏形（不含 utterance，由 parse_instruction 补）。
+
+    规则表：
+    - R0 解析失败/非 dict → 整体降级 clarify（永不默认成 remove）。
+    - R1 intent 不在 VALID_INTENTS 白名单 → clarify。
+    - R2 ops 白名单清洗：仅保留 action∈EDIT_ACTIONS 的 dict op；index/count 强转 int。
+    - R3 remove/regenerate：index 必须给出且 ∈ [1, current_item_count]，
+         任何一个越界/缺失 → 整体降级 clarify（让 agent 反问而不是乱删）。
+    - R4 add：count 缺失/非法/≤0 → 钳为 1；> ADD_COUNT_MAX → 钳为 ADD_COUNT_MAX。
+    - R5 intent=编辑 但 ops 清洗后为空 → clarify。
+    - R6 答疑/确认/修正/clarify → ops 强制清空（物理保证答疑/确认带不动编辑 op；
+         answer_question 本身 return 不含 items，双保险不破坏）。
+    - R7 同句多**类**操作（如 remove+add）→ 整体降级 clarify 请老师分句说：
+         执行层（dispatch→exec_*）单轮只走一类分支，混类会被静默丢弃半截，且
+         remove 后题号位移会使同句其它 index 失效 —— 与 R3「绝不部分执行」同哲学。
+         同类多 op（删第2、3题 / 重出第1、2题）合法保留，exec_* 一次吃完。
+    """
+
+    def _normalized(p: dict) -> dict[str, Any]:
+        return {
+            "intent": p.get("intent"),
+            "ops": [],
+            "knobs": p.get("knobs") if isinstance(p.get("knobs"), dict) else {},
+            "comp": p.get("comp"),
+            "extra_constraints": (
+                list(p.get("extra_constraints"))
+                if isinstance(p.get("extra_constraints"), list)
+                else []
+            ),
+            "mother_correction": (
+                p.get("mother_correction") if isinstance(p.get("mother_correction"), dict) else {}
+            ),
+            "confidence": p.get("confidence"),
+        }
+
+    def _clarify(base: dict[str, Any] | None = None) -> dict[str, Any]:
+        out = base if base is not None else _normalized({})
+        out["intent"] = INTENT_CLARIFY
+        out["ops"] = []
+        return out
+
+    if not isinstance(parsed, dict):  # R0
+        return _clarify()
+
+    base = _normalized(parsed)
+    intent = base["intent"]
+    if intent not in VALID_INTENTS:  # R1
+        return _clarify(base)
+
+    if intent != INTENT_EDIT:  # R6：非编辑意图物理上带不动 ops
+        return base
+
+    # intent = 编辑：清洗 ops（R2~R5）
+    raw_ops = parsed.get("ops") if isinstance(parsed.get("ops"), list) else []
+    ops: list[dict[str, Any]] = []
+    for op in raw_ops:
+        if not isinstance(op, dict):
+            continue
+        action = op.get("action")
+        if action not in EDIT_ACTIONS:  # R2
+            continue
+        clean: dict[str, Any] = {"action": action}
+        if op.get("note"):
+            clean["note"] = str(op.get("note"))
+        if action in ("remove", "regenerate"):
+            idx = _to_int(op.get("index"))
+            if idx is None or not (1 <= idx <= current_item_count):
+                return _clarify(base)  # R3：越界/缺号 → 反问，绝不乱删
+            clean["index"] = idx
+        else:  # add
+            cnt = _to_int(op.get("count"))
+            if cnt is None or cnt <= 0:
+                cnt = 1  # R4 下限
+            clean["count"] = min(cnt, ADD_COUNT_MAX)  # R4 上限
+        ops.append(clean)
+    if not ops:
+        return _clarify(base)  # R5
+    if len({op["action"] for op in ops}) > 1:
+        return _clarify(base)  # R7：混类操作绝不部分执行 → 反问分句
+    base["ops"] = ops
+    return base
 
 
 async def parse_instruction(state: VariantState, config: RunnableConfig) -> VariantState:
@@ -748,20 +1320,10 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
         utterance=utterance or "(空)",
     )
     text = await _ainvoke_text([HumanMessage(content=prompt)])
-    parsed = _parse_json(text) or {}
-    intent = parsed.get("intent")
-    if intent not in {"修正", "编辑", "确认", "答疑", "clarify"}:
-        intent = "clarify"
-    pending = {
-        "intent": intent,
-        "ops": parsed.get("ops") or [],
-        "knobs": parsed.get("knobs") or {},
-        "comp": parsed.get("comp"),
-        "extra_constraints": parsed.get("extra_constraints") or [],
-        "mother_correction": parsed.get("mother_correction") or {},
-        "confidence": parsed.get("confidence"),
-        "utterance": utterance,
-    }
+    parsed = _parse_json(text)
+    # 🔴 物理护栏（G4/FP4）：白名单 + 越界钳制 + 解析失败整体降级 clarify（永不默认成 remove）
+    pending = validate_instruction(parsed, len(items))
+    pending["utterance"] = utterance
     return {"pending": pending, "messages": []}
 
 
@@ -785,7 +1347,8 @@ def dispatch(state: VariantState) -> Literal["remove", "regenerate", "add", "ask
     """三层漏斗收口：硬旋钮命中 → remove/regenerate/add；ops 空/说不清 → clarify。"""
     ops = (state.get("pending") or {}).get("ops") or []
     actions = {str(op.get("action")) for op in ops if isinstance(op, dict)}
-    # 优先级：remove > regenerate > add（同句多操作时分步走，下游回 ASM 再 WAIT）
+    # 🔴 护栏 R7（validate_instruction）保证 ops 只含单一 action 类（混类已降级 clarify），
+    # 此处仅作收口映射；优先级序留作防御（万一上游漏钳也不会静默丢弃后执行半截）。
     if "remove" in actions:
         return "remove"
     if "regenerate" in actions:
@@ -1120,6 +1683,7 @@ graph.add_node("analyze", analyze)
 graph.add_node("classify", classify)
 graph.add_node("clarify", clarify)
 graph.add_node("generate", generate)
+graph.add_node("gene_gate", gene_gate)  # 闸A·基因闸（新变式 → 平行度比对 → 闸B）
 graph.add_node("solve_explain", solve_explain)
 graph.add_node("assemble", assemble)
 # 交互层节点（多轮 WAIT 后的下一句）
@@ -1160,16 +1724,17 @@ graph.add_conditional_edges(
 graph.add_edge("clarify", END)
 
 
-# generate：裸奔兜底时只吐消息、无 items → 结束；正常 → solve_explain
-def after_generate(state: VariantState) -> Literal["solve_explain", "done"]:
+# generate：裸奔兜底时只吐消息、无 items → 结束；正常 → 闸A 基因闸 → 闸B solve_explain
+def after_generate(state: VariantState) -> Literal["gene_gate", "done"]:
     if not state.get("items"):
         return "done"
-    return "solve_explain"
+    return "gene_gate"
 
 
 graph.add_conditional_edges(
-    "generate", after_generate, {"solve_explain": "solve_explain", "done": END}
+    "generate", after_generate, {"gene_gate": "gene_gate", "done": END}
 )
+graph.add_edge("gene_gate", "solve_explain")
 graph.add_edge("solve_explain", "assemble")
 graph.add_edge("assemble", END)
 
@@ -1214,10 +1779,11 @@ graph.add_conditional_edges(
     },
 )
 
-# remove/regenerate/add 三原语 → 过 solve_explain（凡进 items 的题一律重判）→ assemble
+# 三原语收口：regenerate/add 产**新变式** → 先过闸A基因闸再到闸B；
+# remove 只删不产新题 → 直连 solve_explain（旧题带 check+gene 双标，两闸都原样通过）。
 graph.add_edge("exec_remove", "solve_explain")
-graph.add_edge("exec_regenerate", "solve_explain")
-graph.add_edge("exec_add", "solve_explain")
+graph.add_edge("exec_regenerate", "gene_gate")
+graph.add_edge("exec_add", "gene_gate")
 
 # 答疑/clarify → END（不改 items，回等待下一句）
 graph.add_edge("answer_question", END)

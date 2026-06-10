@@ -301,6 +301,20 @@ def _apply_labels(
     aux: dict[str, Any] = {"agent": IMPORT_SOURCE, "role": role}
     if facts.get("image_url"):
         aux["sourceImage"] = facts["image_url"]
+    # 🔴 PRD-C-010 闸B 验算标记透传（item.check 由 solve_explain 填）：
+    # verify = sympy_pass / fail_after_regen / unverified（入库可查的真机验证抓手）；
+    # review = proof_needs_human（证明/开放类人审兜底——labelStatus 维持 LABEL_STATUS_AI=1，
+    # 待审语义挂 auxTags.review，不发明新 label_status 值）。
+    check = (item or {}).get("check") or {}
+    if check.get("verify"):
+        aux["verify"] = str(check["verify"])
+    if check.get("review"):
+        aux["review"] = str(check["review"])
+    # 🔴 PRD-C-010 闸A·基因闸标记透传（item.gene 由 gene_gate 填）：
+    # gene_gate = pass / warn / skipped（平行度入库可查抓手；v1 只警示不硬拦）。
+    gene = (item or {}).get("gene") or {}
+    if gene.get("gate"):
+        aux["gene_gate"] = str(gene["gate"])
     bo["auxTags"] = aux
 
 
