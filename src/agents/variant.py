@@ -23,7 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -84,14 +88,134 @@ def _content_text(resp: BaseMessage) -> str:
     return str(c)
 
 
+# ---------------------------------------------------------------------------
+# LLM 往返持久化（PRD-C-009：给维护者过 prompt/排查用）
+# —— 每次 LLM 调用落一行 JSONL：填充后的完整 prompt + 模型原始返回 + 哪个 prompt + 耗时。
+# 关掉设 env VARIANT_LLM_TRACE=0；落盘失败绝不影响主流程。
+# ---------------------------------------------------------------------------
+_LLM_TRACE_ENABLED = os.getenv("VARIANT_LLM_TRACE", "1").lower() not in ("0", "false", "no")
+_LLM_TRACE_PATH = Path(__file__).resolve().parents[2] / "data" / "llm_trace.jsonl"
+_LLM_TRACE_SEQ = 0  # 进程内自增序号（同一进程内调用顺序）
+
+# prompt 内容前缀 → 标签（哪个 prompt）。新增/造同含「基于母题 DNA」，先判 add 再判 generate。
+_TRACE_MARKERS: list[tuple[str, str]] = [
+    ("看这张题目图", "analyze"),
+    ("独立解出的答案与题面标答不一致", "regen"),
+    ("你是严谨的数学阅卷老师", "solve"),
+    ("举一反三 agent 的指令解析器", "parse"),
+    ("老师对下面这组变式题的某道有疑问", "answer"),
+    ("**新增**", "add"),
+    ("举一反三变式", "generate"),
+]
+
+
+def _msg_text(m: BaseMessage) -> str:
+    """取一条消息的文本（多模态 list 取其中 text part）。"""
+    c = m.content
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        for p in c:
+            if isinstance(p, dict) and p.get("type") == "text":
+                return p.get("text", "")
+    return ""
+
+
+def _trace_label(messages: list[BaseMessage]) -> str:
+    head = "".join(_msg_text(m) for m in messages)[:120]
+    for marker, label in _TRACE_MARKERS:
+        if marker in head:
+            return label
+    return "unknown"
+
+
+def _serialize_request(messages: list[BaseMessage]) -> list[dict]:
+    out: list[dict] = []
+    for m in messages:
+        role = m.__class__.__name__
+        c = m.content
+        if isinstance(c, str):
+            out.append({"role": role, "text": c})
+        elif isinstance(c, list):
+            parts: list[dict] = []
+            for p in c:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    parts.append({"text": p.get("text", "")})
+                elif isinstance(p, dict) and p.get("type") == "image_url":
+                    parts.append({"image_url": (p.get("image_url") or {}).get("url")})
+                else:
+                    parts.append({"raw": str(p)})
+            out.append({"role": role, "parts": parts})
+        else:
+            out.append({"role": role, "text": str(c)})
+    return out
+
+
+def _trace_llm(
+    label: str,
+    messages: list[BaseMessage],
+    response_text: str,
+    response_raw: Any,
+    duration_ms: int,
+    error: str | None = None,
+    retried: bool = False,
+) -> None:
+    if not _LLM_TRACE_ENABLED:
+        return
+    global _LLM_TRACE_SEQ
+    _LLM_TRACE_SEQ += 1
+    try:
+        rec = {
+            "seq": _LLM_TRACE_SEQ,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "model": settings.DEFAULT_MODEL,
+            "duration_ms": duration_ms,
+            "retried": retried,
+            "request": _serialize_request(messages),
+            "response": response_text,
+            "response_raw": response_raw,
+        }
+        if error:
+            rec["error"] = error
+        _LLM_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _LLM_TRACE_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass  # 持久化绝不拖垮主流程
+
+
 async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
-    """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。"""
+    """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
+
+    🔴 每次调用落 JSONL 往返记录（_trace_llm）：发送的完整 prompt + 原始返回。
+    """
     model = _model().bind(max_tokens=settings.VARIANT_MAX_TOKENS)
-    resp = await model.ainvoke(messages)
-    text = _content_text(resp).strip()
-    if not text and retry:
+    label = _trace_label(messages)
+    t0 = time.monotonic()
+    try:
         resp = await model.ainvoke(messages)
         text = _content_text(resp).strip()
+        retried = False
+        if not text and retry:
+            retried = True
+            resp = await model.ainvoke(messages)
+            text = _content_text(resp).strip()
+    except Exception as e:  # noqa: BLE001 — 记下失败往返后照常抛
+        _trace_llm(label, messages, "", None, int((time.monotonic() - t0) * 1000), error=str(e))
+        raise
+    dur = int((time.monotonic() - t0) * 1000)
+    # 原始返回：content（思考型可能是 parts list）+ reasoning/usage 等附加信息（best-effort）
+    raw: dict[str, Any] = {}
+    try:
+        raw["content"] = resp.content
+        if getattr(resp, "additional_kwargs", None):
+            raw["additional_kwargs"] = resp.additional_kwargs
+        if getattr(resp, "response_metadata", None):
+            raw["response_metadata"] = resp.response_metadata
+    except Exception:
+        raw = {"content": str(getattr(resp, "content", ""))}
+    _trace_llm(label, messages, text, raw, dur, retried=retried)
     return text
 
 
