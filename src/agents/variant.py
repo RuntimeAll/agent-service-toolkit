@@ -32,8 +32,10 @@ from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import ensure_config
 from langgraph.graph import END, MessagesState, StateGraph
 
+from agents import conv_trace
 from agents.variant_support import anchor_subject, persist_items
 from core import get_model, settings
 
@@ -192,6 +194,10 @@ async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
     """
     model = _model().bind(max_tokens=settings.VARIANT_MAX_TOKENS)
     label = _trace_label(messages)
+    # 用户级/会话级归属：从 graph config 取 thread_id + ruoyi_token(→teacher_id)
+    conf = (ensure_config() or {}).get("configurable", {}) or {}
+    thread_id = conf.get("thread_id")
+    teacher_id = conv_trace.teacher_id_from_token(conf.get("ruoyi_token"))
     t0 = time.monotonic()
     try:
         resp = await model.ainvoke(messages)
@@ -202,7 +208,13 @@ async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
             resp = await model.ainvoke(messages)
             text = _content_text(resp).strip()
     except Exception as e:  # noqa: BLE001 — 记下失败往返后照常抛
-        _trace_llm(label, messages, "", None, int((time.monotonic() - t0) * 1000), error=str(e))
+        dur = int((time.monotonic() - t0) * 1000)
+        _trace_llm(label, messages, "", None, dur, error=str(e))
+        conv_trace.write(
+            teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
+            model=settings.DEFAULT_MODEL, request=_serialize_request(messages),
+            response="", response_raw=None, duration_ms=dur, error=str(e),
+        )
         raise
     dur = int((time.monotonic() - t0) * 1000)
     # 原始返回：content（思考型可能是 parts list）+ reasoning/usage 等附加信息（best-effort）
@@ -216,6 +228,12 @@ async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
     except Exception:
         raw = {"content": str(getattr(resp, "content", ""))}
     _trace_llm(label, messages, text, raw, dur, retried=retried)
+    # 🔴 用户级对话持久化（优化基础数据源）→ 独立解耦库 conv_trace
+    conv_trace.write(
+        teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
+        model=settings.DEFAULT_MODEL, request=_serialize_request(messages),
+        response=text, response_raw=raw, duration_ms=dur, retried=retried,
+    )
     return text
 
 
