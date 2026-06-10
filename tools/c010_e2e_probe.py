@@ -1,6 +1,6 @@
 """PRD-C-010 举一反三可靠性加固 · 真机 e2e 探针。
 
-直接驱动编译后的 variant graph（不经 :8080 服务，模式同 c009_regression.py），
+直接驱动编译后的 variant graph（不经 :8093 服务，模式同 c009_regression.py），
 真 LLM + 真 OSS 题图 + 真 RuoYi 入库 + 真 DB 回查，断言四件事：
 
   P1 闸B: 每道题带程序验算标记 check.verify ∈ {sympy_pass, unverified, fail_after_regen}

@@ -3,15 +3,15 @@
 一张 OSS 题图 → 过 /variant/stream（analyze → classify → [clarify|generate] → solve_explain → assemble）。
 逐 SSE 帧统计：token 流（analyze/generate 流式）+ 最终 assemble 题组消息。
 
-用法（toolkit 根，venv 内；先起服务 PORT=8080）:
+用法（toolkit 根，venv 内；先起服务 PORT=8093）:
     .venv/Scripts/python.exe tools/variant_smoke.py [可选: OSS 图 URL]
 
 前置：
-  - toolkit service :8080 在跑（uvicorn src.service）。
+  - toolkit service :8093 在跑（uvicorn src.service）。
   - LLM lk888 可达（COMPATIBLE_* 已配，走默认网络，别套 trust_env=False —— 那是治本地 localhost 的）。
   - classify 锚图谱要 MySQL miskt_data2:3307 在跑（不在 → 降级，仍会走 clarify，不致命）。
 
-🔴 httpx 调本地 :8080 用 trust_env=False（免疫本机 Clash 代理）；别用 curl 传中文（编码坑）。
+🔴 httpx 调本地 :8093 用 trust_env=False（免疫本机 Clash 代理）；别用 curl 传中文（编码坑）。
 🔴 帧分隔 = \n\n（toolkit service 是裸 StreamingResponse 直 yield 'data: ...\\n\\n'，
    不是 sse-starlette 的 \r\n\r\n —— 实测踩过：用 \r\n\r\n 拆会一帧都解不出）。按 raw 字节拆，别用 text 迭代器。
 """
@@ -22,7 +22,7 @@ import sys
 
 import httpx
 
-BASE = "http://localhost:8080"
+BASE = "http://localhost:8093"
 URL = f"{BASE}/variant/stream"
 # 默认用一张真实 OSS 题图（dev 库 biz_question.stem_img_url 实例）
 DEFAULT_IMG = (

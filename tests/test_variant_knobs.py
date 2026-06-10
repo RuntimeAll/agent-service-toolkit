@@ -394,7 +394,7 @@ def test_generate_without_user_text_keeps_legacy_prompt_and_no_knobs_call(monkey
     """knobs=None + URL-only first message -> no extraction call, prompt byte-identical to legacy."""
     prompts = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         prompts.append(messages[0].content)
         return _items_json(3)
 
@@ -413,7 +413,7 @@ def test_generate_without_user_text_keeps_legacy_prompt_and_no_knobs_call(monkey
 def test_generate_extracts_knobs_from_first_round_text(monkeypatch):
     calls = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         prompt = messages[0].content
         calls.append(prompt)
         if "出题配方" in prompt:  # KNOBS_PROMPT round
@@ -455,7 +455,7 @@ def test_generate_extracts_knobs_from_first_round_text(monkeypatch):
 
 
 def test_generate_knobs_extraction_failure_falls_back_to_default(monkeypatch):
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         if "出题配方" in messages[0].content:
             raise RuntimeError("relay down")  # extraction must never block generation
         return _items_json(3)
@@ -469,7 +469,7 @@ def test_generate_knobs_extraction_failure_falls_back_to_default(monkeypatch):
 def test_generate_existing_knobs_skip_re_extraction(monkeypatch):
     prompts = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         prompts.append(messages[0].content)
         return _items_json(2)
 
@@ -484,7 +484,7 @@ def test_generate_existing_knobs_skip_re_extraction(monkeypatch):
 def test_generate_shape_defect_triggers_one_group_retry(monkeypatch):
     calls = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         prompt = messages[0].content
         calls.append(prompt)
         if "[配方校验反馈]" in prompt:
@@ -501,7 +501,7 @@ def test_generate_shape_defect_triggers_one_group_retry(monkeypatch):
 def test_generate_retry_still_failing_accepts_with_visible_defects(monkeypatch):
     calls = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         calls.append(messages[0].content)
         return _items_json(3)  # both drafts: wrong count
 
@@ -594,7 +594,7 @@ _ANALYZE_JSON = json.dumps(
 
 
 def _patch_analyze_llm(monkeypatch):
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return _ANALYZE_JSON
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
@@ -662,7 +662,7 @@ def test_generate_re_extracts_after_analyze_reset(monkeypatch):
     extracts fresh from the current human text."""
     calls = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         prompt = messages[0].content
         calls.append(prompt)
         if "出题配方" in prompt:
@@ -684,7 +684,7 @@ def test_generate_re_extracts_after_analyze_reset(monkeypatch):
 def test_generate_empty_draft_with_knobs_retries_then_replies_friendly(monkeypatch):
     calls = []
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         calls.append(messages[0].content)
         return "not json at all"  # both drafts unparseable
 
@@ -697,7 +697,7 @@ def test_generate_empty_draft_with_knobs_retries_then_replies_friendly(monkeypat
 
 
 def test_generate_empty_draft_without_knobs_still_replies_friendly(monkeypatch):
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return "garbage"
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
@@ -726,7 +726,7 @@ def test_exec_remove_clears_stale_shape_defects():
 
 
 def test_exec_add_clears_stale_shape_defects_and_adds_unstamped_items(monkeypatch):
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return _items_json(1)
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
@@ -736,7 +736,7 @@ def test_exec_add_clears_stale_shape_defects_and_adds_unstamped_items(monkeypatc
 
 
 def test_exec_regenerate_clears_defects_and_carries_recipe_stamps(monkeypatch):
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return json.dumps(dict(_ITEM_JSON, stem="重出的题"), ensure_ascii=False)
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)

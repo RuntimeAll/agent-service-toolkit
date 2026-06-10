@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,7 +109,11 @@ def _breaker(name: str) -> _Breaker:
 
 
 async def ainvoke_failover(
-    messages: list[BaseMessage], *, max_tokens: int
+    messages: list[BaseMessage],
+    *,
+    max_tokens: int,
+    tags: list[str] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> tuple[Any, str, str, int]:
     """按主→备顺序调用，熔断转移。
 
@@ -116,6 +121,12 @@ async def ainvoke_failover(
     🔴 relay_model = 实际成交中转站的 per-relay model（RELAY_POOL 各站可配不同模型），
     供上层 conv_trace/_trace_llm/cost_yuan 正确归因（不再恒写 COMPATIBLE_MODEL）。
     全部中转站不可用 → 抛最后一个异常（由上层记 error 后照常抛）。
+
+    tags：透传 langchain config.tags。带 "skip_stream" 的调用其 token 不会被 service
+    转发给前端（service.py 按 metadata.tags 过滤）——JSON 类中间产物调用必须带它。
+    on_delta：流内回调（每个 chunk 后拿到【累计文本】），用于 generate 出题进度计数。
+    给了 on_delta 走 astream 手动聚合（stream_usage 开着，聚合块仍有 usage_metadata）；
+    回调异常静默吞，绝不影响主流程。首 chunk 后失败不再 failover（半截流不可重放）。
     """
     relays = _relays()
     # 🔴 单站无备援时禁用熔断跳过：开闸 fail-fast 只降可用性（30s 内全灭且 last_exc=None
@@ -123,6 +134,7 @@ async def ainvoke_failover(
     single = len(relays) == 1
     last_exc: Exception | None = None
     fallback = 0
+    cfg: dict[str, Any] | None = {"tags": tags} if tags else None
     for relay in relays:
         br = _breaker(relay.name)
         if br.is_open() and not single:
@@ -130,7 +142,23 @@ async def ainvoke_failover(
             continue
         try:
             model = _chat(relay).bind(max_tokens=max_tokens)
-            resp = await model.ainvoke(messages)
+            if on_delta is None:
+                # cfg 为空不传（兼容测试桩的窄签名 ainvoke(messages)）
+                resp = await (model.ainvoke(messages, config=cfg) if cfg else model.ainvoke(messages))
+            else:
+                resp = None
+                acc = ""
+                async for chunk in model.astream(messages, config=cfg):
+                    resp = chunk if resp is None else resp + chunk
+                    try:
+                        c = chunk.content
+                        if isinstance(c, str) and c:
+                            acc += c
+                            on_delta(acc)
+                    except Exception:  # noqa: BLE001 — 进度回调绝不炸主流程
+                        pass
+                if resp is None:
+                    raise RuntimeError("empty stream")
             br.fails = 0
             br.open_until = 0.0  # 成功即复位
             return resp, relay.name, relay.model, fallback

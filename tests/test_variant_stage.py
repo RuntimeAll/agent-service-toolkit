@@ -135,7 +135,7 @@ def test_node_survives_raising_writer_end_to_end(monkeypatch):
 def test_analyze_emits_running_then_done(monkeypatch):
     calls = _record_stages(monkeypatch)
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return json.dumps(
             {
                 "is_question_image": True,
@@ -164,7 +164,7 @@ def test_analyze_emits_running_then_done(monkeypatch):
 def test_analyze_emits_warn_on_non_question_image(monkeypatch):
     calls = _record_stages(monkeypatch)
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return json.dumps({"is_question_image": False})
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
@@ -198,7 +198,7 @@ _ITEM_JSON = {
 def test_generate_emits_knobs_summary_and_running_done_counts(monkeypatch):
     calls = _record_stages(monkeypatch)
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         prompt = messages[0].content
         if "出题配方" in prompt:  # KNOBS extraction round
             return json.dumps(
@@ -223,7 +223,7 @@ def test_generate_emits_knobs_summary_and_running_done_counts(monkeypatch):
 def test_generate_without_teacher_text_reports_default_recipe(monkeypatch):
     calls = _record_stages(monkeypatch)
 
-    async def fake_llm(messages, retry=True):
+    async def fake_llm(messages, retry=True, **kwargs):
         return json.dumps([_ITEM_JSON] * 3, ensure_ascii=False)
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)

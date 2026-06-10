@@ -411,6 +411,28 @@ async def history(input: ChatHistoryInput) -> ChatHistory:
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
+@router.post("/variant/artifact")
+async def variant_artifact(input: ChatHistoryInput) -> dict[str, Any]:
+    """C 线扩展（2026-06-11 会话持久化）：按 thread_id 从 checkpointer 重建右栏
+    artifact 快照（与流内 custom_data.artifact 同契约）。会话恢复时前端先回放
+    /history 的气泡，再用本端点重建卡片栅。无题组返回空 items（前端显空态）。
+    """
+    agent: AgentGraph = get_agent("variant")
+    try:
+        state_snapshot = await agent.aget_state(
+            config=RunnableConfig(configurable={"thread_id": input.thread_id})
+        )
+        values: dict[str, Any] = state_snapshot.values or {}
+        if not values.get("items"):
+            return {"items": [], "header": {"recipe": None, "kp": None, "grade": None}}
+        from agents.variant import _artifact_payload
+
+        return _artifact_payload(values)  # type: ignore[arg-type]
+    except Exception as e:
+        logger.error(f"variant_artifact error: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error")
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

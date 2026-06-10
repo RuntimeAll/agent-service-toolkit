@@ -1,6 +1,6 @@
 """PRD-C-010 思维外放 · 服务级 SSE 冒烟：数 stage 帧。
 
-经 :8080 /variant/stream 真跑一轮，统计 type=custom 且 custom_data.stage 的帧——
+经 :8093 /variant/stream 真跑一轮，统计 type=custom 且 custom_data.stage 的帧——
 证明思路条事件真的从 BE 节点流到了线缆上（FE 渲染逻辑由 vue-tsc+review 把关）。
 
 跑法: .venv/Scripts/python.exe tools/c010_stage_smoke.py
@@ -12,7 +12,7 @@ import sys
 
 import httpx
 
-URL = "http://localhost:8080/variant/stream"
+URL = "http://localhost:8093/variant/stream"
 IMG = (
     "https://question-1256278081.cos.ap-shanghai.myqcloud.com/"
     "2024-04-23/cd2f5750-692b-411d-a335-895ccdf848b0/list/1/question.png"

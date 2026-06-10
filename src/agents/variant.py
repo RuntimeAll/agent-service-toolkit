@@ -233,12 +233,23 @@ def _trace_llm(
         pass  # 持久化绝不拖垮主流程
 
 
-async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
+async def _ainvoke_text(
+    messages: list[BaseMessage],
+    retry: bool = True,
+    *,
+    public_stream: bool = False,
+    on_delta: Any = None,
+) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
     🔴 每次调用落 JSONL 往返记录（_trace_llm）：发送的完整 prompt + 原始返回。
+    🔴 思维外放（用户反馈 2026-06-11）：默认打 skip_stream 标签 —— JSON 类中间产物的
+    token 流对用户是乱码，service 按标签丢弃；只有人话型调用（答疑等）传
+    public_stream=True，token 才透到前端打字机。on_delta=流内进度回调（拿累计文本），
+    generate 用它数「已写到第几题」。
     """
     label = _trace_label(messages)
+    tags = None if public_stream else ["skip_stream"]
     # 用户级/会话级归属：从 graph config 取 thread_id + ruoyi_token(→teacher_id)
     conf = (ensure_config() or {}).get("configurable", {}) or {}
     thread_id = conf.get("thread_id")
@@ -252,14 +263,14 @@ async def _ainvoke_text(messages: list[BaseMessage], retry: bool = True) -> str:
         # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数
         #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
         resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
-            messages, max_tokens=max_tokens
+            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta
         )
         text = _content_text(resp).strip()
         retried = False
         if not text and retry:
             retried = True
             resp, relay, model_used, fb2 = await relay_pool.ainvoke_failover(
-                messages, max_tokens=max_tokens
+                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta
             )
             fallback += fb2
             text = _content_text(resp).strip()
@@ -320,6 +331,32 @@ def _parse_json(text: str) -> Any:
             except Exception:
                 pass
     return None
+
+
+# --- 富文本净化（用户反馈 2026-06-11：解析裸字符不渲染的根因） -----------------
+# LLM（gpt-5.4）产 JSON 时两类脏输出：① LaTeX 用 \( \) / \[ \] 定界（前端
+# markdown-it-katex 只认 $/$$，且 markdown 会把 \( 的反斜杠当转义吃掉）；② 把换行
+# 写成双反斜杠 → 解出字面 \n 两个字符。统一在解析边界净化，入库/快照/气泡三处共净。
+_PAREN_MATH_RE = re.compile(r"\\\(\s*(.+?)\s*\\\)", re.DOTALL)
+_BRACKET_MATH_RE = re.compile(r"\\\[\s*(.+?)\s*\\\]", re.DOTALL)
+# 字面 \n 后跟小写字母 = 可能是 LaTeX 命令（\neq \nabla \newline \nu …），不动；其余视为换行
+_LITERAL_NL_RE = re.compile(r"\\n(?![a-z])")
+
+
+def _sanitize_rich_text(s: Any) -> Any:
+    """LLM 产出的 stem/answer/solution 净化：\\(..\\)→$..$、\\[..\\]→$$..$$、字面 \\n→换行。"""
+    if not isinstance(s, str) or not s:
+        return s
+    s = _BRACKET_MATH_RE.sub(lambda m: f"$${m.group(1)}$$", s)
+    s = _PAREN_MATH_RE.sub(lambda m: f"${m.group(1)}$", s)
+    return _LITERAL_NL_RE.sub("\n", s)
+
+
+def _sanitize_item(it: dict[str, Any]) -> dict[str, Any]:
+    """就地净化一道题的富文本字段，返回原 dict（链式用）。"""
+    for k in ("stem", "answer", "solution"):
+        it[k] = _sanitize_rich_text(it.get(k))
+    return it
 
 
 def _latest_human_text(messages: list[BaseMessage]) -> str:
@@ -647,7 +684,12 @@ GENERATE_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA�
 
 只输出 JSON 数组(不要解释)，每个元素：
 {{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
-  "qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}"""
+  "qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}
+
+格式硬规定（stem/answer/solution 三个字段都遵守）：
+- 数学式一律用 $...$ 包裹（行间长式用 $$...$$），如 $\\sqrt{{2}}$、$x^2-3x+2=0$；
+  **禁止**裸 LaTeX 命令、禁止 \\( \\) / \\[ \\] 定界符。
+- 换行用 JSON 标准转义 \\n（一个反斜杠），不要写成 \\\\n。"""
 
 
 def _mother_facts(state: VariantState) -> dict:
@@ -989,16 +1031,18 @@ def _parse_generated_items(text: str, facts: dict) -> list[dict[str, Any]]:
         if not isinstance(it, dict):
             continue
         items.append(
-            {
-                "stem": it.get("stem"),
-                "answer": it.get("answer"),
-                "solution": it.get("solution"),
-                "qtype": it.get("qtype") or facts["qtype"],
-                "difficulty": it.get("difficulty"),
-                "level": it.get("level") or "normal",
-                "injected_kp": it.get("injected_kp") or None,
-                # check 待 solve_explain 填（无 check 不许进 assemble）
-            }
+            _sanitize_item(
+                {
+                    "stem": it.get("stem"),
+                    "answer": it.get("answer"),
+                    "solution": it.get("solution"),
+                    "qtype": it.get("qtype") or facts["qtype"],
+                    "difficulty": it.get("difficulty"),
+                    "level": it.get("level") or "normal",
+                    "injected_kp": it.get("injected_kp") or None,
+                    # check 待 solve_explain 填（无 check 不许进 assemble）
+                }
+            )
         )
     return items
 
@@ -1055,7 +1099,21 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         )
         + recipe["spec"]
     )
-    text = await _ainvoke_text([HumanMessage(content=prompt)])
+
+    # 🔴 思维外放（用户反馈 2026-06-11）：JSON token 对用户是乱码不外放，但流内数
+    # "stem" 出现次数 → 思路条实时跳「正在写第 n/N 道」+ 当前题干前几个字，等待不再是黑盒。
+    total_n = int(recipe["n"])
+    _seen = {"n": 0}
+
+    def _gen_progress(acc: str) -> None:
+        n = min(acc.count('"stem"'), total_n)
+        if n > _seen["n"]:
+            _seen["n"] = n
+            m = re.findall(r'"stem"\s*:\s*"([^"]{0,24})', acc)
+            peek = (m[-1].replace("\\n", " ").strip() + "…") if m and m[-1] else ""
+            _emit_stage("generate", "生成题目", "running", f"正在写第 {n}/{total_n} 道 {peek}")
+
+    text = await _ainvoke_text([HumanMessage(content=prompt)], on_delta=_gen_progress)
     items = _parse_generated_items(text, facts)
 
     # 🔴 代码级配方校验（数量/题型分布/递增档位）：不符 → 带缺陷反馈整组 retry 1 次。
@@ -1112,7 +1170,9 @@ SOLVE_PROMPT = """你是严谨的数学阅卷老师。真解下面这道题（�
 
 只输出 JSON：
 {{"solved_answer":"你独立算出的答案","solution":"完整解题过程(含答案)",
-  "kp_name":"这道题实际考的主考点","grade":"这道题适配的年级"}}"""
+  "kp_name":"这道题实际考的主考点","grade":"这道题适配的年级"}}
+
+格式硬规定：solution 里数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
 
 REGEN_PROMPT = """下面这道变式题，独立解出的答案与题面标答不一致，请**重新出一道**等价变式重做。
 
@@ -1122,7 +1182,9 @@ REGEN_PROMPT = """下面这道变式题，独立解出的答案与题面标答�
 要求：仍考「{kp_name}」、仍在「{grade}」、{level} 难度；换数字/场景使题面与答案自洽。
 
 只输出 JSON：
-{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp}}}"""
+{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp}}}
+
+格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
 
 
 # ---------------------------------------------------------------------------
@@ -1266,7 +1328,12 @@ async def _solve_one(stem: str) -> dict:
         text = await _ainvoke_text([HumanMessage(content=SOLVE_PROMPT.format(stem=stem or ""))])
     except Exception:  # noqa: BLE001
         return {}
-    return _parse_json(text) or {}
+    solved = _parse_json(text) or {}
+    # 🔴 阅卷解析会回写 item["solution"]（solve_explain 三处）—— 出口统一净化，
+    # 否则 \( \) / 字面 \n 绕过 _parse_generated_items 的净化直达卡片/入库
+    if isinstance(solved, dict) and solved.get("solution"):
+        solved["solution"] = _sanitize_rich_text(solved["solution"])
+    return solved
 
 
 async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> dict | None:
@@ -1299,15 +1366,17 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
         return None
     regen = _parse_json(regen_text)
     if isinstance(regen, dict) and regen.get("stem"):
-        return {
-            "stem": regen.get("stem"),
-            "answer": regen.get("answer"),
-            "solution": regen.get("solution"),
-            "qtype": regen.get("qtype") or item.get("qtype"),
-            "difficulty": regen.get("difficulty") or item.get("difficulty"),
-            "level": regen.get("level") or item.get("level"),
-            "injected_kp": regen.get("injected_kp"),
-        }
+        return _sanitize_item(
+            {
+                "stem": regen.get("stem"),
+                "answer": regen.get("answer"),
+                "solution": regen.get("solution"),
+                "qtype": regen.get("qtype") or item.get("qtype"),
+                "difficulty": regen.get("difficulty") or item.get("difficulty"),
+                "level": regen.get("level") or item.get("level"),
+                "injected_kp": regen.get("injected_kp"),
+            }
+        )
     return None
 
 
@@ -1955,7 +2024,7 @@ ANSWER_PROMPT = """你是数学老师，老师对下面这组变式题的某道�
 
 老师的问题：{question}
 
-直接用人话回答（可含 LaTeX）。只解惑，不要改题、不要重出题。"""
+直接用人话回答（数学式一律 $...$ 包裹）。只解惑，不要改题、不要重出题。"""
 
 
 async def answer_question(state: VariantState, config: RunnableConfig) -> VariantState:
@@ -1971,6 +2040,7 @@ async def answer_question(state: VariantState, config: RunnableConfig) -> Varian
         f"第{i + 1}题 答案:{(it.get('answer') or '')[:60]} 解析:{(it.get('solution') or '')[:120]}"
         for i, it in enumerate(items)
     )
+    # 🔴 public_stream：答疑是纯人话输出，token 不打 skip_stream → 前端打字机逐字外放
     text = await _ainvoke_text(
         [
             HumanMessage(
@@ -1978,7 +2048,8 @@ async def answer_question(state: VariantState, config: RunnableConfig) -> Varian
                     brief=_items_brief(items), detail=detail, question=question or "(空)"
                 )
             )
-        ]
+        ],
+        public_stream=True,
     )
     # 🔴 只返回 messages（绝不含 items），并清空 pending
     return {"messages": [AIMessage(content=text or "我没太理解你的疑问，可以再说具体点吗？")], "pending": None}
@@ -2042,15 +2113,17 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
         regen = _parse_json(regen_text)
         if isinstance(regen, dict) and regen.get("stem"):
             # 🔴 新题清 check → 必过 solve_explain 才能进 assemble（不变量）
-            new_item: dict[str, Any] = {
-                "stem": regen.get("stem"),
-                "answer": regen.get("answer"),
-                "solution": regen.get("solution"),
-                "qtype": regen.get("qtype") or old.get("qtype") or facts["qtype"],
-                "difficulty": regen.get("difficulty") or old.get("difficulty"),
-                "level": regen.get("level") or old.get("level") or "normal",
-                "injected_kp": regen.get("injected_kp"),
-            }
+            new_item: dict[str, Any] = _sanitize_item(
+                {
+                    "stem": regen.get("stem"),
+                    "answer": regen.get("answer"),
+                    "solution": regen.get("solution"),
+                    "qtype": regen.get("qtype") or old.get("qtype") or facts["qtype"],
+                    "difficulty": regen.get("difficulty") or old.get("difficulty"),
+                    "level": regen.get("level") or old.get("level") or "normal",
+                    "injected_kp": regen.get("injected_kp"),
+                }
+            )
             # 配方印记跟题走（与 difficulty 同理：重出仍占原计划槽位，闸A 改判段不丢）
             for k in ("from_recipe", "expected_difficulty"):
                 if old.get(k) is not None:
@@ -2075,7 +2148,9 @@ ADD_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA，**�
 铁律：每道仍考「{kp_name}」、仍在「{grade}」；只换数字/场景（除非老师明确要改难度/题型）。
 
 只输出 JSON 数组(不要解释)，每元素：
-{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}"""
+{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}
+
+格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
 
 
 async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
