@@ -1,35 +1,44 @@
-"""会话持久化 + 思维流式 + 富文本净化 · 服务级冒烟（2026-06-11 四项反馈批次）。
+"""会话持久化 + 思维流式 + 富文本净化 + 身份硬闸 + 入库直连 · 服务级冒烟。
 
 流程：
-  P1  POST /variant/stream 真跑一轮（thread_id 固定）——顺带统计：
-        - stage 帧（含新「正在写第 n/N 道」generate 进度细化）
+  A0  无 token 调 /variant/stream → 应被身份硬闸拦下（🔒 提示，零 LLM 调用）
+  P1  POST /variant/stream 真跑一轮（带服务账号真 token）——顺带统计：
+        - stage 帧（含「正在写第 n/N 道」generate 进度细化）
         - artifact 帧（题目文本应无字面 \\n、无 \\( \\) 定界 = 净化生效）
         - token 帧（JSON 中间产物已打 skip_stream → token 数应≈0；答疑轮才有）
   P2  POST /history {thread_id} → 应回放出 human+ai 消息（会话持久化 BE 半边）
   P3  POST /variant/artifact {thread_id} → 应重建出与 P1 相同题数的快照
   P4  对该 thread 追加一条「答疑」轮 → 应收到 token 帧（公开流式 = 打字机）
+  P5  POST /variant/persist 直连入库（不过 LLM 分类器）→ ok + 回执 + 全题 persisted；
+      无 token 调它 → 401
 
 跑法: .venv/Scripts/python.exe tools/c012_persist_smoke.py
-前置: toolkit :8093 + RuoYi :8090 在跑。
+前置: toolkit :8093 + RuoYi :8090 在跑。⚠ P5 会真往服务账号题库落一组题（import_source=举一反三）。
 """
 
 import asyncio
 import json
 import sys
+import uuid
 
 import httpx
+
+from _probe_auth import real_token
 
 BASE = "http://localhost:8093"
 IMG = (
     "https://question-1256278081.cos.ap-shanghai.myqcloud.com/"
     "2024-04-23/cd2f5750-692b-411d-a335-895ccdf848b0/list/1/question.png"
 )
-THREAD = "c012-persist-smoke-001"
+THREAD = f"c012-smoke-{uuid.uuid4().hex[:8]}"
+TOKEN: str = ""
 
 
-async def stream_round(c: httpx.AsyncClient, message: str):
+async def stream_round(c: httpx.AsyncClient, message: str, *, with_token: bool = True):
     stages, artifacts, tokens, finals = [], [], 0, []
     body = {"message": message, "stream_tokens": True, "thread_id": THREAD}
+    if with_token:
+        body["agent_config"] = {"ruoyi_token": TOKEN}
     async with c.stream("POST", f"{BASE}/variant/stream", json=body) as r:
         assert r.status_code == 200, f"stream HTTP {r.status_code}"
         buf = b""
@@ -67,8 +76,19 @@ async def stream_round(c: httpx.AsyncClient, message: str):
 
 
 async def main() -> int:
+    global TOKEN
+    TOKEN = await real_token()
     ok = True
     async with httpx.AsyncClient(timeout=300.0, trust_env=False) as c:
+        # A0 身份硬闸：无 token → 🔒 提示（不进任何 LLM 节点）
+        _s0, _a0, _t0, finals0 = await stream_round(
+            c, f"帮我对这道题举一反三：{IMG}", with_token=False
+        )
+        gate_hit = any("登录" in f for f in finals0)
+        print(f"A0 无token硬闸: {'PASS' if gate_hit else 'FAIL'} "
+              f"(stage={len(_s0)} token={_t0} reply={finals0[-1][:40] if finals0 else '∅'})")
+        ok = ok and gate_hit and not _s0  # 不应有任何 stage 帧（零节点执行）
+
         # P1 出题轮
         stages, artifacts, tokens, finals = await stream_round(
             c, f"帮我对这道题举一反三：{IMG}"
@@ -122,6 +142,34 @@ async def main() -> int:
         if tokens2 <= 0:
             print("P4 FAIL: 答疑没有 token 流")
             ok = False
+
+        # P5 入库直连（不过 LLM 分类器）：无 token → 401；带 token → ok + 全题 persisted
+        r = await c.post(f"{BASE}/variant/persist", json={"thread_id": THREAD, "ruoyi_token": "bad"})
+        print(f"P5a 伪token直连入库 HTTP {r.status_code}（应 401）")
+        if r.status_code != 401:
+            ok = False
+        r = await c.post(
+            f"{BASE}/variant/persist", json={"thread_id": THREAD, "ruoyi_token": TOKEN}
+        )
+        if r.status_code != 200:
+            print(f"P5b FAIL: HTTP {r.status_code} {r.text[:200]}")
+            ok = False
+        else:
+            data = r.json()
+            arts = data.get("artifact") or {}
+            persisted = [it.get("persisted") for it in arts.get("items", [])]
+            print(f"P5b 直连入库 ok={data.get('ok')} persisted={persisted} "
+                  f"回执首行={str(data.get('reply') or '').splitlines()[0][:60]}")
+            if not (data.get("ok") and persisted and all(persisted)):
+                ok = False
+            # 幂等：再点一次「全部入库」→ 应走防重分支（不重复落库）
+            r2 = await c.post(
+                f"{BASE}/variant/persist", json={"thread_id": THREAD, "ruoyi_token": TOKEN}
+            )
+            rep2 = (r2.json().get("reply") or "") if r2.status_code == 200 else ""
+            dedup = "不会重复" in rep2 or "已入库" in rep2
+            print(f"P5c 重复入库防重: {'PASS' if dedup else 'FAIL'} ({rep2[:50]})")
+            ok = ok and dedup
 
     print("OK" if ok else "SMOKE FAILED")
     return 0 if ok else 1

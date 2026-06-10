@@ -57,13 +57,20 @@ def norm(s):
     return re.sub(r"\s+", "", str(s or "")).strip().lower()
 
 
+_TOKEN = None  # 身份硬闸（2026-06-11）：服务账号真 token，main 里登一次
+
+
 async def run_turn(app, thread_id, text):
-    cfg = {"configurable": {"thread_id": thread_id}}
+    cfg = {"configurable": {"thread_id": thread_id, "ruoyi_token": _TOKEN}}
     await app.ainvoke({"messages": [HumanMessage(content=text)]}, cfg)
     return app.get_state(cfg).values
 
 
 async def main():
+    global _TOKEN
+    from _probe_auth import real_token
+
+    _TOKEN = await real_token()
     saver = MemorySaver()
     app = graph.compile(checkpointer=saver)
     tid = f"c009-reg-{uuid.uuid4().hex[:8]}"

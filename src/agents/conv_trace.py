@@ -32,7 +32,7 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS conv_llm_trace (
   id                BIGINT AUTO_INCREMENT PRIMARY KEY,
   ts                DATETIME(3) NOT NULL,
-  teacher_id        BIGINT NULL          COMMENT '登录老师 user_id(从 ruoyi_token JWT 解)',
+  teacher_id        BIGINT NOT NULL      COMMENT '登录老师 user_id(从 ruoyi_token JWT 解);0=历史无主存量。🔴 NOT NULL=表级绑死用户(2026-06-11 用户拍板),图入口 route_entry 有同源硬闸',
   thread_id         VARCHAR(64) NULL     COMMENT '会话 id',
   source            VARCHAR(32) NULL     COMMENT 'variant/chat/...哪个服务/agent',
   label             VARCHAR(32) NULL     COMMENT 'analyze/generate/solve/...哪个 prompt',
@@ -60,6 +60,14 @@ _MIGRATE = [
     "ALTER TABLE conv_llm_trace ADD COLUMN relay VARCHAR(64) NULL AFTER model",
     "ALTER TABLE conv_llm_trace ADD COLUMN cost_yuan DECIMAL(12,6) NULL AFTER completion_tokens",
     "ALTER TABLE conv_llm_trace ADD COLUMN fallback_count INT NOT NULL DEFAULT 0 AFTER cost_yuan",
+    # 2026-06-11 用户拍板「对话绑死用户·表级限制」：历史无主行回填 0，列改 NOT NULL。
+    # 此后 teacher_id 为 NULL 的 INSERT 会被数据库拒绝（write() 静默吞 = 无主调用不留痕，
+    # 真实流量由图入口 route_entry 硬闸保证必有 token，二者同源双保险。MODIFY 幂等可重跑。）
+    "UPDATE conv_llm_trace SET teacher_id = 0 WHERE teacher_id IS NULL",
+    (
+        "ALTER TABLE conv_llm_trace MODIFY teacher_id BIGINT NOT NULL "
+        "COMMENT '登录老师 user_id(从 ruoyi_token JWT 解);0=历史无主存量;NOT NULL=表级绑死用户'"
+    ),
 ]
 
 

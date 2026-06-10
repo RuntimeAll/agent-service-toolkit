@@ -22,6 +22,8 @@ import sys
 
 import httpx
 
+from _probe_auth import real_token
+
 BASE = "http://localhost:8093"
 URL = f"{BASE}/variant/stream"
 # 默认用一张真实 OSS 题图（dev 库 biz_question.stem_img_url 实例）
@@ -37,6 +39,7 @@ async def main() -> int:
         "message": f"帮我对这道题举一反三：{img}",
         "stream_tokens": True,
         "thread_id": "variant-smoke-001",
+        "agent_config": {"ruoyi_token": await real_token()},  # 身份硬闸 2026-06-11
     }
 
     token_chunks = 0

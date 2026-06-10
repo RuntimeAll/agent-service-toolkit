@@ -12,6 +12,8 @@ import sys
 
 import httpx
 
+from _probe_auth import real_token
+
 URL = "http://localhost:8093/variant/stream"
 IMG = (
     "https://question-1256278081.cos.ap-shanghai.myqcloud.com/"
@@ -21,7 +23,8 @@ IMG = (
 
 async def main() -> int:
     body = {"message": f"帮我对这道题举一反三：{IMG}", "stream_tokens": True,
-            "thread_id": "stage-smoke-001"}
+            "thread_id": "stage-smoke-001",
+            "agent_config": {"ruoyi_token": await real_token()}}  # 身份硬闸 2026-06-11
     stages: list[str] = []
     artifacts: list[dict] = []
     final = ""

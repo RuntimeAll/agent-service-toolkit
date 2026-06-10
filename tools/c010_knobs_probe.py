@@ -46,9 +46,12 @@ def last_ai(state) -> str:
 
 
 async def main() -> int:
+    from _probe_auth import real_token
+
+    token = await real_token()  # 身份硬闸（2026-06-11）：服务账号真 token
     app = graph.compile(checkpointer=MemorySaver())
     tid = f"c010-knobs-{uuid.uuid4().hex[:8]}"
-    cfg = {"configurable": {"thread_id": tid}}
+    cfg = {"configurable": {"thread_id": tid, "ruoyi_token": token}}
 
     await app.ainvoke(
         {"messages": [HumanMessage(content=f"{IMG}\n{INSTRUCTION}")]}, cfg

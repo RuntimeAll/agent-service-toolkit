@@ -22,7 +22,10 @@ from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
 from langsmith import uuid7
 
+from pydantic import BaseModel
+
 from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
+from agents import conv_trace
 from core import settings
 from memory import initialize_database, initialize_store
 from schema import (
@@ -408,6 +411,47 @@ async def history(input: ChatHistoryInput) -> ChatHistory:
         return ChatHistory(messages=chat_messages)
     except Exception as e:
         logger.error(f"An exception occurred: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error")
+
+
+class VariantPersistInput(BaseModel):
+    """全部入库直连请求（2026-06-11 用户拍板：确定性动作不过 LLM 分类器）。"""
+
+    thread_id: str
+    ruoyi_token: str  # 必填：入库 owner = 登录老师本人（与图入口身份硬闸同源）
+
+
+@router.post("/variant/persist")
+async def variant_persist(input: VariantPersistInput) -> dict[str, Any]:
+    """C 线扩展：「全部入库」直连——绕过 LLM 意图分类器，按 thread_id 从 checkpointer
+    取当前题组 → 直调 persist_to_bank 节点函数（同一段代码：簿记/防重/血缘逻辑零分叉）
+    → 回写 state（persisted 标记 + 回执消息进对话历史）→ 返回回执文本 + 最新 artifact。
+
+    与 chat 通道说「入库」语义完全等价，只是省一次分类器 LLM 调用 + 零误判。
+    """
+    from agents.variant import _artifact_payload, persist_to_bank
+
+    if conv_trace.teacher_id_from_token(input.ruoyi_token) is None:
+        raise HTTPException(status_code=401, detail="登录态缺失或已过期，请重新登录")
+    agent: AgentGraph = get_agent("variant")
+    cfg = RunnableConfig(
+        configurable={"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
+    )
+    try:
+        snapshot = await agent.aget_state(config=cfg)
+        values: dict[str, Any] = snapshot.values or {}
+        update = await persist_to_bank(values, cfg)  # type: ignore[arg-type]
+        # 回写 checkpointer（as_node=persist_to_bank：簿记/回执与 chat 通道入库完全一致，
+        # 后续编辑轮 assemble 快照「已收录」不回退、二次入库不重复落行）
+        await agent.aupdate_state(cfg, update, as_node="persist_to_bank")
+        merged = {**values, **{k: v for k, v in update.items() if k != "messages"}}
+        msgs = update.get("messages") or []
+        reply = str(msgs[-1].content) if msgs else ""
+        return {"ok": True, "reply": reply, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"variant_persist error: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 

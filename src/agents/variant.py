@@ -479,19 +479,28 @@ def _emit_artifact(
 
 
 # ---------------------------------------------------------------------------
-# Router（入口分诊：有图? 在途母题? 库内母题跳 analyze/classify）
+# Router（入口分诊：登录? 有图? 在途母题? 库内母题跳 analyze/classify）
 # ---------------------------------------------------------------------------
-def route_entry(state: VariantState) -> Literal["analyze", "parse", "generate", "ask"]:
+def route_entry(
+    state: VariantState, config: RunnableConfig
+) -> Literal["analyze", "parse", "generate", "ask", "auth"]:
+    # 🔴 身份硬闸（用户拍板 2026-06-11）：每次对话绑死登录老师。token 缺失/解不出 userId
+    # → 一步不走（不进任何 LLM 节点，conv_trace 也不会产生无主行；表级 NOT NULL 双保险）。
+    token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
+    if conv_trace.teacher_id_from_token(token) is None:
+        return "auth"
     url = _extract_image_url(_latest_human_text(state.get("messages", [])))
     # 跨轮新图 = 视作新母题（设计 §6：重走 analyze，覆盖在途状态）
     if url:
         return "analyze"
-    # 老会话·纯文字（已出过题组）→ parse 分诊 5 意图（设计 §3 mermaid G0）
-    if state.get("items"):
-        return "parse"
-    # 库内母题（已确认 DNA）→ 直接造（跳 analyze/classify）
-    if state.get("mother_confirmed") and state.get("mother_dna"):
+    # 库内母题（已确认 DNA）、还没出题 → 直接造（跳 analyze/classify）
+    if state.get("mother_confirmed") and state.get("mother_dna") and not state.get("items"):
         return "generate"
+    # 老会话·纯文字：已出题组 或 🔴 在途母题（已分析停在 clarify 等老师答年级/考点）
+    # → parse 分诊。修 17 号多轮路由漏洞：旧版要求有 items 才进 parse，把「clarify 的
+    # 回答」漏成催图（root cause 见 claude-code-sign/17-route_entry-多轮路由漏洞-修复任务.md §2）。
+    if state.get("items") or state.get("mother_dna"):
+        return "parse"
     # 没图、无在途母题、无题组 → 催图（设计 §6 输入边界兜底）
     return "ask"
 
@@ -1974,6 +1983,25 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
         grade=facts["grade"],
         utterance=utterance or "(空)",
     )
+    # 🔴 17 号修复 §5：在途母题（停在 clarify、还没出题）的回答语境 —— 此时没有可编辑的
+    # 题号，老师这句大概率是在答我们的澄清提问（年级/考点/题型）。显式钉死语境，防止
+    # 分类器按「已有题组」惯性乱派编辑 op（编辑类 index 也会被 R3 护栏拦，双保险）。
+    # ⚠ 覆盖必须盖过头部「硬守恒」段（真机踩过：答「9年级上」被判成撞守恒 clarify 驳回）：
+    # 无题组语境下年级/考点不是守恒项，正是我们在求老师确认的待定项。
+    if not items:
+        prompt += (
+            "\n\n【当前语境·最高优先级，覆盖上面所有规则】这一轮还没有出任何题（题组为空）——"
+            "我们刚就母题的年级/考点/题型向老师提了澄清问题，老师这句话是**回答澄清**。"
+            "此语境下上面『母题 DNA 硬守恒，撞它即 clarify 驳回』的规则**不适用**："
+            "年级/考点正是待老师确认/纠正的项，不存在『改守恒』一说。\n"
+            "判定规则（按此覆盖执行）：\n"
+            "- 给出年级（如「这个是9年级上的题目」「八下的」）→ intent=修正，"
+            "mother_correction.grade=规范化年级（如「九年级上学期」）。\n"
+            "- 给出考点（如「考的是二次函数」）→ intent=修正，mother_correction.kp=该考点。\n"
+            "- 同时给年级和考点 → 修正，两项都填。\n"
+            "- 真说不清（与年级/考点/题型无关的闲聊）→ clarify。\n"
+            "- 禁止输出任何编辑类 ops（无题可编），禁止判「确认/答疑」。"
+        )
     text = await _ainvoke_text([HumanMessage(content=prompt)])
     parsed = _parse_json(text)
     # 🔴 物理护栏（G4/FP4）：白名单 + 越界钳制 + 解析失败整体降级 clarify（永不默认成 remove）
@@ -2370,6 +2398,20 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
 
 
 # --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------
+async def require_login(state: VariantState, config: RunnableConfig) -> VariantState:
+    """route_entry 'auth' 分支落点：登录态缺失 → 拒入图（teacher_id 绑死硬闸的提示面）。"""
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    "🔒 登录态缺失或已过期，举一反三需要绑定到你的账号才能使用"
+                    "（对话记录与入库的题都归属到你本人）。请重新登录平台后再试。"
+                )
+            )
+        ]
+    }
+
+
 async def ask_for_image(state: VariantState, config: RunnableConfig) -> VariantState:
     """route_entry 'ask' 分支落点：首轮无图无母题无题组，催老师贴题图。
 
@@ -2409,6 +2451,7 @@ graph.add_node("patch", patch)
 graph.add_node("ask_clarify", ask_clarify)
 graph.add_node("persist_to_bank", persist_to_bank)
 graph.add_node("ask_for_image", ask_for_image)
+graph.add_node("require_login", require_login)
 
 graph.set_conditional_entry_point(
     route_entry,
@@ -2418,9 +2461,12 @@ graph.set_conditional_entry_point(
         "parse": "parse_instruction",
         # 🔴 'ask' 必落真节点（ask_for_image），不能直连 END —— 否则首轮无节点产消息，回复为空
         "ask": "ask_for_image",
+        # 🔴 身份硬闸：无登录态 → 提示重登（同上，必落真节点）
+        "auth": "require_login",
     },
 )
 graph.add_edge("ask_for_image", END)
+graph.add_edge("require_login", END)
 
 # analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → classify
 def after_analyze(state: VariantState) -> Literal["classify", "done"]:
