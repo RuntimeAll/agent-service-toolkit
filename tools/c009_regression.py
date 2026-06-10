@@ -246,6 +246,29 @@ async def main():
     g2 = ("八年级" in str(new_grade)) or ("修正" in grade_reply or "重锚" in grade_reply or "八年级" in grade_reply)
     rec("G2", g2, f"修正年级: new_grade={new_grade} reply={grade_reply[:60]}")
 
+    # ===== G17: DNA 低置信 -> 先确认/回问, 该轮不造题 (generate 入口断言) =====
+    # 直接驱动 generate 节点: 喂三锚低置信 + mother_confirmed=False, 断言拒造(无 items)
+    from agents.variant import generate as _gen  # noqa: E402
+    low_state = {
+        "messages": [],
+        "analysis": {
+            "grade": {"value": "八年级下学期", "confidence": 0.30},
+            "subject": "数学",
+            "kp": {"value": "二次根式", "confidence": 0.35},
+            "qtype": {"value": "选择", "confidence": 0.40},
+        },
+        "mother_confirmed": False,
+        "mother_dna": {"stem": "x"},
+    }
+    g17_out = await _gen(low_state, {"configurable": {"thread_id": "g17"}})
+    g17_items = g17_out.get("items") or []
+    g17_msgs = g17_out.get("messages") or []
+    g17_reply = g17_msgs[0].content if g17_msgs else ""
+    g17 = (len(g17_items) == 0) and bool(g17_reply) and (
+        "确认" in g17_reply or "先不造" in g17_reply or "不造题" in g17_reply
+    )
+    rec("G17", g17, f"低置信拒造: items={len(g17_items)} reply={str(g17_reply)[:80]}")
+
     print("\n" + "=" * 60)
     npass = sum(1 for _, ok, _ in RESULTS if ok)
     print(f"SUMMARY: {npass}/{len(RESULTS)} PASS")

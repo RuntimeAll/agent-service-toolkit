@@ -122,8 +122,12 @@ class RuoyiClient:
     🔴 trust_env=False：调本地/内网 :8090 时禁读系统代理，否则被 Clash 吞超时。
     """
 
-    def __init__(self) -> None:
-        self._token: str | None = settings.RUOYI_TOKEN or None
+    def __init__(self, token: str | None = None) -> None:
+        # 🔴 身份透传：token 由 book-ui 透传的登录老师 access_token 时，直接用它定 owner
+        # （后端 LoginHelper.getUserId() = 该老师），不再用 .env 服务账号登录。
+        # forwarded=True 时禁止自动 login（会切回服务账号，归属就错了）。
+        self._forwarded = bool(token)
+        self._token: str | None = token or (settings.RUOYI_TOKEN or None)
         self._client = httpx.AsyncClient(
             base_url=settings.RUOYI_BASE_URL, timeout=30.0, trust_env=False
         )
@@ -157,6 +161,8 @@ class RuoyiClient:
 
     async def _ensure_token(self) -> str:
         if not self._token:
+            if self._forwarded:
+                raise RuoyiError("缺登录老师 token，无法入库")
             await self.login()
         return self._token  # type: ignore[return-value]
 
@@ -174,6 +180,9 @@ class RuoyiClient:
         await self._ensure_token()
         resp = await self._client.post(path, json=body or {}, headers=self._headers())
         if resp.status_code == 401 and _retry:
+            # 透传 token 失效 → 不能重登（会切服务账号致归属错），让老师重登
+            if self._forwarded:
+                raise RuoyiError(f"{path} 401：登录老师 token 失效，请在平台重新登录后再试")
             self._token = None
             await self.login()
             return await self.teacher_post(path, body, _retry=False)
@@ -216,7 +225,10 @@ QTYPE_MAP: dict[str, int] = {
     "证明题": 5,
 }
 DEFAULT_QTYPE = 5  # 拿不准 → 简答（最宽容）
-DEFAULT_IMPORT_SOURCE = "AI-Orchestrator"  # 设计 §7 默认来源标记
+# 🔴 来源标记 = "举一反三"（与组卷服务 "AI-Orchestrator" 区分；之前照搬错标成组卷来源）
+IMPORT_SOURCE = "举一反三"
+REL_MOTHER = "原题(图)"  # 母题(从上传图抽出的原题)的 variant_relation
+REL_VARIANT = "AI-数值变式"  # 变式题默认 variant_relation
 
 
 def _map_qtype(qtype: Any) -> int:
@@ -235,17 +247,45 @@ def _clamp_difficult(difficulty: Any) -> int | None:
     return max(1, min(4, d))
 
 
+def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
+    """从上传图抽出的「母题(原题)」→ CreateQuestionBo。
+
+    🔴 设计 §7 原为「图母题不入库」；维护者 2026-06-10 拍板改为：图母题不在库时**先把原题入库**，
+       变式再 motherQuestionId 指向它 → 血缘完整可追。母题图 URL 落 stemImg。
+    🔴 不用 auxTags：dev 库 biz_question 无 aux_tags 列（V16 未迁），且血缘已被
+       mother_question_id（组键）+ stem_img_url（来源图）+ import_source 覆盖，变式组无需额外 uuid。
+    """
+    bo: dict[str, Any] = {
+        "questionType": _map_qtype(facts.get("qtype")),
+        "stem": facts.get("stem") or "",
+        "importSource": IMPORT_SOURCE,
+        "variantRelation": REL_MOTHER,
+    }
+    if facts.get("mother_answer"):
+        bo["answer"] = facts["mother_answer"]
+    if facts.get("mother_solution"):
+        bo["analyze"] = facts["mother_solution"]
+    difficult = _clamp_difficult(facts.get("mother_difficulty"))
+    if difficult is not None:
+        bo["difficult"] = difficult
+    if facts.get("subject_id"):
+        bo["subjectId"] = str(facts["subject_id"])
+    if facts.get("image_url"):
+        bo["stemImg"] = facts["image_url"]  # 母题图落题干图字段
+    return bo
+
+
 def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """单道变式 item + 母题 facts → CreateQuestionBo camelCase body。
 
     🔴 只放契约允许的字段；createBy/createUser/status/id 绝不放（后端强制，传了也忽略）。
-    题型映射成整数；难度夹 1~4；带 AI 血缘三件套（母题/变式关系/来源）。
+    题型映射成整数；难度夹 1~4；带 AI 血缘（母题 id / 变式关系 / 来源 / 变式组 auxTags）。
     """
     bo: dict[str, Any] = {
         "questionType": _map_qtype(item.get("qtype") or facts.get("qtype")),
         "stem": item.get("stem") or "",
-        "importSource": DEFAULT_IMPORT_SOURCE,
-        "variantRelation": item.get("variant_relation") or "AI-数值变式",
+        "importSource": IMPORT_SOURCE,
+        "variantRelation": item.get("variant_relation") or REL_VARIANT,
     }
     answer = item.get("answer")
     if answer:
@@ -262,7 +302,7 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
     if subject_id:
         bo["subjectId"] = str(subject_id)
 
-    # 母题血缘（库内母题时才有 id；图母题 MVP 无 id → 不传）
+    # 母题血缘：图母题入库后回填的 mother_question_id（雪花大整数）
     mother_id = facts.get("mother_question_id")
     if mother_id:
         try:
@@ -272,31 +312,46 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
     return bo
 
 
-async def persist_items(
-    items: list[dict[str, Any]], facts: dict[str, Any]
-) -> list[dict[str, Any]]:
-    """逐题落库（设计 §7：只写不判，质量门已在 solve_explain 闭合）。
+def _extract_new_id(resp: Any) -> Any:
+    """从 /teacher/question/create 回执宽容取雪花 id（裸 id / {id} / {questionId}）。"""
+    if isinstance(resp, dict):
+        return resp.get("id") or resp.get("questionId")
+    return resp if resp is not None else None
 
-    一个 RuoyiClient（teacher token 登录定身份）；逐题 POST /teacher/question/create。
-    返回回执 [{ok, id?, error?}...]（部分失败不中断后续，回执如实标）。
+
+async def persist_items(
+    items: list[dict[str, Any]], facts: dict[str, Any], token: str | None = None
+) -> list[dict[str, Any]]:
+    """落库（设计 §7：只写不判，质量门已在 solve_explain 闭合）。
+
+    🔴 母题优先：图母题不在库（facts 无 mother_question_id）且有原题题干时，**先入库母题**，拿到
+       雪花 id 回填 facts.mother_question_id，变式再挂血缘指向它。组键 = 母题 id。
+    🔴 身份：token 非空 = book-ui 透传的登录老师 access_token → owner=该老师；为空则退回 .env
+       服务账号（regression/直连脚本用）。
+    逐题 POST /teacher/question/create。返回回执 [{ok, id?, error?, role}...]（role=mother/variant）。
     """
-    client = RuoyiClient()
+    facts = dict(facts)
+    client = RuoyiClient(token=token)
     receipts: list[dict[str, Any]] = []
     try:
+        # 0) 母题(原题)入库 → 回填 mother_question_id（仅图母题不在库且有题干时）
+        if not facts.get("mother_question_id") and (facts.get("stem") or "").strip():
+            try:
+                mid = _extract_new_id(await client.create_question(build_mother_bo(facts)))
+                if mid is not None:
+                    facts["mother_question_id"] = mid
+                receipts.append({"ok": True, "id": mid, "role": "mother"})
+            except Exception as e:  # noqa: BLE001 — 母题入库失败：变式仍照常落（血缘缺而已）
+                receipts.append({"ok": False, "error": f"母题入库失败：{e}", "role": "mother"})
+
+        # 1) 逐题入库变式（此时 facts.mother_question_id 已回填）
         for item in items:
             bo = build_create_bo(item, facts)
             try:
-                resp = await client.create_question(bo)
-                # 后端回 question.getId()（雪花，回填后随 envelope.response 返回；
-                # 形态可能是裸 id / {id:...} / {questionId:...}，宽容取）
-                new_id = None
-                if isinstance(resp, dict):
-                    new_id = resp.get("id") or resp.get("questionId")
-                elif resp is not None:
-                    new_id = resp
-                receipts.append({"ok": True, "id": new_id})
+                new_id = _extract_new_id(await client.create_question(bo))
+                receipts.append({"ok": True, "id": new_id, "role": "variant"})
             except Exception as e:  # noqa: BLE001 — 单题失败如实记，不拖垮整组
-                receipts.append({"ok": False, "error": str(e)})
+                receipts.append({"ok": False, "error": str(e), "role": "variant"})
     finally:
         await client.aclose()
     return receipts

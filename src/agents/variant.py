@@ -338,6 +338,11 @@ def _mother_facts(state: VariantState) -> dict:
         # 入库用：锚定到的真实节点编码 + 母题 id（图母题 MVP 无 id）
         "subject_id": anchored.get("code"),
         "mother_question_id": dna.get("mother_question_id"),
+        # 🔴 图母题不在库 → 入库时先把母题(原题)也落库挂血缘，下面这几项给 build_mother_bo 用
+        "mother_answer": dna.get("answer"),
+        "mother_solution": dna.get("solution_skeleton") or dna.get("answer"),
+        "mother_difficulty": dna.get("difficulty"),
+        "image_url": state.get("image_url"),
     }
 
 
@@ -909,8 +914,11 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     if not items:
         return {"messages": [AIMessage(content="当前没有可入库的变式题。先贴图举一反三吧。")]}
 
+    # 🔴 身份透传：book-ui 经 agent_config 透传登录老师 access_token（config.configurable.ruoyi_token）
+    # → 入库 owner = 该老师本人（后端 LoginHelper 取 token 身份），而非 .env 服务账号。
+    token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
     try:
-        receipts = await persist_items(items, facts)
+        receipts = await persist_items(items, facts, token=token)
     except Exception as e:  # noqa: BLE001 — 登录/网络整体失败 → 友好兜底，不崩
         return {
             "messages": [
@@ -918,14 +926,22 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
             ]
         }
 
-    ok = [r for r in receipts if r.get("ok")]
-    fail = [r for r in receipts if not r.get("ok")]
-    lines = [f"## 入库完成 · 共 {len(items)} 道，成功 {len(ok)} 道"]
+    mother = next((r for r in receipts if r.get("role") == "mother"), None)
+    var_receipts = [r for r in receipts if r.get("role") != "mother"]
+    ok = [r for r in var_receipts if r.get("ok")]
+    fail = [r for r in var_receipts if not r.get("ok")]
+
+    lines = [f"## 入库完成 · 变式 {len(items)} 道，成功 {len(ok)} 道"]
+    # 母题(原题)入库回执：图母题不在库 → 先落原题挂血缘
+    if mother and mother.get("ok"):
+        lines.append(f"📌 原题(母题)已一并入库，ID：{mother.get('id')}，变式都挂在它名下（血缘可追）。")
+    elif mother and not mother.get("ok"):
+        lines.append(f"⚠ 原题入库失败（变式仍已落，血缘暂缺）：{mother.get('error')}")
     if ok:
         ids = [str(r.get("id")) for r in ok if r.get("id") is not None]
-        lines.append("已落入你的个人题库（来源标记 AI-Orchestrator）。" + (f"题目 ID：{', '.join(ids)}" if ids else ""))
+        lines.append("已落入你的个人题库（来源标记「举一反三」）。" + (f"变式 ID：{', '.join(ids)}" if ids else ""))
     if fail:
-        lines.append(f"\n⚠ {len(fail)} 道入库失败：")
+        lines.append(f"\n⚠ {len(fail)} 道变式入库失败：")
         for i, r in enumerate(fail, 1):
             lines.append(f"  {i}. {r.get('error')}")
     lines.append("\n可回平台「我的题库」找题、组卷、导出 PDF。")

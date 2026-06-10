@@ -63,6 +63,7 @@ class AgentClient:
                 f"{self.base_url}/info",
                 headers=self._headers,
                 timeout=self.timeout,
+                trust_env=False,  # 绕本机系统代理(Clash 7890)
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
@@ -115,7 +116,7 @@ class AgentClient:
             request.agent_config = agent_config
         if user_id:
             request.user_id = user_id
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:  # 绕本机系统代理(Clash 7890), C线铁律
             try:
                 response = await client.post(
                     f"{self.base_url}/{self.agent}/invoke",
@@ -167,6 +168,7 @@ class AgentClient:
                 json=request.model_dump(),
                 headers=self._headers,
                 timeout=self.timeout,
+                trust_env=False,  # 绕本机系统代理(Clash 7890)
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
@@ -245,6 +247,7 @@ class AgentClient:
                 json=request.model_dump(),
                 headers=self._headers,
                 timeout=self.timeout,
+                trust_env=False,  # 绕本机系统代理(Clash 7890)
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
@@ -295,7 +298,7 @@ class AgentClient:
             request.agent_config = agent_config
         if user_id:
             request.user_id = user_id
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:  # 绕本机系统代理(Clash 7890), C线铁律
             try:
                 async with client.stream(
                     "POST",
@@ -327,7 +330,7 @@ class AgentClient:
         See: https://api.smith.langchain.com/redoc#tag/feedback/operation/create_feedback_api_v1_feedback_post
         """
         request = Feedback(run_id=run_id, key=key, score=score, kwargs=kwargs)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:  # 绕本机系统代理(Clash 7890), C线铁律
             try:
                 response = await client.post(
                     f"{self.base_url}/feedback",
@@ -354,6 +357,7 @@ class AgentClient:
                 json=request.model_dump(),
                 headers=self._headers,
                 timeout=self.timeout,
+                trust_env=False,  # 绕本机系统代理(Clash 7890)
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
