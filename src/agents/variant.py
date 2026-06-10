@@ -342,6 +342,9 @@ def _mother_facts(state: VariantState) -> dict:
         "mother_answer": dna.get("answer"),
         "mother_solution": dna.get("solution_skeleton") or dna.get("answer"),
         "mother_difficulty": dna.get("difficulty"),
+        # 🔴 PRD-C-009 入库存 DNA/打标：结构指纹(dim5) + 锚定置信(labelConfidence)
+        "mother_structure": dna.get("structure"),
+        "kp_confidence": (kp.get("confidence") if isinstance(kp, dict) else None),
         "image_url": state.get("image_url"),
     }
 

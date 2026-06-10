@@ -230,6 +230,10 @@ IMPORT_SOURCE = "举一反三"
 REL_MOTHER = "原题(图)"  # 母题(从上传图抽出的原题)的 variant_relation
 REL_VARIANT = "AI-数值变式"  # 变式题默认 variant_relation
 
+# 🔴 PRD-C-009 轻量打标：举一反三入库即 AI 已标（label_status=1），打标人 = agent/模型标识。
+LABEL_STATUS_AI = 1
+LABELED_BY = "举一反三/gemini-3-flash-preview"
+
 
 def _map_qtype(qtype: Any) -> int:
     s = str(qtype or "").strip()
@@ -247,13 +251,66 @@ def _clamp_difficult(difficulty: Any) -> int | None:
     return max(1, min(4, d))
 
 
+def _clamp_conf(conf: Any) -> float | None:
+    """锚定置信 → labelConfidence(0~1)；越界夹紧，缺/非数则不传（后端 @DecimalMin/Max 校验 0~1）。"""
+    try:
+        c = float(conf)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, c))
+
+
+def _apply_labels(
+    bo: dict[str, Any], facts: dict[str, Any], item: dict[str, Any] | None, role: str
+) -> None:
+    """把 5 维度 DNA + 轻量打标 + auxTags 塞进 CreateQuestionBo（PRD-C-009 入库存 DNA/打标）。
+
+    🔴 维度来源：
+    - dim1KpId = subjectId（锚定到的真实节点 code，知识点必绑，与 subjectId 同源）；
+    - dim2Qtype = 题型整数（与 questionType 同 _map_qtype 口径）；
+    - dim4Difficulty = 难度 1~4（变式取 item，母题取 facts.mother_difficulty）；
+    - dim5Structure = 母题结构指纹（mother_dna.structure；变式与母题共享结构 DNA）；
+    - dim3Skill = 思维方法数组（analyze 暂未抽 → 缺则不带）。
+    label_status=1(AI已标) / labeled_by=agent标识 / labelConfidence=锚定置信。
+    auxTags = {agent, role, sourceImage}（V16 aux_tags 列已补，可恢复存）。
+    """
+    src = item or facts
+    subject_id = facts.get("subject_id")
+    if subject_id:
+        bo["dim1KpId"] = str(subject_id)  # 知识点必绑
+    bo["dim2Qtype"] = bo.get("questionType")
+    dim4 = _clamp_difficult(
+        src.get("difficulty") if item is not None else facts.get("mother_difficulty")
+    )
+    if dim4 is not None:
+        bo["dim4Difficulty"] = dim4
+    if facts.get("mother_structure"):
+        bo["dim5Structure"] = facts["mother_structure"]
+    skills = (item or {}).get("skills") or facts.get("skills")
+    if isinstance(skills, list) and skills:
+        bo["dim3Skill"] = [str(s) for s in skills]
+
+    # 轻量打标
+    bo["labelStatus"] = LABEL_STATUS_AI
+    bo["labeledBy"] = LABELED_BY
+    conf = _clamp_conf(facts.get("kp_confidence"))
+    if conf is not None:
+        bo["labelConfidence"] = conf
+
+    # 血缘溯源标签（aux_tags 列 V16 已补，恢复存；不放业务数据）
+    aux: dict[str, Any] = {"agent": IMPORT_SOURCE, "role": role}
+    if facts.get("image_url"):
+        aux["sourceImage"] = facts["image_url"]
+    bo["auxTags"] = aux
+
+
 def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     """从上传图抽出的「母题(原题)」→ CreateQuestionBo。
 
     🔴 设计 §7 原为「图母题不入库」；维护者 2026-06-10 拍板改为：图母题不在库时**先把原题入库**，
        变式再 motherQuestionId 指向它 → 血缘完整可追。母题图 URL 落 stemImg。
-    🔴 不用 auxTags：dev 库 biz_question 无 aux_tags 列（V16 未迁），且血缘已被
-       mother_question_id（组键）+ stem_img_url（来源图）+ import_source 覆盖，变式组无需额外 uuid。
+    🔴 PRD-C-009：V16 维度列已补到 dev 库 → 入库存 DNA/打标（dim1~5 + label_* + auxTags），
+       由 _apply_labels 统一塞（role="mother"）。aux_tags 列已存在，恢复溯源标签。
     """
     bo: dict[str, Any] = {
         "questionType": _map_qtype(facts.get("qtype")),
@@ -272,6 +329,7 @@ def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
         bo["subjectId"] = str(facts["subject_id"])
     if facts.get("image_url"):
         bo["stemImg"] = facts["image_url"]  # 母题图落题干图字段
+    _apply_labels(bo, facts, item=None, role="mother")
     return bo
 
 
@@ -279,7 +337,8 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
     """单道变式 item + 母题 facts → CreateQuestionBo camelCase body。
 
     🔴 只放契约允许的字段；createBy/createUser/status/id 绝不放（后端强制，传了也忽略）。
-    题型映射成整数；难度夹 1~4；带 AI 血缘（母题 id / 变式关系 / 来源 / 变式组 auxTags）。
+    题型映射成整数；难度夹 1~4；带 AI 血缘（母题 id / 变式关系 / 来源）。
+    🔴 PRD-C-009：5 维度 DNA + 轻量打标 + auxTags 由 _apply_labels 统一塞（role="variant"）。
     """
     bo: dict[str, Any] = {
         "questionType": _map_qtype(item.get("qtype") or facts.get("qtype")),
@@ -309,6 +368,7 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
             bo["motherQuestionId"] = int(mother_id)
         except (TypeError, ValueError):
             pass
+    _apply_labels(bo, facts, item=item, role="variant")
     return bo
 
 
