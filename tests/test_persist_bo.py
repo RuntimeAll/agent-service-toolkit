@@ -37,3 +37,28 @@ def test_variant_bo_keeps_and_clamps_item_difficulty():
 def test_mother_bo_always_has_difficult_when_missing():
     bo = build_mother_bo({"qtype": "选择", "stem": "x"})  # 无 mother_difficulty
     assert "difficult" in bo and 1 <= bo["difficult"] <= 4
+
+
+# ── subject_id NOT NULL 真因回归（2026-06-12 实测：锚定失败 subject_id=None →
+#    INSERT subject_id=NULL → "Column 'subject_id' cannot be null" → 母题+全部变式 500）──
+
+
+def test_variant_bo_subject_id_falls_back_to_unclassified_when_none():
+    # 锚定失败（facts 无 subject_id）→ 必带 subjectId="0"（未分类），绝不漏列
+    bo = build_create_bo(_variant(2), {})
+    assert bo.get("subjectId") == "0"
+
+
+def test_variant_bo_keeps_real_subject_id():
+    bo = build_create_bo(_variant(2), {"subject_id": "3001002"})
+    assert bo["subjectId"] == "3001002"
+
+
+def test_mother_bo_subject_id_falls_back_to_unclassified_when_none():
+    bo = build_mother_bo({"qtype": "选择", "stem": "x"})  # 无 subject_id
+    assert bo.get("subjectId") == "0"
+
+
+def test_mother_bo_keeps_real_subject_id():
+    bo = build_mother_bo({"qtype": "选择", "stem": "x", "subject_id": "3071"})
+    assert bo["subjectId"] == "3071"

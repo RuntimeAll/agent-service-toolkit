@@ -233,6 +233,14 @@ REL_VARIANT = "AI-数值变式"  # 变式题默认 variant_relation
 # 🔴 PRD-C-009 轻量打标：举一反三入库即 AI 已标（label_status=1），打标人 = agent/模型标识。
 LABEL_STATUS_AI = 1
 
+# 🔴 biz_question.subject_id 是 varchar(20) NOT NULL 无默认值（V1 建表）。锚定失败时
+#   facts.subject_id = None（classify 没命中 biz_subject 节点，但 DNA 闸可能凭 LLM 置信放行）→
+#   旧代码 `if subject_id:` 漏列 → 入库 INSERT subject_id=NULL → SQLException "Column 'subject_id'
+#   cannot be null" → 母题+全部变式 500「发生未知异常」，成功 0 道（2026-06-12 实测真因，与
+#   difficult NOT NULL 同类）。兜底 "0" = 未分类 sentinel（题库分页查询「subjectId 空或 '0' 不过滤」，
+#   库里 0 行占用，无 DB 外键），落「未分类」可入库、可后续补打标，绝不再 NULL 炸库。
+UNCLASSIFIED_SUBJECT_ID = "0"
+
 
 def _labeled_by() -> str:
     """打标人标识 = 举一反三/<当前配置模型>。动态读 settings（换模型不再标错来源；
@@ -353,8 +361,9 @@ def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     if difficult is None:
         difficult = 2  # 常规档兜底
     bo["difficult"] = difficult
-    if facts.get("subject_id"):
-        bo["subjectId"] = str(facts["subject_id"])
+    # 🔴 NOT NULL 列：锚定失败(None)必兜底 "0"（未分类），绝不漏列致 INSERT NULL → 500（同 build_create_bo）。
+    msid = facts.get("subject_id")
+    bo["subjectId"] = str(msid) if msid else UNCLASSIFIED_SUBJECT_ID
     if facts.get("image_url"):
         bo["stemImg"] = facts["image_url"]  # 母题图落题干图字段
     _apply_labels(bo, facts, item=None, role="mother")
@@ -390,10 +399,10 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
         difficult = 2  # 常规档兜底
     bo["difficult"] = difficult
 
-    # 知识点编码：classify 锚定到的真实节点 code（落 subjectId）
+    # 知识点编码：classify 锚定到的真实节点 code（落 subjectId）。
+    # 🔴 NOT NULL 列：锚定失败(None)必兜底 "0"（未分类），绝不漏列致 INSERT NULL → 500。
     subject_id = facts.get("subject_id")
-    if subject_id:
-        bo["subjectId"] = str(subject_id)
+    bo["subjectId"] = str(subject_id) if subject_id else UNCLASSIFIED_SUBJECT_ID
 
     # 母题血缘：图母题入库后回填的 mother_question_id（雪花大整数）
     mother_id = facts.get("mother_question_id")
