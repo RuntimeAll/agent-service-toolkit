@@ -6,8 +6,9 @@ Orthogonal to Gate-B (sympy answer verification):
 - surface (numbers / scene) MUST be swapped, otherwise it is a replay -> rework;
 - judge LLM failure / JSON failure -> item passes through marked "skipped"
   (Gate-A is an enhancement, never a blocker -> G5);
-- after one regen the item still failing -> keep original, mark "warn",
-  visible card note + auxTags.gene_gate transmission (warn does NOT block persist).
+- after one regen the item still failing -> keep original, mark "warn"
+  (4d/PRD-C-012: warn is a single low gate -> card display stays SILENT;
+  the truth still flows into auxTags.gene_gate and the both-low matrix).
 
 gene_gate_decision is a pure function (zero LLM / zero IO).
 Node-level behavior is tested with monkeypatched judge/regen (no network).
@@ -20,8 +21,6 @@ from agents.variant import (
     GENE_GATE_PASS,
     GENE_GATE_SKIPPED,
     GENE_GATE_WARN,
-    NOTE_GENE_WARN,
-    _fmt_item,
     gene_gate,
     gene_gate_decision,
     variant,
@@ -256,36 +255,8 @@ def test_already_marked_items_are_not_rejudged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# card text + auxTags transmission (warn must be visible, not blocking)
+# auxTags transmission (truth always flows to audit, regardless of 4d display)
 # ---------------------------------------------------------------------------
-
-def test_fmt_item_renders_gene_warn_note():
-    card = _fmt_item(
-        1,
-        {
-            "stem": "s",
-            "answer": "a",
-            "solution": "sol",
-            "check": {"badge": "ok"},
-            "gene": {"gate": GENE_GATE_WARN, "reason": "replay"},
-        },
-    )
-    assert NOTE_GENE_WARN in card
-
-
-def test_fmt_item_no_gene_note_when_pass():
-    card = _fmt_item(
-        1,
-        {
-            "stem": "s",
-            "answer": "a",
-            "solution": "sol",
-            "check": {"badge": "ok"},
-            "gene": {"gate": GENE_GATE_PASS},
-        },
-    )
-    assert NOTE_GENE_WARN not in card
-
 
 def test_aux_tags_carry_gene_gate_mark():
     facts = {"qtype": "qt", "subject_id": "100200300"}

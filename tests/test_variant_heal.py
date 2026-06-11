@@ -9,8 +9,9 @@ Coverage map (all LLM calls monkeypatched -> zero network):
 - gene mark survival: solve_explain heal paths (sympy-FAIL heal + degrade heal)
   carry the original item's gene mark onto the healed draft (auxTags.gene_gate
   stays queryable; later edit turns never re-judge / silently replace the item)
-- card dedupe: _fmt_item skips its warn line when solve_explain already
-  appended the same NOTE_* into item.solution (no double banner on the card)
+- 4d visibility matrix (PRD-C-012): _apply_visibility maps check x gene truth
+  onto display tier/badge/note -- positive/neutral/silent only, warn requires
+  BOTH gates low; sympy-proven-wrong items get dropped, never shown
 - EXTRACT_PROMPT contract pin: the root-rejection (she-gen) guidance for
   equation_solve stays in the payload contract
 """
@@ -23,15 +24,19 @@ from agents import math_verify
 from agents.variant import (
     EXTRACT_PROMPT,
     GENE_GATE_SKIPPED,
+    NOTE_BOTH_GATES_LOW,
     NOTE_PROOF_REVIEW,
-    NOTE_UNVERIFIED,
-    NOTE_VERIFY_FAIL,
+    NOTE_SELF_CHECK_OK,
+    NOTE_VERIFIED_OK,
     REVIEW_PROOF,
-    VERIFY_FAIL_AFTER_REGEN,
+    TIER_BOTH_LOW,
+    TIER_PROOF,
+    TIER_SELF_OK,
+    TIER_SILENT,
+    TIER_VERIFIED,
     VERIFY_SYMPY_PASS,
     VERIFY_UNVERIFIED,
-    _append_card_note,
-    _fmt_item,
+    _apply_visibility,
     _machine_verify,
     _regen_once,
     _solve_one,
@@ -199,42 +204,106 @@ def test_degrade_heal_carries_original_gene(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# card dedupe: NOTE embedded in solution -> _fmt_item must not repeat the banner
+# 4d visibility matrix (PRD-C-012): only-say-good, warn needs BOTH gates low
 # ---------------------------------------------------------------------------
 
-def test_fmt_item_proof_note_rendered_once():
-    item = {"stem": "s", "answer": "a", "solution": "sol",
-            "check": {"badge": "warn", "review": REVIEW_PROOF, "solved_answer": None}}
-    _append_card_note(item, NOTE_PROOF_REVIEW)  # what solve_explain does
-    card = _fmt_item(1, item)
-    assert card.count(NOTE_PROOF_REVIEW) == 1
+def test_visibility_sympy_pass_is_verified_even_with_gene_warn():
+    # strong positive wins; a single low gate (gene) stays silent
+    item = {"solution": "sol", "check": {"badge": "ok", "verify": VERIFY_SYMPY_PASS},
+            "gene": {"gate": "warn"}}
+    _apply_visibility(item)
+    assert item["check"]["tier"] == TIER_VERIFIED
+    assert item["check"]["badge"] == "ok"
+    assert NOTE_VERIFIED_OK in item["solution"]
+    assert "⚠" not in item["solution"]
 
 
-def test_fmt_item_verify_fail_note_rendered_once():
-    item = {"stem": "s", "answer": "a", "solution": "sol",
-            "check": {"badge": "warn", "verify": VERIFY_FAIL_AFTER_REGEN, "computed": "3"}}
-    _append_card_note(item, NOTE_VERIFY_FAIL)
-    card = _fmt_item(1, item)
-    assert card.count("程序验算未通过") == 1
+def test_visibility_self_check_match_is_light_positive():
+    item = {"solution": "sol",
+            "check": {"badge": "ok", "verify": VERIFY_UNVERIFIED, "self_check": "match"}}
+    _apply_visibility(item)
+    assert item["check"]["tier"] == TIER_SELF_OK
+    assert NOTE_SELF_CHECK_OK in item["solution"]
+    assert "未经程序验算" not in item["solution"]  # old scary banner is gone (G3)
 
 
-def test_fmt_item_unverified_note_rendered_once():
-    item = {"stem": "s", "answer": "a", "solution": "sol",
-            "check": {"badge": "warn", "verify": VERIFY_UNVERIFIED, "solved_answer": "2"}}
-    _append_card_note(item, NOTE_UNVERIFIED)
-    card = _fmt_item(1, item)
-    assert card.count(NOTE_UNVERIFIED) == 1
-    assert "我没算准" not in card  # solution note wins; no second overlapping banner
+def test_visibility_single_low_gate_stays_silent():
+    # verify-side low (mismatch) but gene ok -> silent: no note, badge ok
+    item = {"solution": "sol",
+            "check": {"badge": "warn", "verify": VERIFY_UNVERIFIED, "self_check": "mismatch"},
+            "gene": {"gate": "pass"}}
+    _apply_visibility(item)
+    assert item["check"]["tier"] == TIER_SILENT
+    assert item["check"]["badge"] == "ok"
+    assert item["solution"] == "sol"  # nothing appended
 
 
-def test_fmt_item_legacy_warn_item_still_gets_banner():
-    # items without an embedded note (pre-PRD-C-010 state) keep the warn line
-    card = _fmt_item(
-        1,
-        {"stem": "s", "answer": "a", "solution": "sol",
-         "check": {"badge": "warn", "solved_answer": "2"}},
-    )
-    assert "我没算准" in card
+def test_visibility_both_gates_low_warns():
+    item = {"solution": "sol",
+            "check": {"badge": "warn", "verify": VERIFY_UNVERIFIED, "self_check": "mismatch"},
+            "gene": {"gate": "warn"}}
+    _apply_visibility(item)
+    assert item["check"]["tier"] == TIER_BOTH_LOW
+    assert item["check"]["badge"] == "warn"
+    assert NOTE_BOTH_GATES_LOW in item["solution"]
+
+
+def test_visibility_proof_is_neutral_and_idempotent():
+    item = {"solution": "sol",
+            "check": {"badge": "ok", "review": REVIEW_PROOF, "solved_answer": None}}
+    _apply_visibility(item)
+    _apply_visibility(item)  # idempotent: note appended once
+    assert item["check"]["tier"] == TIER_PROOF
+    assert item["solution"].count(NOTE_PROOF_REVIEW) == 1
+
+
+def test_visibility_proof_struct_low_plus_gene_warn_is_both_low():
+    item = {"solution": "sol",
+            "check": {"badge": "warn", "review": REVIEW_PROOF, "solved_answer": None},
+            "gene": {"gate": "warn"}}
+    _apply_visibility(item)
+    assert item["check"]["tier"] == TIER_BOTH_LOW
+
+
+# ---------------------------------------------------------------------------
+# 4d plan A: sympy-proven-wrong item is DROPPED after failed heal (never shown)
+# ---------------------------------------------------------------------------
+
+def test_fail_after_failed_heal_drops_item(monkeypatch):
+    async def verify_fn(item, solved_answer):
+        return {"verdict": "fail", "detail": "wrong", "computed": "3"}
+
+    async def regen_fn(item, facts, feedback=None):
+        return None  # heal attempt fails -> drop, not keep-with-warn
+
+    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3"}))
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
+    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "解答"}])
+    out = asyncio.run(solve_explain(state, {}))
+    assert out["items"] == []  # the wrong item never reaches the teacher
+    assert len(out["dropped_notes"]) == 1
+    assert "已剔除" in out["dropped_notes"][0]
+
+
+def test_fail_heal_success_keeps_count_and_no_drop(monkeypatch):
+    async def verify_fn(item, solved_answer):
+        if item.get("stem") == "old":
+            return {"verdict": "fail", "detail": "wrong", "computed": "3"}
+        return {"verdict": "pass", "detail": "ok", "computed": "5"}
+
+    async def regen_fn(item, facts, feedback=None):
+        return {"stem": "new", "answer": "5", "solution": "s", "qtype": "qt",
+                "difficulty": 3, "level": "normal", "injected_kp": None}
+
+    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3", "new": "5"}))
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
+    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "qt"}])
+    out = asyncio.run(solve_explain(state, {}))
+    assert len(out["items"]) == 1
+    assert out["dropped_notes"] == []
+    assert out["items"][0]["check"]["tier"] == TIER_VERIFIED
 
 
 # ---------------------------------------------------------------------------

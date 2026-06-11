@@ -56,14 +56,27 @@ VERIFY_SYMPY_PASS = "sympy_pass"  # 程序验算通过（入库可查的抓手�
 # 🔴 验算墙钟预算（G5 反挂死）：sympy 对病态载荷（如 9**9**9 / 超高次方程）可能无界计算，
 # _machine_verify 用 asyncio.wait_for 包 to_thread —— 超时按 degrade 降级（线程不可杀但流程解锁）。
 VERIFY_TIMEOUT_S = 10.0
-VERIFY_FAIL_AFTER_REGEN = "fail_after_regen"  # 验算 fail 且回炉 1 次后仍不过
+# 🔴 4d 方案A 后 fail_after_regen 不再外发（真 fail 题剔除）；常量保留：旧库存量 aux_tags
+# 仍有该值（FE 兜底/审计查询用），勿删。
+VERIFY_FAIL_AFTER_REGEN = "fail_after_regen"
 VERIFY_UNVERIFIED = "unverified"  # degrade：sympy 吃不下 → 退回 LLM 自检 fallback
 REVIEW_PROOF = "proof_needs_human"  # 证明/开放/作图类：不进 sympy，转人审
 
-# 题卡可见文本（追加在 item.solution 尾部 → assemble/_fmt_item 渲染 + 入库 analyze 字段同步可见）
-NOTE_VERIFY_FAIL = "⚠ 程序验算未通过，请老师核对。"
-NOTE_UNVERIFIED = "⚠ 未经程序验算。"
-NOTE_PROOF_REVIEW = "⚠ 证明/开放类题不做程序验算，请老师人工审核。"
+# 题卡可见文本（追加在 item.solution 尾部 → 入库 analyze 字段同步可见）。
+# 🔴 4d 可见性矩阵（PRD-C-012，用户拍板 2026-06-11「只说好、不说坏，除非双闸都不高」）：
+# 外显只有 正面/中性/沉默 三类，⚠ 仅双闸（闸B verify × 闸A gene）皆存疑；
+# 真值 check.verify / gene.gate 原样入 aux_tags 审计，不洗白。
+NOTE_VERIFIED_OK = "✓ 程序验算通过。"
+NOTE_SELF_CHECK_OK = "✓ 已独立复算一致。"
+NOTE_BOTH_GATES_LOW = "⚠ 程序验算与平行度双重存疑，请老师重点核对。"
+NOTE_PROOF_REVIEW = "ℹ 证明/开放类题不做程序验算，已转人工复核。"
+
+# 题卡外显层级（check.tier → artifact.tier → FE 徽章；展示层与真值解耦）
+TIER_VERIFIED = "verified"  # 强正面：sympy 验算通过
+TIER_SELF_OK = "self_ok"  # 轻正面：程序不可验，LLM 独立复算一致
+TIER_PROOF = "proof"  # 中性：证明/开放类转人审
+TIER_SILENT = "silent"  # 沉默：单闸存疑（不说坏）
+TIER_BOTH_LOW = "both_low"  # ⚠：双闸皆存疑
 
 # ---------------------------------------------------------------------------
 # 闸A·基因闸（验"是不是平行题"，与闸B"答案对不对"正交。依据 12-题目DNA方法论 §2/§5）：
@@ -72,12 +85,12 @@ NOTE_PROOF_REVIEW = "⚠ 证明/开放类题不做程序验算，请老师人工
 # 判决 = 一次轻量 LLM 比对(受约束 JSON) + 纯函数 gene_gate_decision；
 # rework → 既有 REGEN 回炉 1 次再判；仍不过 → gene_gate:"warn" 只警示不硬拦(v1)；
 # judge 调用/解析失败 → 按 pass 放行标 "skipped"（闸A是增强不是关卡，绝不卡死流程，G5）。
-# 标记落 item.gene.gate → 入库透传 auxTags.gene_gate（_apply_labels）+ 题卡 _fmt_item 可见。
+# 标记落 item.gene.gate → 入库透传 auxTags.gene_gate（_apply_labels）；4d 后 gene=warn
+# 单闸不再外显负面（沉默），仅参与 _apply_visibility 双闸裁决。
 # ---------------------------------------------------------------------------
 GENE_GATE_PASS = "pass"  # 基因比对通过（平行题）
-GENE_GATE_WARN = "warn"  # 回炉 1 次后仍不过 → 警示不拦截
+GENE_GATE_WARN = "warn"  # 回炉 1 次后仍不过 → 真值留档；外显层按 4d 矩阵裁决
 GENE_GATE_SKIPPED = "skipped"  # judge 调用失败/JSON 解析失败 → 放行留痕
-NOTE_GENE_WARN = "⚠ 与母题平行度存疑"
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +118,9 @@ class VariantState(MessagesState, total=False):
     knobs: dict[str, Any] | None
     # generate 的代码级配方校验缺陷清单（整组 retry 1 次后仍不符 → assemble 头部外显 ⚠）
     shape_defects: list[str]
+    # 4d 方案A（PRD-C-012）：本轮被剔除题的叙事（sympy 证实标答错且重生未果 → 不外发），
+    # solve_explain 每轮重写（非累计），assemble 摘要外显「本组少 N 道」
+    dropped_notes: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +459,8 @@ def _artifact_payload(
                 "level": str(it.get("level") or "normal"),
                 # 🔴 verify 与 review 互斥不同键：证明类只有 review（proof_needs_human）
                 "verify": chk.get("verify") or chk.get("review") or None,
+                # 4d 外显层级（FE 徽章唯一依据；旧线程恢复无 tier → FE 按「只说好」兜底）
+                "tier": chk.get("tier") or None,
                 "gene": (it.get("gene") or {}).get("gate") or None,
                 # persisted：flags 优先（persist 节点按回执现算）；否则读 item 簿记
                 # （persist_to_bank 成功后回写 state.items[i].persisted → 后续编辑轮
@@ -690,6 +708,9 @@ GENERATE_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA�
 - **主考点 + 年级 硬守恒**：每道题都必须仍考「{kp_name}」、仍在该年级范围内。
 - 守{{解题结构, 难度(普通题)}}；只换{{数字, 场景}}。
 - 难题 1 道升一档；可综合 1 个相邻知识点(主考点仍守，注入为副点)，填到 injected_kp。
+- **答案可程序验算**(PRD-C-012 4c)：answer 优先给可计算的数值/表达式（如 $x_1=2, x_2=3$、
+  $3\\sqrt{{2}}$、选项字母），能出数值答案就不要出纯文字表述答案（证明/作图类除外）；
+  数字设计成解恰好整洁可验（避免无理数逼近、区间叙述、带单位混排）。
 
 只输出 JSON 数组(不要解释)，每个元素：
 {{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
@@ -1188,7 +1209,8 @@ REGEN_PROMPT = """下面这道变式题，独立解出的答案与题面标答�
 主考点(硬守恒): {kp_name}
 年级(硬守恒): {grade}
 原题干: {stem}
-要求：仍考「{kp_name}」、仍在「{grade}」、{level} 难度；换数字/场景使题面与答案自洽。
+要求：仍考「{kp_name}」、仍在「{grade}」、{level} 难度；换数字/场景使题面与答案自洽；
+answer 优先给可计算的数值/表达式（可程序验算），数字设计成解恰好整洁。
 
 只输出 JSON：
 {{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp}}}
@@ -1251,6 +1273,42 @@ def _append_card_note(item: dict, note: str) -> None:
     """把验算标记行追加到题卡可见文本字段(solution)尾部 → UI 渲染 + 入库 analyze 同步可见。"""
     sol = str(item.get("solution") or "").rstrip()
     item["solution"] = f"{sol}\n\n> {note}" if sol else f"> {note}"
+
+
+_TIER_NOTES = {
+    TIER_VERIFIED: NOTE_VERIFIED_OK,
+    TIER_SELF_OK: NOTE_SELF_CHECK_OK,
+    TIER_PROOF: NOTE_PROOF_REVIEW,
+    TIER_BOTH_LOW: NOTE_BOTH_GATES_LOW,
+    # TIER_SILENT 无 note（沉默 = 不说话）
+}
+
+
+def _apply_visibility(item: dict) -> None:
+    """4d 可见性矩阵（PRD-C-012）：check×gene 真值 → 外显 tier + badge + 题卡 note。
+
+    🔴 只定展示层，真值不动（verify/gene 原样进 aux_tags 审计）。幂等：note 已在
+    solution 里不重复追加。⚠ 仅 TIER_BOTH_LOW（双闸皆存疑）；单闸存疑 = 沉默。
+    """
+    chk = item.get("check") or {}
+    gene_low = (item.get("gene") or {}).get("gate") == GENE_GATE_WARN
+    if chk.get("review") == REVIEW_PROOF:
+        # 证明类：badge=warn 表示结构软校验缺骨架（verify 侧低）
+        struct_low = chk.get("badge") == "warn"
+        tier = TIER_BOTH_LOW if (struct_low and gene_low) else TIER_PROOF
+    elif chk.get("verify") == VERIFY_SYMPY_PASS:
+        tier = TIER_VERIFIED  # 强正面（gene 即便 warn 也不外显负面——单闸沉默）
+    elif chk.get("self_check") == "match":
+        tier = TIER_SELF_OK  # 程序不可验但独立复算一致 → 轻正面
+    else:
+        # verify 侧低（unverified 且自检不一致）：gene 也低才 ⚠，否则沉默
+        tier = TIER_BOTH_LOW if gene_low else TIER_SILENT
+    chk["tier"] = tier
+    chk["badge"] = "warn" if tier == TIER_BOTH_LOW else "ok"
+    item["check"] = chk
+    note = _TIER_NOTES.get(tier)
+    if note and note not in str(item.get("solution") or ""):
+        _append_card_note(item, note)
 
 
 async def _extract_payload(
@@ -1397,14 +1455,17 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
     - 其余（计算/解答/填空/选择）→ LLM 抽验算载荷 → math_verify.verify（纯 sympy）：
       pass → check.verify=sympy_pass 照常；
       fail → 既有 REGEN 回炉 1 次（computed/detail 注回 prompt）→ 重生版再验（须 pass+守恒），
-             仍不过 → 保留原版 badge=warn + verify=fail_after_regen + 题卡尾追加可见提示；
-      degrade → 保留原有「LLM 独立解 + _norm 比对」自检作 fallback，verify=unverified + 可见提示。
+             🔴 仍不过 → **剔除不外发**（4d 方案A·用户拍板 2026-06-11：程序证实标答错的题
+             老师永远看不到；剔除过程思路条透明叙事 + dropped_notes 进摘要）；
+      degrade → 保留原有「LLM 独立解 + _norm 比对」自检作 fallback（check.self_check 记
+             match/mismatch），外显层交 _apply_visibility 按 4d 矩阵定 tier/note。
     🔴 判决只读 verify() 的 verdict，永不采信 LLM 自评；任何验算环节失败均降级继续，绝不抛（G5）。
     🔴 凡进 items 的题一律过本节点，无 check 不许进 assemble（remove 后旧题带 check 原样通过）。
     """
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
     out: list[dict] = []
+    dropped: list[str] = []  # 本轮剔除叙事（assemble 摘要 + 思路条同步外显）
 
     for i, it in enumerate(items):
         item = dict(it)
@@ -1422,10 +1483,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
                 "solved_answer": None,
                 "review": REVIEW_PROOF,
             }
-            note = NOTE_PROOF_REVIEW
-            if not struct_ok:
-                note += "（题面缺「已知/求证/证明」类结构，请重点看）"
-            _append_card_note(item, note)
+            _apply_visibility(item)
             out.append(item)
             continue
 
@@ -1447,6 +1505,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
                 "verify_detail": res.get("detail"),
                 "computed": res.get("computed"),
             }
+            _apply_visibility(item)
             out.append(item)
             continue
 
@@ -1486,18 +1545,22 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
                         }
                         healed = draft
             if healed:
+                _apply_visibility(healed)
                 out.append(healed)
             else:
-                # 回炉后仍不过 → 保留原版标 ⚠，不拦截流程
-                item["check"] = {
-                    "badge": "warn",
-                    "solved_answer": solved_answer,
-                    "verify": VERIFY_FAIL_AFTER_REGEN,
-                    "verify_detail": res.get("detail"),
-                    "computed": res.get("computed"),
-                }
-                _append_card_note(item, NOTE_VERIFY_FAIL)
-                out.append(item)
+                # 🔴 4d 方案A（PRD-C-012 用户拍板）：sympy 证实标答错、重生仍不过 → 剔除不外发。
+                # 老师永远看不到错题（题卡层无负面文案需求）；剔除过程思路条透明叙事，
+                # 摘要经 dropped_notes 说明本组少一道。真值（fail 详情）只进叙事/日志，不进题卡。
+                _emit_stage(
+                    "verify",
+                    "程序验算",
+                    "warn",
+                    f"第 {i + 1} 道程序验出标答错误（重生一次仍未过），已剔除",
+                )
+                dropped.append(
+                    f"1 道{item.get('qtype') or ''}题程序验出标答错误（程序算得"
+                    f"「{res.get('computed')}」与标答不符，重生一次仍未过），已剔除"
+                )
             continue
 
         # ── degrade：sympy 吃不下（载荷抽不成/超范围）→ 保留既有 LLM 自检 fallback ──
@@ -1508,8 +1571,9 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
                 "solved_answer": solved_answer,
                 "verify": VERIFY_UNVERIFIED,
                 "verify_detail": res.get("detail"),
+                "self_check": "match",  # 4d：独立复算一致 → 轻正面（不再打 ⚠ 未经程序验算）
             }
-            _append_card_note(item, NOTE_UNVERIFIED)
+            _apply_visibility(item)
             out.append(item)
             continue
 
@@ -1532,30 +1596,36 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
                         "badge": "ok",
                         "solved_answer": r_answer,
                         "verify": VERIFY_UNVERIFIED,
+                        "self_check": "match",
                     }
-                    _append_card_note(draft, NOTE_UNVERIFIED)
                     # 🔴 闸A 标记随愈合保留（同 FAIL 自愈路径：不丢 gene、不被编辑轮重判）
                     draft["gene"] = item.get("gene") or {
                         "gate": GENE_GATE_SKIPPED,
                         "reason": "healed-in-solve",
                     }
+                    _apply_visibility(draft)
                     healed = draft
 
         if healed:
             out.append(healed)
         else:
-            # 守恒破 或 重生仍不过 → 保留原版打 ⚠（仍属未经程序验算）
+            # 守恒破 或 重生仍不过 → 保留（程序没证明它错，只是没把握）。
+            # 4d：verify 侧低 → 单闸沉默 / gene 也低 → ⚠（_apply_visibility 矩阵裁决）
             item["check"] = {
                 "badge": "warn",
                 "solved_answer": solved_answer,
                 "verify": VERIFY_UNVERIFIED,
                 "verify_detail": res.get("detail"),
+                "self_check": "mismatch",
             }
-            _append_card_note(item, NOTE_UNVERIFIED)
+            _apply_visibility(item)
             out.append(item)
 
-    _emit_stage("verify", "程序验算", "done")
-    return {"items": out, "messages": []}
+    if dropped:
+        _emit_stage("verify", "程序验算", "done", f"剔除 {len(dropped)} 道，保留 {len(out)} 道")
+    else:
+        _emit_stage("verify", "程序验算", "done")
+    return {"items": out, "dropped_notes": dropped, "messages": []}
 
 
 # ---------------------------------------------------------------------------
@@ -1741,55 +1811,26 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
     return {"items": out, "messages": []}
 
 
-def _fmt_item(idx: int, it: dict) -> str:
-    badge = (it.get("check") or {}).get("badge", "warn")
-    mark = "✓" if badge == "ok" else "⚠"
-    lvl = "难题" if it.get("level") == "hard" else "普通"
-    inj = it.get("injected_kp")
-    inj_s = f"（综合相邻考点：{inj}）" if inj else ""
-    warn_s = ""
-    if badge != "ok":
-        chk = it.get("check") or {}
-        # 🔴 防双写：solve_explain 已把对应 NOTE_* 追加进 solution（_append_card_note，
-        # 随入库 analyze 持久），题卡渲染时同义警示只出一遍 —— solution 已含则跳过 warn_s。
-        sol = str(it.get("solution") or "")
-        if chk.get("review") == REVIEW_PROOF:
-            if NOTE_PROOF_REVIEW not in sol:
-                warn_s = f"\n> {NOTE_PROOF_REVIEW}"
-        elif chk.get("verify") == VERIFY_FAIL_AFTER_REGEN:
-            if NOTE_VERIFY_FAIL not in sol:
-                computed = chk.get("computed")
-                warn_s = (
-                    f"\n> ⚠ 程序验算未通过（sympy 算得「{computed}」与标答不符，回炉一次仍未过），请老师核对。"
-                )
-        else:
-            if NOTE_UNVERIFIED not in sol:
-                sa = chk.get("solved_answer")
-                warn_s = f"\n> ⚠ 我没算准（独立解得「{sa}」与标答不一致），老师重点看。"
-    # 闸A·基因闸警示（与闸B 正交：badge=ok 的题也可能平行度存疑）
-    gene_s = ""
-    gene = it.get("gene") or {}
-    if gene.get("gate") == GENE_GATE_WARN:
-        g_reason = gene.get("reason")
-        gene_s = (
-            f"\n> {NOTE_GENE_WARN}"
-            + (f"（{g_reason}）" if g_reason else "（题型/难度/解法结构或换皮程度与母题不平行）")
-            + "，请老师确认。"
-        )
-    return (
-        f"### 第 {idx} 题 {mark}（{lvl}·{it.get('qtype', '')}·难度{it.get('difficulty', '?')}）{inj_s}\n\n"
-        f"{it.get('stem', '')}\n\n"
-        f"**答案**：{it.get('answer', '')}\n\n"
-        f"**解析**：{it.get('solution', '')}{warn_s}{gene_s}\n"
-    )
+def _status_summary(items: list[dict]) -> str:
+    """按 4d tier 汇总状态短语（只说好：正面/中性计数，⚠ 仅双闸低）。旧数据无 tier 不计入。"""
+    tiers = [(it.get("check") or {}).get("tier") for it in items]
+    parts = []
+    if n := tiers.count(TIER_VERIFIED):
+        parts.append(f"{n} 道程序验算通过")
+    if n := tiers.count(TIER_SELF_OK):
+        parts.append(f"{n} 道已独立复算一致")
+    if n := tiers.count(TIER_PROOF):
+        parts.append(f"{n} 道证明类已转人工复核")
+    if n := tiers.count(TIER_BOTH_LOW):
+        parts.append(f"{n} 道需重点核对（题卡已标注）")
+    return "、".join(parts) or f"{len(items)} 道已生成"
 
 
 async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
-    """题组快照：每题带 solution 解析 + check ✓/⚠（状态已定）+ 外显配方（老师指定/默认）+ 变更摘要。"""
+    """题组摘要（P1 聊天瘦身·PRD-C-012）：左栏只发摘要头——配方/守恒DNA/状态计数/旋钮提示；
+    题干/答案/解析全文**只走右栏 artifact 题卡**，聊天流不再复读（用户拍板 2026-06-11）。"""
     items = state.get("items") or []
     facts = _mother_facts(state)
-    n_ok = sum(1 for it in items if (it.get("check") or {}).get("badge") == "ok")
-    n_warn = len(items) - n_ok
 
     # 配方外显：有 knobs → "按你的要求: ..."；无 → 旧默认文案（行为不变）
     desc = knobs_desc(state.get("knobs"))
@@ -1797,18 +1838,20 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     # 代码级配方校验缺陷（generate 整组 retry 1 次后仍不符）→ 头部外显 ⚠，不拦截
     defects = state.get("shape_defects") or []
     defect_s = ("\n\n⚠ 配方未完全满足：" + "；".join(defects)) if defects else ""
+    # 4d 方案A：被剔除题的摘要说明（过程已在思路条叙事，这里收口"本组为何少了"）
+    dropped = state.get("dropped_notes") or []
+    dropped_s = ("\n\n" + "；".join(dropped)) if dropped else ""
 
     head = (
-        f"## 举一反三 · {len(items)} 道变式（{recipe_s}）{defect_s}\n\n"
+        f"## 举一反三 · {len(items)} 道变式（{recipe_s}）{defect_s}{dropped_s}\n\n"
         f"**母题 DNA**：考点「{facts['kp_name']}」· 年级「{facts['grade']}」· 题型「{facts['qtype']}」（硬守恒）\n\n"
-        f"**状态**：{n_ok} 道 ✓ 通过自检"
-        + (f"，{n_warn} 道 ⚠ 需老师重点看" if n_warn else "")
-        + "\n\n旋钮可拨：数量 / 数字 / 场景 / 难度 / 题型(可配比) / 解法。说「这组可以了」即入库。\n\n---\n"
+        f"**状态**：{_status_summary(items)}\n\n"
+        "题目详情见右侧题卡。旋钮可拨：数量 / 数字 / 场景 / 难度 / 题型(可配比) / 解法。"
+        "说「这组可以了」即入库。"
     )
-    body = "\n".join(_fmt_item(i + 1, it) for i, it in enumerate(items))
     # artifact 快照帧（PRD-C-011）：每轮题组变化都过 assemble → FE 题卡每轮拿最新快照
     _emit_artifact(state)
-    return {"messages": [AIMessage(content=head + body)]}
+    return {"messages": [AIMessage(content=head)]}
 
 
 # ===========================================================================

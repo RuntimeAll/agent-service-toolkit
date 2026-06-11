@@ -548,6 +548,27 @@ def test_assemble_header_shows_teacher_recipe_and_defects():
     assert "配方：默认" not in text
 
 
+def test_assemble_message_is_summary_only_p1():
+    # P1 聊天瘦身（PRD-C-012 G1）：左栏只发摘要——不复读题干/解析全文，长度受限；
+    # 4d 状态计数按 tier 汇总；dropped_notes（方案A 剔除）收口进摘要。
+    state = dict(
+        _FACTS_STATE,
+        items=[
+            {"stem": "stem-full-text", "answer": "a", "solution": "sol-full",
+             "check": {"badge": "ok", "tier": "verified"}},
+            {"stem": "another-stem", "answer": "b", "solution": "sol-2",
+             "check": {"badge": "ok", "tier": "self_ok"}},
+        ],
+        dropped_notes=["1 道解答题程序验出标答错误（程序算得「3」与标答不符，重生一次仍未过），已剔除"],
+    )
+    text = _assembled(state)
+    assert "### 第" not in text  # G1：无题块
+    assert "stem-full-text" not in text and "sol-full" not in text  # 不复读题目内容
+    assert "1 道程序验算通过" in text and "1 道已独立复算一致" in text  # tier 计数
+    assert "已剔除" in text  # 方案A 摘要说明
+    assert len(text) <= 600  # G1：摘要长度上限
+
+
 def test_assemble_header_without_knobs_keeps_legacy_text():
     state = dict(
         _FACTS_STATE,

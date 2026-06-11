@@ -18,6 +18,7 @@
 
 import asyncio
 import json
+import re
 import sys
 import uuid
 
@@ -103,10 +104,13 @@ async def main() -> int:
             ok = False
         else:
             dirty = []
+            # 🔴 与 variant._LITERAL_NL_RE 同口径：\n 后跟小写字母 = LaTeX 命令（\ne/\neq/\nabla/\not…）
+            #   合法保留；只有 \n 后非小写字母才算字面换行残留（2026-06-11 真机踩出 $m\ne 0$ 误报）
+            literal_nl = re.compile(r"\\n(?![a-z])")
             for it in artifacts[-1].get("items", []):
                 for k in ("stem", "answer", "solution"):
                     v = str(it.get(k) or "")
-                    if "\\n" in v.replace("\\neq", "").replace("\\nabla", ""):
+                    if literal_nl.search(v):
                         dirty.append(f"#{it.get('index')}.{k} 含字面\\n")
                     if "\\(" in v or "\\[" in v:
                         dirty.append(f"#{it.get('index')}.{k} 含 \\( \\[ 定界")

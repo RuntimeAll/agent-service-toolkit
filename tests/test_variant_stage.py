@@ -291,6 +291,8 @@ def test_solve_explain_emits_per_item_progress_then_done(monkeypatch):
 
 
 def test_solve_explain_emits_warn_when_item_goes_back_to_furnace(monkeypatch):
+    # 4d 方案A（PRD-C-012）：sympy FAIL + 重生失败 → 剔除不外发；
+    # 思路条透明叙事：回炉中 → 已剔除 → done 带「剔除/保留」计数。
     calls = _record_stages(monkeypatch)
 
     async def solve_stub(stem):
@@ -300,16 +302,18 @@ def test_solve_explain_emits_warn_when_item_goes_back_to_furnace(monkeypatch):
         return {"verdict": math_verify.FAIL, "detail": "mismatch", "computed": "x=9"}
 
     async def regen_none(item, facts, feedback=None):
-        return None  # regen fails -> original kept with warn badge
+        return None  # heal fails -> item dropped (plan A), never shown to teacher
 
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_fail)
     monkeypatch.setattr(variant_mod, "_regen_once", regen_none)
     state = dict(_FACTS_STATE, items=[{"stem": "a", "answer": "x=2", "qtype": "解答"}])
     out = asyncio.run(solve_explain(state, {}))
-    assert out["items"][0]["check"]["badge"] == "warn"
+    assert out["items"] == []
+    assert len(out["dropped_notes"]) == 1
     assert ("verify", "程序验算", "warn", "第 1 道回炉重生中") in calls
-    assert calls[-1] == ("verify", "程序验算", "done", None)
+    assert any(c[2] == "warn" and "已剔除" in (c[3] or "") for c in calls)
+    assert calls[-1] == ("verify", "程序验算", "done", "剔除 1 道，保留 0 道")
 
 
 def test_persist_emits_running_then_done_with_counts(monkeypatch):
@@ -411,6 +415,7 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
         "difficulty": 3,
         "level": "normal",
         "verify": "sympy_pass",
+        "tier": None,  # 旧结构 check 无 tier（4d 前存量）→ FE 按「只说好」兜底
         "gene": "pass",
         "persisted": False,
     }
@@ -446,6 +451,7 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "difficulty": 0,
         "level": "normal",
         "verify": None,
+        "tier": None,
         "gene": None,
         "persisted": False,
     }
