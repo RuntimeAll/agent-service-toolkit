@@ -46,6 +46,8 @@ CONF_GATE = 0.75
 MAX_HEAL = 1
 # 默认配方：3 道 = 2 普通 + 1 难（设计 §5）
 DEFAULT_SHAPE = {"normal": 2, "hard": 1}
+# P2 逐题过闸并发上限（PRD-C-012：generate 流内 eager + gene_gate/solve_explain 节点共用口径）
+GATE_CONCURRENCY = 3
 
 # ---------------------------------------------------------------------------
 # 闸B（PRD-C-010）：sympy 程序验算 + 题型分流的标记值
@@ -483,15 +485,29 @@ def _artifact_payload(
 
 
 def _emit_artifact(
-    state: VariantState, persisted_flags: list[bool] | None = None
+    state: VariantState,
+    persisted_flags: list[bool] | None = None,
+    *,
+    partial: bool = False,
+    expected_total: int | None = None,
 ) -> None:
-    """发 artifact 快照帧（FE 题卡数据源）。任何异常静默吞，artifact 是增强不是关卡。"""
+    """发 artifact 快照帧（FE 题卡数据源）。任何异常静默吞，artifact 是增强不是关卡。
+
+    🔴 P2 增量帧（PRD-C-012）：partial=True 时帧带 {"partial": true, "expected_total": N}
+    （每题闸链完成发一帧，items=按生成序已完成的题）；assemble 定稿帧不带 partial 键
+    （FE 老逻辑只认最后一帧也不坏，向后兼容）。
+    """
     try:
         writer = get_stream_writer()
     except Exception:  # noqa: BLE001 — 无 runtime context（单测直调节点）→ 静默 no-op
         return
     try:
-        writer(ChatMessage(content=[{"artifact": _artifact_payload(state, persisted_flags)}], role="custom"))
+        payload = _artifact_payload(state, persisted_flags)
+        if partial:
+            payload["partial"] = True
+            if expected_total is not None:
+                payload["expected_total"] = int(expected_total)
+        writer(ChatMessage(content=[{"artifact": payload}], role="custom"))
     except Exception:  # noqa: BLE001 — 发送失败绝不炸节点
         pass
 
@@ -694,16 +710,49 @@ async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
     return {"messages": [AIMessage(content=body)]}
 
 
-GENERATE_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA，造 {n} 道举一反三变式。
+# ---------------------------------------------------------------------------
+# 🔴 验算载荷契约（PRD-C-012 4a 单一事实源）：GENERATE / REGEN 出题自带 verify_payload
+# 与 EXTRACT 事后抽取共用同一段契约文本（提成常量防两份漂移）。
+# 注意：本常量以「format 模板片段」形态存在（花括号已双写转义），只能拼进会被
+# .format() 的 prompt 模板里使用，不要单独 .format() 它。
+# 排版（吃 aigeek 前缀缓存）：契约属固定段，各 prompt 把它排在变动段（题干/facts）之前。
+# ---------------------------------------------------------------------------
+_PAYLOAD_CONTRACT = """载荷契约（kind 四选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）。
+🔴 表达式硬边界（违反 = 程序直接拒收变 degrade，浪费一次验算机会）：
+- 只允许这些函数：sqrt / Abs / Min / Max（比大小、最值题用 Min(...)/Max(...)，绝对值用 Abs()）。
+- **禁止任何 Python 语法**：不许 if/else 三元、列表推导、len()/range()、布尔 True/False、比较式（< > ==）。
+- 选项/claimed 必须是**可算出的数值或表达式**（如 "-sqrt(25)"、"7/2"），不是真假陈述；某选项本身不是数值（如文字判断、区间）→ 整题输出 kind:none。
+- 计数类问题（"有几个是…"）若每项判定都是数值比较可写成 Min/Max/Abs 组合才抽，否则 kind:none——不要发明 Piecewise/Eq/逻辑与。
+1. 方程求解: {{"kind":"equation_solve","equations":["x**2-5*x+6=0"],"unknowns":["x"],"claimed":["2","3"]}}
+   （claimed = 标准答案申报的全部解；只支持单未知数。🔴 程序按"解集完全相等"判：若题目含舍根/取值范围
+   约束——如分式方程验增根后舍去、几何/应用题边长必须为正——标答只保留部分解时，**不要用本 kind**
+   （claimed 会少于裸方程全部解被误判 fail）：能数值验保留解就改用 kind 3 numeric，否则输出 kind:none）
+2. 表达式等价(化简/展开/因式分解): {{"kind":"expr_equiv","expr_a":"题面原式","expr_b":"标准答案给的结果式"}}
+3. 数值计算: {{"kind":"numeric","expr":"3*7/2","claimed":"10.5","tol":1e-6}}
+4. 选择题: {{"kind":"choice","ground":{{上述1/2/3任一子载荷}},"options":{{"A":"2","B":"3"}},"claimed_correct":"B"}}
+   （options 的值 = 各选项的数学值；ground = 由题干建立的真值载荷；claimed_correct = 标准答案的选项字母）"""
 
-母题 DNA：
-- 主考点(硬守恒，不可改): {kp_name}
-- 年级(硬守恒): {grade}
-- 题型: {qtype}
-- 母题题干: {stem}
-- 母题答案/解法骨架: {skeleton}
+# 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
+# 含 {占位符} 的变动段（配方/铁律的考点名、母题 DNA）移到末尾；语义一字不改。
+GENERATE_PROMPT = (
+    """你是浙教版初中数学命题专家。基于母题 DNA，造 {n} 道举一反三变式。
 
-配方(默认)：共 {n} 道 = {n_normal} 道普通(守难度) + {n_hard} 道难题(升一档)。
+只输出 JSON 数组(不要解释)，每个元素：
+{{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
+  "qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null",
+  "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
+
+格式硬规定（stem/answer/solution 三个字段都遵守）：
+- 数学式一律用 $...$ 包裹（行间长式用 $$...$$），如 $\\sqrt{{2}}$、$x^2-3x+2=0$；
+  **禁止**裸 LaTeX 命令、禁止 \\( \\) / \\[ \\] 定界符。
+- 换行用 JSON 标准转义 \\n（一个反斜杠），不要写成 \\\\n。
+
+verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题自己的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 该题标准答案）：
+"""
+    + _PAYLOAD_CONTRACT
+    + """
+抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ verify_payload 填 {{"kind":"none","reason":"原因"}}。
+
 铁律：
 - **主考点 + 年级 硬守恒**：每道题都必须仍考「{kp_name}」、仍在该年级范围内。
 - 守{{解题结构, 难度(普通题)}}；只换{{数字, 场景}}。
@@ -712,14 +761,15 @@ GENERATE_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA�
   $3\\sqrt{{2}}$、选项字母），能出数值答案就不要出纯文字表述答案（证明/作图类除外）；
   数字设计成解恰好整洁可验（避免无理数逼近、区间叙述、带单位混排）。
 
-只输出 JSON 数组(不要解释)，每个元素：
-{{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
-  "qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}
+配方(默认)：共 {n} 道 = {n_normal} 道普通(守难度) + {n_hard} 道难题(升一档)。
 
-格式硬规定（stem/answer/solution 三个字段都遵守）：
-- 数学式一律用 $...$ 包裹（行间长式用 $$...$$），如 $\\sqrt{{2}}$、$x^2-3x+2=0$；
-  **禁止**裸 LaTeX 命令、禁止 \\( \\) / \\[ \\] 定界符。
-- 换行用 JSON 标准转义 \\n（一个反斜杠），不要写成 \\\\n。"""
+母题 DNA：
+- 主考点(硬守恒，不可改): {kp_name}
+- 年级(硬守恒): {grade}
+- 题型: {qtype}
+- 母题题干: {stem}
+- 母题答案/解法骨架: {skeleton}"""
+)
 
 
 def _mother_facts(state: VariantState) -> dict:
@@ -1051,30 +1101,73 @@ def gene_judge_knobs_spec(
     return "老师指定配方（🔴 优先于上面的判别标准）：\n" + "\n".join(lines)
 
 
+def _normalize_generated_item(it: dict[str, Any], facts: dict) -> dict[str, Any]:
+    """单题规整 + 净化（generate 全量解析与 P2 流式增量解析共用的单一事实源）。
+
+    🔴 verify_payload（PRD-C-012 4a 出题自带验算载荷）仅当 dict 才随 item 流转——
+    item 内部字段：不进 artifact 帧、不入库（_artifact_payload / build_create_bo
+    均显式字段白名单，天然不外漏）。
+    """
+    out: dict[str, Any] = {
+        "stem": it.get("stem"),
+        "answer": it.get("answer"),
+        "solution": it.get("solution"),
+        "qtype": it.get("qtype") or facts["qtype"],
+        "difficulty": it.get("difficulty"),
+        "level": it.get("level") or "normal",
+        "injected_kp": it.get("injected_kp") or None,
+        # check 待 solve_explain 填（无 check 不许进 assemble）
+    }
+    if isinstance(it.get("verify_payload"), dict):
+        out["verify_payload"] = it["verify_payload"]
+    return _sanitize_item(out)
+
+
 def _parse_generated_items(text: str, facts: dict) -> list[dict[str, Any]]:
     """generate/重试共用：LLM 返回文本 → 规整 items（check 待 solve_explain 填）。"""
     data = _parse_json(text)
     if not isinstance(data, list):
         data = (data or {}).get("items") if isinstance(data, dict) else None
-    items: list[dict[str, Any]] = []
-    for it in data or []:
-        if not isinstance(it, dict):
+    return [_normalize_generated_item(it, facts) for it in data or [] if isinstance(it, dict)]
+
+
+def _iter_complete_items(acc: str) -> list[dict[str, Any]]:
+    """🔴 纯函数（PRD-C-012 P2 逐题吐出）：从流式累计文本里增量解析「已完整闭合」的 item。
+
+    判定 = 花括号配平（跳过字符串内花括号与转义引号）+ json.loads 成功 + 顶层含 "stem"
+    键才算一道；半截题绝不返回。外层包装对象（如 {"items":[...]}）不重复计：已接受
+    item 的区间被 consumed 哨兵跳过，且包装对象顶层无 stem 键；item 内嵌套对象
+    （如 verify_payload）顶层无 stem 键同样不计。返回按文本出现顺序（= 生成序）。
+    """
+    out: list[dict[str, Any]] = []
+    stack: list[int] = []
+    in_str = esc = False
+    consumed_end = -1
+    for i, ch in enumerate(acc or ""):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
             continue
-        items.append(
-            _sanitize_item(
-                {
-                    "stem": it.get("stem"),
-                    "answer": it.get("answer"),
-                    "solution": it.get("solution"),
-                    "qtype": it.get("qtype") or facts["qtype"],
-                    "difficulty": it.get("difficulty"),
-                    "level": it.get("level") or "normal",
-                    "injected_kp": it.get("injected_kp") or None,
-                    # check 待 solve_explain 填（无 check 不许进 assemble）
-                }
-            )
-        )
-    return items
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            if start <= consumed_end:
+                continue  # 包着已接受 item 的外层对象 → 不重复计
+            try:
+                obj = json.loads(acc[start : i + 1])
+            except Exception:  # noqa: BLE001 — 闭合但不是合法 JSON → 不算（半截/脏文本）
+                continue
+            if isinstance(obj, dict) and "stem" in obj:
+                out.append(obj)
+                consumed_end = i
+    return out
 
 
 async def _extract_knobs(state: VariantState) -> dict[str, Any]:
@@ -1133,22 +1226,118 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     # 🔴 思维外放（用户反馈 2026-06-11）：JSON token 对用户是乱码不外放，但流内数
     # "stem" 出现次数 → 思路条实时跳「正在写第 n/N 道」+ 当前题干前几个字，等待不再是黑盒。
     total_n = int(recipe["n"])
+    md_i = _to_int(mother_d) or 3
+    increasing = bool(knobs) and knobs.get("difficulty_plan") == PLAN_INCREASING
+
+    def _stamp_recipe(item: dict[str, Any], idx: int) -> dict[str, Any]:
+        # 🔴 配方印记落 item 级（闸A 改判段只作用于产生该配方的这一轮生成的题）：
+        #   from_recipe = 本轮按老师配方生成；expected_difficulty = 递增计划该题预期档
+        #   （跟题走，remove 位移/add 追加不会错档；编辑轮新增题无印记 → 不被旧计划误改判）。
+        if knobs:
+            item["from_recipe"] = True
+            if increasing:
+                item["expected_difficulty"] = min(md_i + idx, DIFFICULTY_CAP)
+        return item
+
+    # ── P2 流内 eager（PRD-C-012）：增量发现完整新题 → 立即 spawn 闸链 task ──
+    # 调用成本不增：闸A/闸B 仍是同一批 per-item helper，只是从「流结束后串行」改成
+    # 「题一完整就并发跑」（同一 Semaphore(GATE_CONCURRENCY) 限流）。宏观 DAG 零改动：
+    # 产物已带 gene+check → 下游 gene_gate/solve_explain 节点天然跳过已判项。
+    sem = asyncio.Semaphore(GATE_CONCURRENCY)
+    eager_raw: list[dict[str, Any]] = []  # 流内稳收的规整题（生成序；merge/兜底用）
+    eager_tasks: list[asyncio.Task] = []
+    completed: dict[int, dict[str, Any]] = {}  # idx → 已过闸链的题（剔除题带 _dropped 哨兵）
+    # 🔴 stale 标志（对抗审修复）：流重启（中转站中途熔断换站从头重流 / 空返回 retry 二次
+    # 开流）或 shape 整组 retry 采纳后，已派发的 eager 闸链全部作废 —— 置位后：①不再派发
+    # 新 task；②在跑的 task 不再记账/发帧（半发帧误导 FE）；③merge 不消费（use_eager=False）。
+    stale = {"flag": False}
+
+    def _cancel_eager() -> None:
+        stale["flag"] = True
+        for t in eager_tasks:
+            t.cancel()
+
+    async def _eager_chain(idx: int, item: dict[str, Any]) -> None:
+        """单题闸链（闸A → 闸B）+ 完成即发增量 artifact 帧。任何异常静默吞（G5：
+        eager 是增强不是关卡，失败的题留给下游节点照旧串行补判）。"""
+        try:
+            async with sem:
+                judged = await _gene_one_item(item, _gene_facts_for(item, facts, knobs), idx, total_n)
+                kept, note = await _check_one_item(judged, facts, idx, total_n)
+            if stale["flag"]:
+                return  # 本轮 eager 已作废（流重启/整组 retry）→ 不记账、不发作废题的帧
+            if kept is None:
+                # 4d 方案A：剔除题转哨兵（带 gene 不带 check）→ 下游 solve_explain 收口
+                # 进 dropped_notes；不出现在增量帧。
+                kept = dict(judged)
+                kept["_dropped"] = note or "1 道题程序验出标答错误（重生一次仍未过），已剔除"
+            completed[idx] = kept
+            # 思路条进度 + 增量 artifact 帧（partial=true；items=按生成序已完成且未剔除的题）
+            _emit_stage("verify", "程序验算", "running", f"第 {len(completed)}/{total_n} 道完成")
+            shown = [
+                completed[k] for k in sorted(completed) if not completed[k].get("_dropped")
+            ]
+            _emit_artifact(
+                dict(state, items=shown, knobs=knobs), partial=True, expected_total=total_n
+            )
+        except Exception:  # noqa: BLE001 — eager 失败绝不炸 generate；该题留给下游节点补判
+            pass
+
     _seen = {"n": 0}
+    _acc_len = {"v": 0}
 
     def _gen_progress(acc: str) -> None:
+        # 🔴 流重启检测（对抗审修复）：中转站首站吐若干 chunk 后熔断换下一站从头重流 /
+        # _ainvoke_text 空返回 retry 二次开流时，acc 从头重积（len 回落）。此时 eager_raw
+        # 里是死流的题、与新流（最终 text 的事实源）下标天然错位 —— 本轮 eager 全作废
+        # （cancel + 静默 + use_eager=False），题目交还下游 gene_gate/solve_explain 节点
+        # 照旧补判（宏观 DAG 不变，只损失 eager 增强）。
+        if len(acc) < _acc_len["v"] and not stale["flag"]:
+            _cancel_eager()
+        _acc_len["v"] = len(acc)
         n = min(acc.count('"stem"'), total_n)
         if n > _seen["n"]:
             _seen["n"] = n
             m = re.findall(r'"stem"\s*:\s*"([^"]{0,24})', acc)
             peek = (m[-1].replace("\\n", " ").strip() + "…") if m and m[-1] else ""
             _emit_stage("generate", "生成题目", "running", f"正在写第 {n}/{total_n} 道 {peek}")
+        if stale["flag"]:
+            return  # eager 已作废 → 只保留进度叙事，不再派发新闸链
+        # P2：增量解析已完整闭合的新题（半截题绝不派发）→ 立即起闸链 task
+        try:
+            found = _iter_complete_items(acc)
+            while len(eager_raw) < len(found):
+                idx = len(eager_raw)
+                item = _stamp_recipe(_normalize_generated_item(found[idx], facts), idx)
+                eager_raw.append(item)
+                eager_tasks.append(
+                    asyncio.get_running_loop().create_task(_eager_chain(idx, dict(item)))
+                )
+        except Exception:  # noqa: BLE001 — 进度/派发是增强不是关卡（G5），绝不打断流
+            pass
 
-    text = await _ainvoke_text([HumanMessage(content=prompt)], on_delta=_gen_progress)
+    try:
+        text = await _ainvoke_text([HumanMessage(content=prompt)], on_delta=_gen_progress)
+    except BaseException:
+        # 🔴 孤儿收口（对抗审修复）：全中转站熔断耗尽等按设计外抛时，已 spawn 的 eager
+        # task 必须 cancel + 等待退场——否则每条链最多还有 4-5 次 LLM 调用在后台静默烧完，
+        # 并继续向已 error 收尾的流发帧。收口后原样 re-raise，不改失败语义。
+        _cancel_eager()
+        if eager_tasks:
+            await asyncio.gather(*eager_tasks, return_exceptions=True)
+        raise
     items = _parse_generated_items(text, facts)
+    if len(items) < len(eager_raw):
+        # 整体解析比流内增量还少（尾部 JSON 破损等）→ 用流内稳收的题兜底
+        items = [dict(it) for it in eager_raw]
 
     # 🔴 代码级配方校验（数量/题型分布/递增档位）：不符 → 带缺陷反馈整组 retry 1 次。
     #   含首稿解析为空（items=[] 时「要求N道实出0道」也是明确缺陷，值得一次重试）。
+    #   🔴 shape 冲突处理（PRD-C-012）：数量类缺陷只能等流结束才判；整组 retry 产出
+    #   新 items 时丢弃 eager 结果（接受罕见浪费），retry 题不做流内 eager —— 由下游
+    #   gene_gate/solve_explain 节点（同一批 helper + gather 并发）一次性过闸。
     defects = shape_check(items, knobs, mother_d)
+    retried = False
     if defects:
         feedback = (
             "\n\n[配方校验反馈] 你上一稿不满足老师指定配方："
@@ -1163,6 +1352,17 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         if retry_items:
             items = retry_items
             defects = shape_check(items, knobs, mother_d)
+            retried = True
+            # 🔴 整组 retry 采纳 = 首稿题全部作废（对抗审修复）：cancel 仍在跑的 eager
+            # 闸链（每条链最多还有 4-5 次 LLM 调用，gather 白等可达数十秒）+ 静默其
+            # 后续发帧（作废题的 partial 帧只会误导 FE）。retry 失败回退首稿的分支
+            # （retried=False）保持现状不取消——首稿仍是最终产物。
+            _cancel_eager()
+
+    # eager task 收口（绝不留孤儿任务；retry 整组重出/流重启时结果弃用）
+    if eager_tasks:
+        await asyncio.gather(*eager_tasks, return_exceptions=True)
+    use_eager = bool(eager_tasks) and not retried and not stale["flag"]
 
     if not items:
         # 两稿皆空/解析失败 → 友好失败收尾（after_generate 走 done→END），绝不静默空轮
@@ -1179,32 +1379,46 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             ],
         }
 
-    # 🔴 配方印记落 item 级（闸A 改判段只作用于产生该配方的这一轮生成的题）：
-    #   from_recipe = 本轮按老师配方生成；expected_difficulty = 递增计划该题预期档（跟题走，
-    #   remove 位移/add 追加不会错档；编辑轮新增题无印记 → 不被旧计划误改判）。
+    # 配方印记（_stamp_recipe 同一公式；eager 已在派发时落印，此处对 retry/未派发尾项
+    # 落印 + 对已派发项幂等重写同值）
     if knobs:
-        md_i = _to_int(mother_d) or 3
-        increasing = knobs.get("difficulty_plan") == PLAN_INCREASING
         for i, it in enumerate(items):
-            it["from_recipe"] = True
-            if increasing:
-                it["expected_difficulty"] = min(md_i + i, DIFFICULTY_CAP)
+            _stamp_recipe(it, i)
+
+    if use_eager:
+        # 已过闸链的题按生成序回填 + 🔴 同一性校验（对抗审修复）：completed[i] 派生自
+        # eager_raw[i]（heal/补题换 stem 不影响——比的是派发时的原稿 stem），仅当它与
+        # 全量解析第 i 道是同一道题（stem 一致）才采用。错位场景（模型偶发吐无 stem 的
+        # 杂物对象：全量解析保留为 stem=None 而流内增量跳过，两套下标错一位）→ 保留
+        # 原稿走下游节点补判（宏观 DAG 不变），绝不把验算徽章嫁接到另一道题上。
+        def _same_item(i: int, it: dict[str, Any]) -> bool:
+            if i >= len(eager_raw):
+                return False
+            key = _norm(eager_raw[i].get("stem"))
+            return bool(key) and key == _norm(it.get("stem"))
+
+        items = [
+            completed[i] if (i in completed and _same_item(i, it)) else it
+            for i, it in enumerate(items)
+        ]
 
     _emit_stage("generate", "生成题目", "done", f"{len(items)} 道")
     return {"items": items, "knobs": knobs, "shape_defects": defects, "messages": []}
 
 
+# 🔴 排版（PRD-C-012 任务3）：固定契约段前移，变动段（题干）移末尾；语义一字不改。
 SOLVE_PROMPT = """你是严谨的数学阅卷老师。真解下面这道题（不看给定答案，独立算一遍）。
-
-题干：{stem}
 
 只输出 JSON：
 {{"solved_answer":"你独立算出的答案","solution":"完整解题过程(含答案)",
   "kp_name":"这道题实际考的主考点","grade":"这道题适配的年级"}}
 
-格式硬规定：solution 里数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
+格式硬规定：solution 里数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
 
-REGEN_PROMPT = """下面这道变式题，独立解出的答案与题面标答不一致，请**重新出一道**等价变式重做。
+题干：{stem}"""
+
+REGEN_PROMPT = (
+    """下面这道变式题，独立解出的答案与题面标答不一致，请**重新出一道**等价变式重做。
 
 主考点(硬守恒): {kp_name}
 年级(硬守恒): {grade}
@@ -1213,39 +1427,40 @@ REGEN_PROMPT = """下面这道变式题，独立解出的答案与题面标答�
 answer 优先给可计算的数值/表达式（可程序验算），数字设计成解恰好整洁。
 
 只输出 JSON：
-{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp}}}
+{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp},
+  "verify_payload":{{...新题的程序验算载荷，契约见下...}}}}
 
-格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
+格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
+
+verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**新题的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 新题标准答案）：
+"""
+    + _PAYLOAD_CONTRACT
+    + """
+抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ verify_payload 填 {{"kind":"none","reason":"原因"}}。"""
+)
 
 
 # ---------------------------------------------------------------------------
 # 闸B·程序验算（PRD-C-010）：LLM 只负责"人话题 → 结构化载荷"的有界抽取，
 # pass/fail 判决只读 math_verify.verify()（纯 sympy，零 LLM）的 verdict。
 # ---------------------------------------------------------------------------
-EXTRACT_PROMPT = """你是数学验算载荷抽取器。把下面这道题的「题干 + 题面标准答案」抽成可被 sympy 程序验算的结构化载荷 JSON（验算对象 claimed = 题面标准答案）。
+# 🔴 排版（PRD-C-012 任务3）：契约固定段前移（与 GENERATE/REGEN 共用 _PAYLOAD_CONTRACT
+# 单一事实源），变动段（题型/题干/标答）移末尾；语义一字不改。
+EXTRACT_PROMPT = (
+    """你是数学验算载荷抽取器。把下面这道题的「题干 + 题面标准答案」抽成可被 sympy 程序验算的结构化载荷 JSON（验算对象 claimed = 题面标准答案）。
+
+"""
+    + _PAYLOAD_CONTRACT
+    + """
+
+抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ 只输出 {{"kind":"none","reason":"原因"}}。
+只输出 JSON（不要解释）。
 
 题型: {qtype}
 题干: {stem}
 题面标准答案(待验算的 claimed): {answer}
-参考·另一次独立解答(仅帮助你理解答案格式，不是验算对象): {solved_answer}
-
-载荷契约（kind 四选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）。
-🔴 表达式硬边界（违反 = 程序直接拒收变 degrade，浪费一次验算机会）：
-- 只允许这些函数：sqrt / Abs / Min / Max（比大小、最值题用 Min(...)/Max(...)，绝对值用 Abs()）。
-- **禁止任何 Python 语法**：不许 if/else 三元、列表推导、len()/range()、布尔 True/False、比较式（< > ==）。
-- 选项/claimed 必须是**可算出的数值或表达式**（如 "-sqrt(25)"、"7/2"），不是真假陈述；某选项本身不是数值（如文字判断、区间）→ 整题输出 kind:none。
-- 计数类问题（"有几个是…"）若每项判定都是数值比较可写成 Min/Max/Abs 组合才抽，否则 kind:none——不要发明 Piecewise/Eq/逻辑与。
-1. 方程求解: {{"kind":"equation_solve","equations":["x**2-5*x+6=0"],"unknowns":["x"],"claimed":["2","3"]}}
-   （claimed = 标准答案申报的全部解；只支持单未知数。🔴 程序按"解集完全相等"判：若题目含舍根/取值范围
-   约束——如分式方程验增根后舍去、几何/应用题边长必须为正——标答只保留部分解时，**不要用本 kind**
-   （claimed 会少于裸方程全部解被误判 fail）：能数值验保留解就改用 kind 3 numeric，否则输出 kind:none）
-2. 表达式等价(化简/展开/因式分解): {{"kind":"expr_equiv","expr_a":"题面原式","expr_b":"标准答案给的结果式"}}
-3. 数值计算: {{"kind":"numeric","expr":"3*7/2","claimed":"10.5","tol":1e-6}}
-4. 选择题: {{"kind":"choice","ground":{{上述1/2/3任一子载荷}},"options":{{"A":"2","B":"3"}},"claimed_correct":"B"}}
-   （options 的值 = 各选项的数学值；ground = 由题干建立的真值载荷；claimed_correct = 标准答案的选项字母）
-
-抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ 只输出 {{"kind":"none","reason":"原因"}}。
-只输出 JSON（不要解释）。"""
+参考·另一次独立解答(仅帮助你理解答案格式，不是验算对象): {solved_answer}"""
+)
 
 _PAYLOAD_KINDS = {"equation_solve", "expr_equiv", "numeric", "choice"}
 
@@ -1345,14 +1560,63 @@ async def _extract_payload(
     return None
 
 
-async def _machine_verify(item: dict, solved_answer: Any) -> dict:
-    """程序验算一道题：抽载荷 → math_verify.verify（纯 sympy）。永不抛异常。
+def _payload_claim_consistent(payload: dict, answer: Any) -> bool:
+    """🔴 4a 载荷一致性廉价闸（对抗审修复；纯代码非 LLM）：被验对象(claimed) 必须就是
+    题面标答——防止模型在同一次调用里把 claimed 写成与 answer 不同的值（或编一套与
+    题干无关但自洽的 equations+claimed），sympy PASS 后强正面徽章背书的却不是老师
+    看到的那个答案。宽松互含比对（_norm 去空白小写）：
+    - numeric：claimed 与标答互含/相等；
+    - equation_solve：claimed 各解都出现在标答里，或标答含于 claimed 拼接；
+    - choice：claimed_correct 选项字母在标答里，或该选项的值与标答互含；
+    - expr_equiv：无 claimed（被验对象=expr_b 结果式，难与人话标答廉价比对）→ 豁免。
+    判不一致 → 调用方退回 _extract_payload 兜底（不动判决语义，只收紧
+    『被验对象=被展示对象』的绑定）。"""
+    kind = payload.get("kind")
+    ans = _norm(answer)
+    if not ans:
+        return True  # 没有展示答案可比 → 不拦（兜底抽取同样无从比）
+    if kind == "numeric":
+        c = _norm(payload.get("claimed"))
+        return bool(c) and (c in ans or ans in c)
+    if kind == "equation_solve":
+        claimed = payload.get("claimed")
+        vals = [_norm(v) for v in claimed] if isinstance(claimed, (list, tuple)) else [_norm(claimed)]
+        vals = [v for v in vals if v]
+        return bool(vals) and (all(v in ans for v in vals) or ans in ",".join(vals))
+    if kind == "choice":
+        key = _norm(payload.get("claimed_correct"))
+        if not key:
+            return False
+        if key in ans or ans in key:
+            return True  # 标答就是选项字母（最常见形态）
+        opts = payload.get("options")
+        if isinstance(opts, dict):
+            for k, v in opts.items():
+                if _norm(k) == key:
+                    nv = _norm(v)
+                    return bool(nv) and (nv in ans or ans in nv)
+        return False
+    return True  # expr_equiv 等无 claimed 的 kind → 豁免
 
+
+async def _machine_verify(item: dict, solved_answer: Any) -> dict:
+    """程序验算一道题：载荷优先 → 事后抽取兜底 → math_verify.verify（纯 sympy）。永不抛异常。
+
+    🔴 4a 载荷优先（PRD-C-012）：item.verify_payload（出题 LLM 同步产出）是 dict 且
+    kind 合法且 claimed 与题面标答一致（_payload_claim_consistent 廉价闸）→ 直接验，
+    省一次抽取往返；kind=="none"/缺失/非法/claimed 不一致 → 退回既有
+    _extract_payload 事后抽取兜底。判决语义零变化（仍只读 verify() 的 verdict）。
     返回 {"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}。
     """
-    payload = await _extract_payload(
-        item.get("stem"), item.get("answer"), solved_answer, item.get("qtype")
-    )
+    payload: Any = item.get("verify_payload")
+    if not (
+        isinstance(payload, dict)
+        and payload.get("kind") in _PAYLOAD_KINDS
+        and _payload_claim_consistent(payload, item.get("answer"))
+    ):
+        payload = await _extract_payload(
+            item.get("stem"), item.get("answer"), solved_answer, item.get("qtype")
+        )
     if payload is None:
         return {"verdict": math_verify.DEGRADE, "detail": "载荷抽取失败/抽不成", "computed": None}
     try:
@@ -1433,7 +1697,7 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
         return None
     regen = _parse_json(regen_text)
     if isinstance(regen, dict) and regen.get("stem"):
-        return _sanitize_item(
+        draft = _sanitize_item(
             {
                 "stem": regen.get("stem"),
                 "answer": regen.get("answer"),
@@ -1444,182 +1708,236 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
                 "injected_kp": regen.get("injected_kp"),
             }
         )
+        # 4a：重生稿自带的验算载荷随新题走（旧题载荷绝不沿用——题面已换）
+        if isinstance(regen.get("verify_payload"), dict):
+            draft["verify_payload"] = regen["verify_payload"]
+        return draft
     return None
 
 
-async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantState:
-    """④ solve + 闸B 程序验算（PRD-C-010）。每题真解产解析 → 题型分流 → sympy 判决：
+async def _check_one_item(
+    item: dict[str, Any], facts: dict, idx: int, total: int
+) -> tuple[dict[str, Any] | None, str | None]:
+    """🔴 闸B per-item 协程（P2 单一事实源：solve_explain 节点与 generate 流内 eager 共用）。
 
-    - 证明/开放/作图类（分流键=题型，题干骨架兜底）→ 不进 sympy，正则级结构软校验，
-      标 check.review=proof_needs_human 转人审（G3/FP2，不误杀）。
-    - 其余（计算/解答/填空/选择）→ LLM 抽验算载荷 → math_verify.verify（纯 sympy）：
-      pass → check.verify=sympy_pass 照常；
-      fail → 既有 REGEN 回炉 1 次（computed/detail 注回 prompt）→ 重生版再验（须 pass+守恒），
-             🔴 仍不过 → **剔除不外发**（4d 方案A·用户拍板 2026-06-11：程序证实标答错的题
-             老师永远看不到；剔除过程思路条透明叙事 + dropped_notes 进摘要）；
-      degrade → 保留原有「LLM 独立解 + _norm 比对」自检作 fallback（check.self_check 记
-             match/mismatch），外显层交 _apply_visibility 按 4d 矩阵定 tier/note。
-    🔴 判决只读 verify() 的 verdict，永不采信 LLM 自评；任何验算环节失败均降级继续，绝不抛（G5）。
-    🔴 凡进 items 的题一律过本节点，无 check 不许进 assemble（remove 后旧题带 check 原样通过）。
+    入参 item 视为本协程私有（调用方传副本）；idx/total 只用于思路条叙事编号。
+    返回 (item, None)=保留（已带 check + 外显 tier）；(None, dropped 叙事)=4d 方案A 剔除。
+    已带 check 的题原样通过（不重判、不发 stage）。判决/降级语义与重排前逐字一致：
+    - 证明/开放/作图类 → 不进 sympy，软校验 + 人审标记；
+    - sympy pass → sympy_pass；fail → REGEN 回炉 1 次（须 pass+守恒）→ 仍不过剔除；
+    - degrade → LLM 独立解自检 fallback（match/mismatch + 自愈 1 次）。
+    🔴 判决只读 verify() 的 verdict，永不采信 LLM 自评；任何环节失败降级继续，绝不抛（G5）。
     """
-    facts = _mother_facts(state)
-    items = list(state.get("items") or [])
-    out: list[dict] = []
-    dropped: list[str] = []  # 本轮剔除叙事（assemble 摘要 + 思路条同步外显）
+    if item.get("check"):  # 已定状态（如自愈过的补题再次流经）→ 不重复
+        return item, None
 
-    for i, it in enumerate(items):
-        item = dict(it)
-        if item.get("check"):  # 已定状态（如自愈过的补题再次流经）→ 不重复
-            out.append(item)
-            continue
+    _emit_stage("verify", "程序验算", "running", f"第 {idx + 1}/{total} 道")
 
-        _emit_stage("verify", "程序验算", "running", f"第 {i + 1}/{len(items)} 道")
+    # ── 闸B·题型分流：证明/开放/作图 → 不进 sympy，软校验 + 人审标记 ──
+    if _is_proof_like(item.get("qtype") or facts["qtype"], item.get("stem")):
+        struct_ok = _proof_struct_ok(item.get("stem"))
+        item["check"] = {
+            "badge": "ok" if struct_ok else "warn",
+            "solved_answer": None,
+            "review": REVIEW_PROOF,
+        }
+        _apply_visibility(item)
+        return item, None
 
-        # ── 闸B·题型分流：证明/开放/作图 → 不进 sympy，软校验 + 人审标记 ──
-        if _is_proof_like(item.get("qtype") or facts["qtype"], item.get("stem")):
-            struct_ok = _proof_struct_ok(item.get("stem"))
-            item["check"] = {
-                "badge": "ok" if struct_ok else "warn",
-                "solved_answer": None,
-                "review": REVIEW_PROOF,
-            }
-            _apply_visibility(item)
-            out.append(item)
-            continue
+    solved = await _solve_one(item.get("stem", ""))
+    solved_answer = solved.get("solved_answer")
+    # solve 产出解析（给老师当判题依据；优先用阅卷解析）
+    if solved.get("solution"):
+        item["solution"] = solved.get("solution")
 
-        solved = await _solve_one(item.get("stem", ""))
-        solved_answer = solved.get("solved_answer")
-        # solve 产出解析（给老师当判题依据；优先用阅卷解析）
-        if solved.get("solution"):
-            item["solution"] = solved.get("solution")
+    # ── 闸B·程序验算：判决只读 verdict（G1/G2），不再用字符串比对自判 ──
+    res = await _machine_verify(item, solved_answer)
+    verdict = res.get("verdict")
 
-        # ── 闸B·程序验算：判决只读 verdict（G1/G2），不再用字符串比对自判 ──
-        res = await _machine_verify(item, solved_answer)
-        verdict = res.get("verdict")
+    if verdict == math_verify.PASS:
+        item["check"] = {
+            "badge": "ok",
+            "solved_answer": solved_answer,
+            "verify": VERIFY_SYMPY_PASS,
+            "verify_detail": res.get("detail"),
+            "computed": res.get("computed"),
+        }
+        _apply_visibility(item)
+        return item, None
 
-        if verdict == math_verify.PASS:
-            item["check"] = {
-                "badge": "ok",
-                "solved_answer": solved_answer,
-                "verify": VERIFY_SYMPY_PASS,
-                "verify_detail": res.get("detail"),
-                "computed": res.get("computed"),
-            }
-            _apply_visibility(item)
-            out.append(item)
-            continue
-
-        if verdict == math_verify.FAIL:
-            # sympy 判定标答真错 → 既有回炉机制重生 1 次，computed/detail 注回 prompt
-            healed = None
-            if MAX_HEAL >= 1:
-                _emit_stage("verify", "程序验算", "warn", f"第 {i + 1} 道回炉重生中")
-                feedback = (
-                    f"程序(sympy)验算判定该题题面标答错误：程序算得 computed={res.get('computed')}；"
-                    f"详情：{res.get('detail')}。请重新出一道题面与标答自洽、经得起程序验算的等价变式。"
-                )
-                draft = await _regen_once(item, facts, feedback=feedback)
-                if draft:
-                    resolved = await _solve_one(draft.get("stem", ""))
-                    if resolved.get("solution"):
-                        draft["solution"] = resolved.get("solution")
-                    # 🔴 重生版仍须过守恒校验 + 程序验算双闸
-                    cons = _conservation_ok(
-                        resolved.get("kp_name", ""), resolved.get("grade", ""), facts
-                    )
-                    r_res = await _machine_verify(draft, resolved.get("solved_answer"))
-                    if cons and r_res.get("verdict") == math_verify.PASS:
-                        draft["check"] = {
-                            "badge": "ok",
-                            "solved_answer": resolved.get("solved_answer"),
-                            "verify": VERIFY_SYMPY_PASS,
-                            "verify_detail": r_res.get("detail"),
-                            "computed": r_res.get("computed"),
-                        }
-                        # 🔴 闸A 标记随愈合保留（healed 整体替换不丢 gene → 入库 auxTags.gene_gate
-                        # 不断档 + 后续编辑轮 gene_gate 不重判/不静默换题）；原版无 gene（如持久化
-                        # 旧线程存量题）→ 按既有 skipped 语义留痕（闸A 没判过，REGEN 锁同骨架）。
-                        draft["gene"] = item.get("gene") or {
-                            "gate": GENE_GATE_SKIPPED,
-                            "reason": "healed-in-solve",
-                        }
-                        healed = draft
-            if healed:
-                _apply_visibility(healed)
-                out.append(healed)
-            else:
-                # 🔴 4d 方案A（PRD-C-012 用户拍板）：sympy 证实标答错、重生仍不过 → 剔除不外发。
-                # 老师永远看不到错题（题卡层无负面文案需求）；剔除过程思路条透明叙事，
-                # 摘要经 dropped_notes 说明本组少一道。真值（fail 详情）只进叙事/日志，不进题卡。
-                _emit_stage(
-                    "verify",
-                    "程序验算",
-                    "warn",
-                    f"第 {i + 1} 道程序验出标答错误（重生一次仍未过），已剔除",
-                )
-                dropped.append(
-                    f"1 道{item.get('qtype') or ''}题程序验出标答错误（程序算得"
-                    f"「{res.get('computed')}」与标答不符，重生一次仍未过），已剔除"
-                )
-            continue
-
-        # ── degrade：sympy 吃不下（载荷抽不成/超范围）→ 保留既有 LLM 自检 fallback ──
-        match = _norm(solved_answer) == _norm(item.get("answer"))
-        if match:
-            item["check"] = {
-                "badge": "ok",
-                "solved_answer": solved_answer,
-                "verify": VERIFY_UNVERIFIED,
-                "verify_detail": res.get("detail"),
-                "self_check": "match",  # 4d：独立复算一致 → 轻正面（不再打 ⚠ 未经程序验算）
-            }
-            _apply_visibility(item)
-            out.append(item)
-            continue
-
-        # 独立解 ≠ 标答（LLM 自检）→ 既有自愈：重生 1 次 → 重解 + 守恒
+    if verdict == math_verify.FAIL:
+        # sympy 判定标答真错 → 既有回炉机制重生 1 次，computed/detail 注回 prompt
         healed = None
         if MAX_HEAL >= 1:
-            _emit_stage("verify", "程序验算", "warn", f"第 {i + 1} 道回炉重生中")
-            draft = await _regen_once(item, facts)
+            _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道回炉重生中")
+            feedback = (
+                f"程序(sympy)验算判定该题题面标答错误：程序算得 computed={res.get('computed')}；"
+                f"详情：{res.get('detail')}。请重新出一道题面与标答自洽、经得起程序验算的等价变式。"
+            )
+            draft = await _regen_once(item, facts, feedback=feedback)
             if draft:
                 resolved = await _solve_one(draft.get("stem", ""))
-                r_answer = resolved.get("solved_answer")
-                r_match = _norm(r_answer) == _norm(draft.get("answer"))
-                # 🔴 重生版仍须过守恒校验
+                if resolved.get("solution"):
+                    draft["solution"] = resolved.get("solution")
+                # 🔴 重生版仍须过守恒校验 + 程序验算双闸
                 cons = _conservation_ok(
                     resolved.get("kp_name", ""), resolved.get("grade", ""), facts
                 )
-                if r_match and cons:
-                    draft["solution"] = resolved.get("solution") or draft.get("solution")
+                r_res = await _machine_verify(draft, resolved.get("solved_answer"))
+                if cons and r_res.get("verdict") == math_verify.PASS:
                     draft["check"] = {
                         "badge": "ok",
-                        "solved_answer": r_answer,
-                        "verify": VERIFY_UNVERIFIED,
-                        "self_check": "match",
+                        "solved_answer": resolved.get("solved_answer"),
+                        "verify": VERIFY_SYMPY_PASS,
+                        "verify_detail": r_res.get("detail"),
+                        "computed": r_res.get("computed"),
                     }
-                    # 🔴 闸A 标记随愈合保留（同 FAIL 自愈路径：不丢 gene、不被编辑轮重判）
+                    # 🔴 闸A 标记随愈合保留（healed 整体替换不丢 gene → 入库 auxTags.gene_gate
+                    # 不断档 + 后续编辑轮 gene_gate 不重判/不静默换题）；原版无 gene（如持久化
+                    # 旧线程存量题）→ 按既有 skipped 语义留痕（闸A 没判过，REGEN 锁同骨架）。
                     draft["gene"] = item.get("gene") or {
                         "gate": GENE_GATE_SKIPPED,
                         "reason": "healed-in-solve",
                     }
-                    _apply_visibility(draft)
                     healed = draft
-
         if healed:
-            out.append(healed)
-        else:
-            # 守恒破 或 重生仍不过 → 保留（程序没证明它错，只是没把握）。
-            # 4d：verify 侧低 → 单闸沉默 / gene 也低 → ⚠（_apply_visibility 矩阵裁决）
-            item["check"] = {
-                "badge": "warn",
-                "solved_answer": solved_answer,
-                "verify": VERIFY_UNVERIFIED,
-                "verify_detail": res.get("detail"),
-                "self_check": "mismatch",
-            }
-            _apply_visibility(item)
-            out.append(item)
+            _apply_visibility(healed)
+            return healed, None
+        # 🔴 4d 方案A（PRD-C-012 用户拍板）：sympy 证实标答错、重生仍不过 → 剔除不外发。
+        # 老师永远看不到错题（题卡层无负面文案需求）；剔除过程思路条透明叙事。
+        # 🔴 G4/AC3 补题（对抗审修复）：剔除≠回炉——回炉修同一道，补题是剔除后再产一道
+        # 新题恢复数量。再 _regen_once + 验算 + 守恒一次，全过才顶位；任一环节不过 →
+        # 记 dropped 叙事（摘要说明本组少一道）。全程降级不抛（G5），eager 与节点路径
+        # 自动共享（本协程是单一事实源）。
+        _emit_stage(
+            "verify",
+            "程序验算",
+            "warn",
+            f"第 {idx + 1} 道程序验出标答错误（重生一次仍未过），已剔除，补一道中",
+        )
+        repl_feedback = (
+            f"原题已被程序验算剔除（程序算得 computed={res.get('computed')}；"
+            f"详情：{res.get('detail')}）。请重新出一道全新的等价变式补足数量："
+            "题面与标答自洽、经得起程序验算。"
+        )
+        repl = await _regen_once(item, facts, feedback=repl_feedback)
+        if repl:
+            r_solved = await _solve_one(repl.get("stem", ""))
+            if r_solved.get("solution"):
+                repl["solution"] = r_solved.get("solution")
+            # 🔴 补题仍须过守恒校验 + 程序验算双闸（与回炉同一把尺）
+            r_cons = _conservation_ok(
+                r_solved.get("kp_name", ""), r_solved.get("grade", ""), facts
+            )
+            r_res = await _machine_verify(repl, r_solved.get("solved_answer"))
+            if r_cons and r_res.get("verdict") == math_verify.PASS:
+                repl["check"] = {
+                    "badge": "ok",
+                    "solved_answer": r_solved.get("solved_answer"),
+                    "verify": VERIFY_SYMPY_PASS,
+                    "verify_detail": r_res.get("detail"),
+                    "computed": r_res.get("computed"),
+                }
+                # 闸A 标记沿用既有 heal 语义：原版 gene 跟槽位走；没有 → skipped 留痕
+                repl["gene"] = item.get("gene") or {
+                    "gate": GENE_GATE_SKIPPED,
+                    "reason": "replenished-in-solve",
+                }
+                _apply_visibility(repl)
+                _emit_stage(
+                    "verify", "程序验算", "running", f"第 {idx + 1} 道已剔除，补一道成功"
+                )
+                return repl, None
+        return None, (
+            f"1 道{item.get('qtype') or ''}题程序验出标答错误（程序算得"
+            f"「{res.get('computed')}」与标答不符，重生一次仍未过），已剔除；"
+            "补一道未成，本组少一道"
+        )
+
+    # ── degrade：sympy 吃不下（载荷抽不成/超范围）→ 保留既有 LLM 自检 fallback ──
+    match = _norm(solved_answer) == _norm(item.get("answer"))
+    if match:
+        item["check"] = {
+            "badge": "ok",
+            "solved_answer": solved_answer,
+            "verify": VERIFY_UNVERIFIED,
+            "verify_detail": res.get("detail"),
+            "self_check": "match",  # 4d：独立复算一致 → 轻正面（不再打 ⚠ 未经程序验算）
+        }
+        _apply_visibility(item)
+        return item, None
+
+    # 独立解 ≠ 标答（LLM 自检）→ 既有自愈：重生 1 次 → 重解 + 守恒
+    healed = None
+    if MAX_HEAL >= 1:
+        _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道回炉重生中")
+        draft = await _regen_once(item, facts)
+        if draft:
+            resolved = await _solve_one(draft.get("stem", ""))
+            r_answer = resolved.get("solved_answer")
+            r_match = _norm(r_answer) == _norm(draft.get("answer"))
+            # 🔴 重生版仍须过守恒校验
+            cons = _conservation_ok(
+                resolved.get("kp_name", ""), resolved.get("grade", ""), facts
+            )
+            if r_match and cons:
+                draft["solution"] = resolved.get("solution") or draft.get("solution")
+                draft["check"] = {
+                    "badge": "ok",
+                    "solved_answer": r_answer,
+                    "verify": VERIFY_UNVERIFIED,
+                    "self_check": "match",
+                }
+                # 🔴 闸A 标记随愈合保留（同 FAIL 自愈路径：不丢 gene、不被编辑轮重判）
+                draft["gene"] = item.get("gene") or {
+                    "gate": GENE_GATE_SKIPPED,
+                    "reason": "healed-in-solve",
+                }
+                _apply_visibility(draft)
+                healed = draft
+
+    if healed:
+        return healed, None
+    # 守恒破 或 重生仍不过 → 保留（程序没证明它错，只是没把握）。
+    # 4d：verify 侧低 → 单闸沉默 / gene 也低 → ⚠（_apply_visibility 矩阵裁决）
+    item["check"] = {
+        "badge": "warn",
+        "solved_answer": solved_answer,
+        "verify": VERIFY_UNVERIFIED,
+        "verify_detail": res.get("detail"),
+        "self_check": "mismatch",
+    }
+    _apply_visibility(item)
+    return item, None
+
+
+async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantState:
+    """④ solve + 闸B 程序验算（PRD-C-010；判决语义见 _check_one_item，单一事实源）。
+
+    P2（PRD-C-012）：循环体已抽成 per-item 协程 _check_one_item，本节点按题
+    asyncio.gather + Semaphore(GATE_CONCURRENCY=3) 并发，结果按原下标顺序回填；
+    已带 check 的题照旧跳过不重判；generate 流内 eager 剔除的哨兵题
+    （item._dropped=叙事）在此收口进 dropped_notes（语义不变：每轮重写）。
+    🔴 凡进 items 的题一律过本节点，无 check 不许进 assemble（remove 后旧题带 check 原样通过）。
+    """
+    facts = _mother_facts(state)
+    items = list(state.get("items") or [])
+    total = len(items)
+    sem = asyncio.Semaphore(GATE_CONCURRENCY)
+
+    async def _run(i: int, it: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        item = dict(it)
+        # generate 流内 eager 已剔除（4d 方案A）→ 哨兵只收叙事，不外发、不重验
+        if item.get("_dropped"):
+            return None, str(item["_dropped"])
+        if item.get("check"):  # 已定状态 → 不重复（不进并发槽、不发 stage）
+            return item, None
+        async with sem:
+            return await _check_one_item(item, facts, i, total)
+
+    results = await asyncio.gather(*(_run(i, it) for i, it in enumerate(items)))
+    out = [it for it, _ in results if it is not None]
+    dropped = [note for _, note in results if note]  # 本轮剔除叙事（按原题序）
 
     if dropped:
         _emit_stage("verify", "程序验算", "done", f"剔除 {len(dropped)} 道，保留 {len(out)} 道")
@@ -1634,16 +1952,9 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
 # 🔴 宏观控制流仍是确定性 DAG —— 闸A是图上固定节点，LLM 只产 judge JSON，
 #    pass/rework 判决 = 纯函数 gene_gate_decision（可单测），不采信 LLM 自评流程走向。
 # ---------------------------------------------------------------------------
+# 🔴 排版（PRD-C-012 任务3）：判别标准/输出契约固定段前移，变动段（母题摘要/变式题）
+# 移末尾（runtime 追加的 knobs_spec 改判段照旧排在最后）；语义一字不改。
 GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下面这道变式是否是母题的「平行题」：骨架基因(题型/难度/解法结构)必须一致，皮肤(数字/场景)必须已换。
-
-母题摘要：
-- 主考点: {kp_name} / 年级: {grade}
-- 题型: {qtype} / 难度: {difficulty}
-- 解法骨架: {skeleton}
-- 题干: {mother_stem}
-
-变式题（申报 level={level} / 题型 {v_qtype} / 难度 {v_difficulty}）：
-{variant_stem}
 
 判别标准：
 - qtype_match: 变式题型与母题一致。
@@ -1652,7 +1963,16 @@ GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下
 - surface_swapped: 数字/场景至少一类已换；与母题题面几乎相同(只是复读) = false。
 
 只输出一个 JSON（不要解释）：
-{{"qtype_match": true/false, "difficulty_match": true/false, "structure_match": true/false, "surface_swapped": true/false, "reason": "一句话依据"}}"""
+{{"qtype_match": true/false, "difficulty_match": true/false, "structure_match": true/false, "surface_swapped": true/false, "reason": "一句话依据"}}
+
+母题摘要：
+- 主考点: {kp_name} / 年级: {grade}
+- 题型: {qtype} / 难度: {difficulty}
+- 解法骨架: {skeleton}
+- 题干: {mother_stem}
+
+变式题（申报 level={level} / 题型 {v_qtype} / 难度 {v_difficulty}）：
+{variant_stem}"""
 
 # 骨架基因键（必须全 match）；皮肤键（必须 swapped）
 _GENE_SKELETON_KEYS = ("qtype_match", "difficulty_match", "structure_match")
@@ -1741,72 +2061,88 @@ async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState:
-    """闸A 节点：对每道**未判过基因**的变式做母题基因比对。
+def _gene_facts_for(item: dict, facts: dict, knobs: dict[str, Any] | None) -> dict:
+    """🔴 闸A·配方对齐 facts（gene_gate 节点与 generate 流内 eager 共用的单一事实源）：
+    只对带 from_recipe 印记的题（产生该配方那一轮生成的）注入改判段，递增预期档读
+    item 级 expected_difficulty（generate 落印，跟题走不随下标位移）。编辑轮 add 的
+    新题无印记 → 按默认标准判，绝不被旧配方（如「5道递增」）误改判。"""
+    if knobs and item.get("from_recipe"):
+        spec = gene_judge_knobs_spec(knobs, item.get("expected_difficulty"))
+        if spec:
+            return dict(facts, knobs_spec=spec)
+    return facts
 
+
+async def _gene_one_item(item: dict, facts_i: dict, idx: int, total: int) -> dict:
+    """🔴 闸A per-item 协程（P2 单一事实源：gene_gate 节点与 generate 流内 eager 共用）。
+
+    入参 item 视为本协程私有（调用方传副本）；idx/total 只用于思路条叙事编号。
+    判决/降级语义与重排前逐字一致：
     - pass → item.gene={gate:"pass"}；
     - rework → 带 reason 走既有 _regen_once 回炉 1 次 → 重生版再判：
         re_judge 过 **且 代码级 _conservation_ok 守恒校验过**（主考点+年级硬守恒贯穿重生，
-          不只采信 LLM）→ 换用重生版（gene=pass，🔴 不带 check → 下游 solve_explain 闸B 必判，正交不破）；
+          不只采信 LLM）→ 换用重生版（gene=pass，🔴 不带 check → 下游闸B 必判，正交不破）；
         仍不过/守恒破/重生失败 → 保留原版 gene={gate:"warn", reason}（v1 只警示不硬拦）；
-    - judge 失败 → gene={gate:"skipped"} 放行。
+    - judge 失败 → gene={gate:"skipped"} 放行（闸A是增强不是关卡，G5）。
+    已带 gene 的题原样通过（不重判、不发 stage）。
+    """
+    if item.get("gene"):  # 已判过 → 不重判（旧题预算保护）
+        return item
+
+    _emit_stage("gene_gate", "平行度比对", "running", f"第 {idx + 1}/{total} 道")
+    judge = await _gene_judge_one(item, facts_i)
+    if judge is None:
+        item["gene"] = {"gate": GENE_GATE_SKIPPED}
+        return item
+
+    if gene_gate_decision(judge) == "pass":
+        item["gene"] = {"gate": GENE_GATE_PASS}
+        return item
+
+    # rework：既有回炉重生 1 次（基因反馈注回 prompt）→ 重生版再判一次
+    _emit_stage("gene_gate", "平行度比对", "warn", f"第 {idx + 1} 道回炉重生中")
+    draft = await _regen_once(item, facts_i, feedback=_gene_feedback(judge))
+    if draft:
+        re_judge = await _gene_judge_one(draft, facts_i)
+        if re_judge is not None and gene_gate_decision(re_judge) == "pass":
+            # 🔴 重生稿接受前仍须过**代码级**守恒闸（主考点+年级硬守恒贯穿"重生"，
+            # 不能只采信 LLM re_judge）：破守恒 → 丢弃重生稿，落下方"保留原版打 warn"。
+            resolved = await _solve_one(draft.get("stem", ""))
+            if _conservation_ok(
+                resolved.get("kp_name", ""), resolved.get("grade", ""), facts_i
+            ):
+                draft["gene"] = {"gate": GENE_GATE_PASS}
+                return draft  # 不带 check → solve_explain（闸B）必判
+
+    # 回炉仍不过 → 保留原版打 warn（不拦截入库，aux_tags + 题卡可见警示）
+    item["gene"] = {
+        "gate": GENE_GATE_WARN,
+        "reason": str(judge.get("reason") or "").strip() or None,
+    }
+    return item
+
+
+async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState:
+    """闸A 节点：对每道**未判过基因**的变式做母题基因比对（判决语义见 _gene_one_item）。
+
+    P2（PRD-C-012）：循环体已抽成 per-item 协程 _gene_one_item，本节点按题
+    asyncio.gather + Semaphore(GATE_CONCURRENCY=3) 并发，结果按原下标顺序回填。
     🔴 已带 gene 的题（exec_add 追加时的旧题等）原样通过，不重判不重复花预算。
     """
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
-    # 🔴 闸A·配方对齐：只对带 from_recipe 印记的题（产生该配方那一轮生成的）注入改判段，
-    #   递增预期档读 item 级 expected_difficulty（generate 落印，跟题走不随下标位移）。
-    #   编辑轮 add 的新题无印记 → 按默认标准判，绝不被旧配方（如「5道递增」）误改判。
     knobs = state.get("knobs") or {}
-    out: list[dict] = []
+    total = len(items)
+    sem = asyncio.Semaphore(GATE_CONCURRENCY)
 
-    for i, it in enumerate(items):
+    async def _run(i: int, it: dict[str, Any]) -> dict[str, Any]:
         item = dict(it)
-        if item.get("gene"):  # 已判过 → 不重判（旧题预算保护）
-            out.append(item)
-            continue
+        if item.get("gene"):  # 已判过 → 不进并发槽、不发 stage
+            return item
+        async with sem:
+            return await _gene_one_item(item, _gene_facts_for(item, facts, knobs), i, total)
 
-        facts_i = facts
-        if knobs and item.get("from_recipe"):
-            spec = gene_judge_knobs_spec(knobs, item.get("expected_difficulty"))
-            if spec:
-                facts_i = dict(facts, knobs_spec=spec)
-
-        _emit_stage("gene_gate", "平行度比对", "running", f"第 {i + 1}/{len(items)} 道")
-        judge = await _gene_judge_one(item, facts_i)
-        if judge is None:
-            item["gene"] = {"gate": GENE_GATE_SKIPPED}
-            out.append(item)
-            continue
-
-        if gene_gate_decision(judge) == "pass":
-            item["gene"] = {"gate": GENE_GATE_PASS}
-            out.append(item)
-            continue
-
-        # rework：既有回炉重生 1 次（基因反馈注回 prompt）→ 重生版再判一次
-        _emit_stage("gene_gate", "平行度比对", "warn", f"第 {i + 1} 道回炉重生中")
-        draft = await _regen_once(item, facts_i, feedback=_gene_feedback(judge))
-        if draft:
-            re_judge = await _gene_judge_one(draft, facts_i)
-            if re_judge is not None and gene_gate_decision(re_judge) == "pass":
-                # 🔴 重生稿接受前仍须过**代码级**守恒闸（主考点+年级硬守恒贯穿"重生"，
-                # 不能只采信 LLM re_judge）：破守恒 → 丢弃重生稿，落下方"保留原版打 warn"。
-                resolved = await _solve_one(draft.get("stem", ""))
-                if _conservation_ok(
-                    resolved.get("kp_name", ""), resolved.get("grade", ""), facts
-                ):
-                    draft["gene"] = {"gate": GENE_GATE_PASS}
-                    out.append(draft)  # 不带 check → solve_explain（闸B）必判
-                    continue
-
-        # 回炉仍不过 → 保留原版打 warn（不拦截入库，aux_tags + 题卡可见警示）
-        item["gene"] = {
-            "gate": GENE_GATE_WARN,
-            "reason": str(judge.get("reason") or "").strip() or None,
-        }
-        out.append(item)
-
+    out = list(await asyncio.gather(*(_run(i, it) for i, it in enumerate(items))))
     _emit_stage("gene_gate", "平行度比对", "done")
     return {"items": out, "messages": []}
 
@@ -1868,14 +2204,10 @@ VALID_INTENTS = {INTENT_REVISE, INTENT_EDIT, INTENT_CONFIRM, INTENT_QA, INTENT_C
 EDIT_ACTIONS = {"remove", "regenerate", "add"}
 ADD_COUNT_MAX = 5  # 与 exec_add 单轮上限同口径（min(n,5)），护栏在源头就钳掉
 
+# 🔴 排版（PRD-C-012 任务3）：分类标准/输出契约/硬约束固定段前移，变动段
+# （母题 DNA、老师最新一句话）移末尾（runtime 追加的 17 号无题组语境段照旧排最后）；
+# 语义一字不改。
 PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类器：intent 只能从 5 个枚举值里选 1 个，禁止发明新值）。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
-
-母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
-- 主考点: {kp_name}
-- 年级: {grade}
-
-老师最新一句话：
-{utterance}
 
 【分类标准】逐条对照，命中哪条选哪条；都不命中选 "clarify"（其中"编辑"细分 3 种 action）：
 1. "答疑" —— 判别：只是在问某题怎么解/为什么，不要求改动任何题。例：「为什么第3题选B？」
@@ -1903,7 +2235,14 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 - intent 只能是上述 5 个枚举值之一；ops.action 只能是 remove/regenerate/add。
 - remove/regenerate 的 index 从 1 起、必须 ≤ {n}；拿不准题号时 ops 留空、intent 取 "clarify"。
 - add 的 count 必须是正整数；intent=答疑/确认/修正/clarify 时 ops 必须为空数组。
-- 解析不出来 = "clarify"，绝不猜成删题。"""
+- 解析不出来 = "clarify"，绝不猜成删题。
+
+母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
+- 主考点: {kp_name}
+- 年级: {grade}
+
+老师最新一句话：
+{utterance}"""
 
 
 def _items_brief(items: list[dict]) -> str:
@@ -2195,6 +2534,9 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                     "injected_kp": regen.get("injected_kp"),
                 }
             )
+            # 4a：重出稿自带的验算载荷随新题走（REGEN_PROMPT 契约产出）
+            if isinstance(regen.get("verify_payload"), dict):
+                new_item["verify_payload"] = regen["verify_payload"]
             # 配方印记跟题走（与 difficulty 同理：重出仍占原计划槽位，闸A 改判段不丢）
             for k in ("from_recipe", "expected_difficulty"):
                 if old.get(k) is not None:
@@ -2205,7 +2547,25 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
 
 
 # --- 编辑·add：生成 N 道新题（吸收软约束/旋钮）→ 过 solve_explain ----------------
-ADD_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA，**新增** {n} 道举一反三变式。
+# 🔴 排版（对抗审修复·比照 GENERATE_PROMPT）：固定段（输出契约/格式/载荷契约）前移
+# 吃 aigeek 前缀缓存，变动段（母题 DNA/补充要求）移末尾；并补上 4a verify_payload 契约
+# ——编辑轮加题同样出题自带载荷，不再永远回落事后抽取。
+ADD_PROMPT = (
+    """你是浙教版初中数学命题专家。基于母题 DNA，**新增** {n} 道举一反三变式。
+
+只输出 JSON 数组(不要解释)，每元素：
+{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null",
+  "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
+
+格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
+
+verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题自己的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 该题标准答案）：
+"""
+    + _PAYLOAD_CONTRACT
+    + """
+抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ verify_payload 填 {{"kind":"none","reason":"原因"}}。
+
+铁律：每道仍考「{kp_name}」、仍在「{grade}」；只换数字/场景（除非老师明确要改难度/题型）。
 
 母题 DNA：
 - 主考点(硬守恒): {kp_name}
@@ -2214,14 +2574,8 @@ ADD_PROMPT = """你是浙教版初中数学命题专家。基于母题 DNA，**�
 - 母题题干: {stem}
 - 母题答案/解法骨架: {skeleton}
 
-老师的补充要求（best-effort 吸收，撞守恒的忽略）：{extra}
-
-铁律：每道仍考「{kp_name}」、仍在「{grade}」；只换数字/场景（除非老师明确要改难度/题型）。
-
-只输出 JSON 数组(不要解释)，每元素：
-{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null"}}
-
-格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
+老师的补充要求（best-effort 吸收，撞守恒的忽略）：{extra}"""
+)
 
 
 async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
@@ -2270,19 +2624,11 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
     for it in data or []:
         if not isinstance(it, dict):
             continue
-        # 🔴 新题不带 check → 下游 solve_explain 必判
-        items.append(
-            {
-                "stem": it.get("stem"),
-                "answer": it.get("answer"),
-                "solution": it.get("solution"),
-                "qtype": it.get("qtype") or facts["qtype"],
-                "difficulty": it.get("difficulty"),
-                "level": it.get("level") or "normal",
-                "injected_kp": it.get("injected_kp") or None,
-                # 不落 from_recipe 印记：补题轮的题不受首轮配方（递增/题型配比）改判
-            }
-        )
+        # 🔴 新题不带 check → 下游 solve_explain 必判。规整/净化走 generate 同一事实源
+        # （_normalize_generated_item：富文本净化 + verify_payload 仅 dict 才携带，
+        # 对抗审修复：编辑轮加题此前漏过 _sanitize_item 且永远拿不到 4a 载荷红利）。
+        # 不落 from_recipe 印记：补题轮的题不受首轮配方（递增/题型配比）改判。
+        items.append(_normalize_generated_item(it, facts))
     # 🔴 编辑轮清陈旧缺陷外显（同 exec_remove 注释）
     return {"items": items, "pending": None, "shape_defects": [], "messages": []}
 

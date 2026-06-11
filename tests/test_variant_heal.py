@@ -307,6 +307,80 @@ def test_fail_heal_success_keeps_count_and_no_drop(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# G4/AC3 replenish (adversarial fix): drop is followed by ONE replenish attempt
+# (a NEW question, regen+verify+conservation) before the group goes one short
+# ---------------------------------------------------------------------------
+
+def test_fail_drop_then_replenish_restores_count(monkeypatch):
+    calls = {"n": 0}
+
+    async def verify_fn(item, solved_answer):
+        if item.get("stem") == "补":
+            return {"verdict": "pass", "detail": "ok", "computed": "5"}
+        return {"verdict": "fail", "detail": "wrong", "computed": "3"}
+
+    async def regen_fn(item, facts, feedback=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # heal attempt fails -> drop
+        assert feedback and "剔除" in feedback  # replenish prompt says original was dropped
+        return {"stem": "补", "answer": "5", "solution": "s", "qtype": "qt",
+                "difficulty": 3, "level": "normal", "injected_kp": None}
+
+    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3", "补": "5"}))
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
+    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "qt",
+                                      "gene": {"gate": "pass"}}])
+    out = asyncio.run(solve_explain(state, {}))
+    assert len(out["items"]) == 1  # G4: count restored by the replenished question
+    assert out["items"][0]["stem"] == "补"
+    assert out["items"][0]["check"]["verify"] == VERIFY_SYMPY_PASS
+    assert out["items"][0]["gene"] == {"gate": "pass"}  # slot's gene mark carried
+    assert out["dropped_notes"] == []  # replenish succeeded -> no shortfall note
+
+
+def test_fail_drop_replenish_fails_notes_shortfall(monkeypatch):
+    async def verify_fn(item, solved_answer):
+        return {"verdict": "fail", "detail": "wrong", "computed": "3"}
+
+    async def regen_fn(item, facts, feedback=None):
+        return None  # heal AND replenish both fail
+
+    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3"}))
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
+    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "解答"}])
+    out = asyncio.run(solve_explain(state, {}))
+    assert out["items"] == []
+    assert len(out["dropped_notes"]) == 1
+    note = out["dropped_notes"][0]
+    assert "已剔除" in note and "补一道未成" in note and "少一道" in note  # AC3 wording
+
+
+def test_fail_drop_replenish_must_pass_verify_and_conservation(monkeypatch):
+    # replenish draft that sympy still fails must NOT sneak into the group
+    calls = {"n": 0}
+
+    async def verify_fn(item, solved_answer):
+        return {"verdict": "fail", "detail": "wrong", "computed": "3"}  # fails everything
+
+    async def regen_fn(item, facts, feedback=None):
+        calls["n"] += 1
+        return {"stem": "补", "answer": "5", "solution": "s", "qtype": "qt",
+                "difficulty": 3, "level": "normal", "injected_kp": None}
+
+    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3", "补": "5"}))
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
+    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "qt"}])
+    out = asyncio.run(solve_explain(state, {}))
+    assert calls["n"] == 2  # exactly one heal + one replenish attempt (no loop)
+    assert out["items"] == []  # unverifiable replenish never shown
+    assert len(out["dropped_notes"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # EXTRACT_PROMPT contract pin: root-rejection guidance present (F4)
 # ---------------------------------------------------------------------------
 
