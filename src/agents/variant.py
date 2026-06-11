@@ -1980,7 +1980,11 @@ async def _check_one_item(
     if struct_defects:
         # 🔴 P13 预算闸：结构回炉是增强类调用，预算耗尽 → 跳过回炉，直接标 ⚠ 注记继续走
         #   sympy（既有降级路径，绝不卡死）。
-        if _budget_exhausted():
+        # 🔴 RC2「老师意志优先」补齐结构闸（题组编辑器 reverify 修复）：from_edit 题（老师手动
+        #   编辑/点名改造）即便结构 lint 不过也**绝不回炉换题**——回炉会用模型重出覆盖老师改的
+        #   内容（reverify 真机实锤：手改题干→结构不匹配旧 qtype→被静默换成另一道题）。只标 ⚠
+        #   注记、保留老师原题继续验算，交人审。与下游 FAIL/degrade 的 from_edit 短路语义一致。
+        if item.get("from_edit") or _budget_exhausted():
             item["structure_lint"] = {"badge": "warn", "defects": struct_defects}
         else:
             _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道结构不合题型，回炉重生中")
@@ -2164,8 +2168,10 @@ async def _check_one_item(
 
     # 独立解 ≠ 标答（LLM 自检）→ 既有自愈：重生 1 次 → 重解 + 守恒
     # 🔴 P13：degrade 自愈也是增强类调用，预算耗尽 → 跳过自愈，落下方 warn 保留（不抛）。
+    # 🔴 RC2「老师意志优先」补齐 degrade 支（题组编辑器 reverify 修复）：from_edit 题不自愈换题，
+    #   直接落下方 warn 保留老师原题（与结构闸/FAIL 支一致——reverify 只验不换）。
     healed = None
-    if MAX_HEAL >= 1 and not _budget_exhausted():
+    if MAX_HEAL >= 1 and not _budget_exhausted() and not item.get("from_edit"):
         _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道回炉重生中")
         draft = await _regen_once(item, facts)
         if draft:

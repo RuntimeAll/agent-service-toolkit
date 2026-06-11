@@ -233,6 +233,39 @@ def test_reverify_from_edit_fail_kept_warn_not_dropped(monkeypatch):
     assert regen_called["n"] == 0  # from_edit 永不回炉换题
 
 
+def test_reverify_from_edit_structure_defect_kept_not_replaced(monkeypatch):
+    # 🔴 reverify 真机实锤的 bug 回归：from_edit 题手改后 stem 与旧 qtype 结构不匹配
+    #   （选择 qtype 但 stem 是填空形态、无 4 选项）→ structure_lint 命中缺陷。修复前
+    #   结构闸无 from_edit 守卫 → _regen_once 把老师改的内容静默换成另一道题。修复后：
+    #   结构缺陷只标 ⚠ 注记、保留老师原题，_regen_once 绝不被调用。
+    regen_called = {"n": 0}
+
+    async def solve_stub(stem):
+        return {"solved_answer": "x=2", "solution": "解析"}
+
+    async def verify_degrade(item, solved_answer):
+        return {"verdict": math_verify.DEGRADE, "detail": "no payload", "computed": None}
+
+    async def regen_spy(item, facts, feedback=None):
+        regen_called["n"] += 1
+        return {"stem": "被换掉的另一道题-不该发生"}
+
+    monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_degrade)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_spy)
+
+    edited_stem = "【手改】已知 $x^2=4$，则 $x=$ ____。"
+    items = [{"stem": edited_stem, "answer": "x=±2", "qtype": "选择",
+              "check": {"tier": TIER_MANUAL}}]
+    state = dict(_FACTS_STATE, items=items)
+    update, item, err = asyncio.run(reverify_item_state(state, 1))
+    assert err is None
+    assert item is not None
+    assert item["stem"] == edited_stem  # 老师手改内容逐字保留，绝不被换题
+    assert regen_called["n"] == 0  # 结构闸/degrade 支都不回炉换 from_edit 题
+    assert item.get("structure_lint", {}).get("badge") == "warn"  # 结构存疑只标注记
+
+
 def test_reverify_clears_old_check_before_rejudge(monkeypatch):
     # 旧 check（manual）不该让 _check_one_item 原样跳过 → 必须重判（solve 被调到）
     solve_called = {"n": 0}
