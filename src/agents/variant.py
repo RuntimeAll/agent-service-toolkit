@@ -38,6 +38,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, MessagesState, StateGraph
 
 from agents import conv_trace, math_verify
+from agents.qtype_format import format_by_qtype
 from agents.variant_support import anchor_subject, persist_items
 from core import get_model, relay_pool, settings
 
@@ -1712,6 +1713,20 @@ def _append_card_note(item: dict, note: str) -> None:
     item["solution"] = f"{sol}\n\n> {note}" if sol else f"> {note}"
 
 
+def _format_item_stem(item: dict) -> None:
+    """🔴 题型模版自动规范（PRD-C-009·BE 镜像 normalize.ts）：就地把 item.stem 跑一遍
+    format_by_qtype（选项分行 / 填空 ____ / 判断补括号），规范文本落进 item。
+
+    🔴 落点铁律：必须在 sympy/structure_lint **判决之后**调用——规范是纯排版（可能动选项
+    行序/下划线/补括号），绝不能影响判决（判决先跑、规范后做）。cosmetic-only、幂等、
+    解析不出原样、永不抛（format_by_qtype 自带 G5 降级）。规范后 item.stem 即 canonical，
+    上屏（_artifact_payload 读 stem）/ 入库（build_create_bo 读 stem）/ 会话恢复都吃规范文本。
+    """
+    stem = item.get("stem")
+    if isinstance(stem, str) and stem:
+        item["stem"] = format_by_qtype(stem, item.get("qtype"))
+
+
 _TIER_NOTES = {
     TIER_VERIFIED: NOTE_VERIFIED_OK,
     TIER_SELF_OK: NOTE_SELF_CHECK_OK,
@@ -2675,6 +2690,13 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     #   exec_add/exec_remove 改了题集会清掉该标记（次序失效回默认）；regenerate 原位改单题不清。
     if not state.get("manual_order"):
         items = _sort_by_difficulty(items)
+    # 🔴 题型模版自动规范（PRD-C-009·BE）：题组定稿收口处统一规范 stem（在 solve_explain
+    #   sympy/structure_lint 判决**之后**，绝不影响判决）。assemble 是 generate/add/regenerate/
+    #   remove 四路的唯一收口（exec_* → gene_gate/solve_explain → assemble），在此规范一次即覆盖
+    #   全部产新题/删题路径；幂等 → 多轮经过 assemble 不漂移。规范文本落进 state.items，
+    #   随快照上屏（_emit_artifact）+ 入库（persist_to_bank/build_create_bo 读 item.stem）+ 会话恢复。
+    for it in items:
+        _format_item_stem(it)
     state = {**state, "items": items}  # 覆盖后的 difficulty + 排序后的序随 state 流给快照/入库
     facts = _mother_facts(state)
 
@@ -3471,6 +3493,10 @@ def edit_item_state(
         it["solution"] = _sanitize_rich_text(solution)
     it["manual_edited"] = True
     it["from_edit"] = True
+    # 🔴 题型模版自动规范（PRD-C-009·BE）：手动编辑回写后顺手规范 stem（净化之后）。
+    #   edit-item 本身不跑 sympy 判决（check 置 manual 中性），此处规范无判决可影响——让老师
+    #   手改的题立刻是 canonical 上屏，即便未点 reverify 也吃规范文本。cosmetic-only、幂等。
+    _format_item_stem(it)
     # check 置中性：手动编辑、验算待重跑（清旧 verify/badge/tier，避免徽章误导）
     it["check"] = {"tier": TIER_MANUAL}
     return {"items": new_items}, it, None
@@ -3498,7 +3524,12 @@ async def reverify_item_state(
     target["from_edit"] = True  # 编辑后重验：保留老师意志（FAIL 不回炉换题，打 ⚠ 交人审）
     rechecked, _dropped = await _check_one_item(target, facts, index - 1, len(items))
     # from_edit 短路保证 rechecked 非 None；兜底（极端降级）保留原题不丢
-    new_items[index - 1] = rechecked if rechecked is not None else new_items[index - 1]
+    final = rechecked if rechecked is not None else new_items[index - 1]
+    # 🔴 题型模版自动规范（PRD-C-009·BE）：reverify 是单题 sympy/structure_lint 判决路径
+    #   （_check_one_item），规范在判决**之后**就地跑（绝不影响判决）。规范文本落进 item →
+    #   随 _artifact_payload 上屏 + 后续入库 + 会话恢复都吃规范文本；幂等不漂移。
+    _format_item_stem(final)
+    new_items[index - 1] = final
     return {"items": new_items}, new_items[index - 1], None
 
 
