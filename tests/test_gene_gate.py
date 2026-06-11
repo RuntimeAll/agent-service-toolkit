@@ -29,9 +29,12 @@ from agents.variant_support import build_create_bo
 
 
 def _judge(**over):
+    # P12.1 (PRD-C-013): difficulty_match removed from Gate-A — judge no longer
+    # second-guesses difficulty (subjective eyeballing vs generate's declared value =
+    # two noise sources). Difficulty consistency is now a pure-function relative check
+    # (difficulty_consistency_defects), warn-only, zero LLM.
     base = {
         "qtype_match": True,
-        "difficulty_match": True,
         "structure_match": True,
         "surface_swapped": True,
         "reason": "parallel",
@@ -52,8 +55,10 @@ def test_qtype_mismatch_reworks():
     assert gene_gate_decision(_judge(qtype_match=False)) == "rework"
 
 
-def test_difficulty_mismatch_reworks():
-    assert gene_gate_decision(_judge(difficulty_match=False)) == "rework"
+def test_difficulty_match_is_no_longer_a_gate_a_judgment(monkeypatch):
+    # P12.1: even if a (legacy) judge dict carries difficulty_match=False, Gate-A's
+    # pure decision must NOT rework on it — difficulty is no longer a skeleton gene.
+    assert gene_gate_decision(_judge(difficulty_match=False)) == "pass"
 
 
 def test_structure_mismatch_reworks():
@@ -255,6 +260,41 @@ def test_already_marked_items_are_not_rejudged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# RC2 (PRD-C-013): edit-round output is judged but NEVER reworked.
+# The teacher already named the rewrite; Gate-A failing only marks warn, the
+# teacher's intent wins over the gene gate. No regen budget spent on it.
+# ---------------------------------------------------------------------------
+
+def test_edit_round_item_failing_judge_is_warned_not_reworked(monkeypatch):
+    regen_calls = []
+
+    async def judge_fail(item, facts):
+        return _judge(structure_match=False, reason="teacher reshaped it")
+
+    async def regen_spy(item, facts, feedback=None):
+        regen_calls.append(item)
+        return {"stem": "new", "answer": "2"}
+
+    items = _run_gate(
+        [{"stem": "edited", "from_edit": True}], monkeypatch, judge_fail, regen_spy
+    )
+    assert regen_calls == []  # RC2: edit-round product never reworks
+    assert items[0]["stem"] == "edited"  # original (edited) item kept verbatim
+    assert items[0]["gene"]["gate"] == GENE_GATE_WARN
+    assert items[0]["gene"]["reason"] == "teacher reshaped it"
+
+
+def test_edit_round_item_passing_judge_still_passes(monkeypatch):
+    # from_edit short-circuit only kicks in on a failing judge; a passing edited
+    # item still passes normally.
+    async def judge_ok(item, facts):
+        return _judge()
+
+    items = _run_gate([{"stem": "edited", "from_edit": True}], monkeypatch, judge_ok)
+    assert items[0]["gene"]["gate"] == GENE_GATE_PASS
+
+
+# ---------------------------------------------------------------------------
 # auxTags transmission (truth always flows to audit, regardless of 4d display)
 # ---------------------------------------------------------------------------
 
@@ -285,3 +325,110 @@ def test_graph_wiring_gene_gate_between_producers_and_solve():
     assert ("exec_remove", "solve_explain") in edges
     # conditional edge generate -> gene_gate exists in the drawable graph
     assert ("generate", "gene_gate") in edges
+
+
+# ---------------------------------------------------------------------------
+# P12.1 difficulty consistency: pure-function (zero LLM) intra-group relative
+# check that replaces the deleted Gate-A difficulty_match judgment.
+# ---------------------------------------------------------------------------
+
+def test_difficulty_consistency_no_defect_when_hard_ge_normal():
+    items = [
+        {"level": "normal", "difficulty": 2},
+        {"level": "normal", "difficulty": 3},
+        {"level": "hard", "difficulty": 4},
+    ]
+    assert variant_mod.difficulty_consistency_defects(items) == []
+
+
+def test_difficulty_consistency_flags_hard_easier_than_normal():
+    items = [
+        {"level": "normal", "difficulty": 3},
+        {"level": "hard", "difficulty": 2},  # hard easier than a normal -> defect
+    ]
+    defects = variant_mod.difficulty_consistency_defects(items)
+    assert len(defects) == 1
+    assert "第2道" in defects[0]
+
+
+def test_difficulty_consistency_empty_when_no_hard_or_no_normal():
+    assert variant_mod.difficulty_consistency_defects(
+        [{"level": "normal", "difficulty": 3}]
+    ) == []
+    assert variant_mod.difficulty_consistency_defects(
+        [{"level": "hard", "difficulty": 2}]
+    ) == []
+
+
+def test_difficulty_consistency_skips_unparseable_difficulty():
+    # missing/unparseable difficulty -> excluded from comparison, no false alarm
+    items = [
+        {"level": "normal", "difficulty": None},
+        {"level": "hard", "difficulty": "x"},
+    ]
+    assert variant_mod.difficulty_consistency_defects(items) == []
+
+
+def test_difficulty_consistency_hard_equal_to_normal_is_ok():
+    # hard == max normal is allowed (>=, not strictly >)
+    items = [
+        {"level": "normal", "difficulty": 3},
+        {"level": "hard", "difficulty": 3},
+    ]
+    assert variant_mod.difficulty_consistency_defects(items) == []
+
+
+# ---------------------------------------------------------------------------
+# RC1 (PRD-C-013): qtype-conversion structure judgment. When the variant qtype
+# differs from the mother qtype, structure_match must target the *target* qtype's
+# canonical structure (not the mother's original skeleton).
+# ---------------------------------------------------------------------------
+
+def test_gene_target_qtype_detects_conversion():
+    facts = {"qtype": "解答题"}
+    assert variant_mod._gene_target_qtype({"qtype": "选择"}, facts) == "选择"
+
+
+def test_gene_target_qtype_none_when_same_qtype_after_alias():
+    facts = {"qtype": "解答题"}  # aliases to 解答
+    assert variant_mod._gene_target_qtype({"qtype": "计算题"}, facts) is None  # also 解答
+
+
+def test_gene_facts_for_injects_target_qtype_spec_on_conversion():
+    facts = {"qtype": "解答", "kp_name": "kp", "grade": "g7", "stem": "m", "skeleton": "sk"}
+    out = variant_mod._gene_facts_for({"qtype": "选择"}, facts, None)
+    assert "target_qtype_spec" in out
+    assert "选择" in out["target_qtype_spec"]
+    # judge prompt carries the target-qtype structure rule
+    prompt = variant_mod._gene_judge_prompt({"qtype": "选择", "stem": "v"}, out)
+    assert "题型转换语境" in prompt
+
+
+def test_gene_facts_for_no_target_spec_when_same_qtype():
+    facts = {"qtype": "解答"}
+    out = variant_mod._gene_facts_for({"qtype": "解答"}, facts, None)
+    assert "target_qtype_spec" not in out
+
+
+# ---------------------------------------------------------------------------
+# P12.3: rework feedback carries the mother skeleton/stem (was missing -> the
+# regen prompt asked "match the mother" with no mother in sight -> ~random).
+# ---------------------------------------------------------------------------
+
+def test_gene_feedback_embeds_mother_skeleton_and_stem():
+    facts = {"skeleton": "set up equation then solve", "stem": "mother question text"}
+    fb = variant_mod._gene_feedback(
+        _judge(structure_match=False, reason="r"), facts
+    )
+    assert "set up equation then solve" in fb
+    assert "mother question text" in fb
+    assert "同源" in fb  # 解法核心步骤同源（考点级）
+
+
+def test_gene_feedback_target_qtype_path_drops_mother_skeleton_requirement():
+    facts = {"skeleton": "sk", "stem": "mst"}
+    fb = variant_mod._gene_feedback(
+        _judge(qtype_match=False), facts, target_qtype="选择"
+    )
+    assert "选择" in fb
+    assert "规范结构" in fb  # target qtype canonical structure, not mother skeleton

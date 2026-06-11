@@ -159,12 +159,21 @@ class Settings(BaseSettings):
     RUOYI_TOKEN: str | None = None
     # 思考型模型读图建议 max_tokens（≥4096）
     VARIANT_MAX_TOKENS: int = 4096
+    # === PRD-C-013 P13 预算闸：state 级 LLM 调用计数上限（per-round 重置）===
+    # 超限后**增强类**调用（闸A rework / 闸B heal / replenish 补题 / extract 兜底）跳过
+    # 走既有 G5 降级路径（标 ⚠ / 保留原题，不卡死）；核心链（parse/generate/grade）不跳。
+    # 出题轮预算更宽（首稿 + 三题 eager 双闸 + 难度总评）；编辑轮窄（单题重验）。
+    VARIANT_BUDGET_GENERATE: int = 18
+    VARIANT_BUDGET_EDIT: int = 6
 
     # === PRD-C-011 Block B：LLM 出口多中转站主备 + 熔断转移 ===
     # RELAY_POOL = JSON 数组（主→备有序）：[{"name","base_url","api_key","model"}]
     # 留空 → 从 COMPATIBLE_* 派生单中转站（名字取 RELAY_NAME）。
     RELAY_POOL: str | None = None
     RELAY_NAME: str = "lk888"  # 单中转站时的展示名（也是 conv_trace.relay 列默认值）
+    # 轻活模型（S1.1）：难度总评等无识图、可降本的调用点经 per-call model 覆盖走它；
+    # 留空 → 各调用点退回默认（relay 配置 model），行为不变。
+    LLM_MODEL_LIGHT: str = "gpt-5-nano"
     RELAY_FAIL_THRESHOLD: int = 3  # 连续失败 N 次 → 熔断器 trip
     RELAY_COOLDOWN_S: float = 30.0  # 熔断冷却秒数（之后 half-open 探活）
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}

@@ -276,12 +276,32 @@ def test_artifact_payload_never_leaks_internal_item_keys():
     }
     art = variant_mod._artifact_payload(state)
     it = art["items"][0]
+    # 内部字段绝不外漏：verify_payload/from_recipe/expected_difficulty/_seq 等都不进帧；
+    # 非剔除题不带 _dropped（仅剔除题显式带 _dropped:true 哨兵）
     assert "verify_payload" not in it and "_dropped" not in it
-    # explicit whitelist: exactly the FE contract keys, nothing internal
+    assert "from_recipe" not in it and "expected_difficulty" not in it and "_seq" not in it
+    # explicit whitelist: exactly the FE contract keys（含 P2b 稳定 merge 键 seq），nothing internal
     assert set(it) == {
-        "index", "stem", "answer", "solution", "qtype", "difficulty",
+        "index", "seq", "stem", "answer", "solution", "qtype", "difficulty",
         "level", "verify", "tier", "gene", "persisted",
     }
+
+
+def test_artifact_payload_dropped_item_carries_sentinel_and_stable_seq():
+    # 🔴 对抗审①：剔除题（item._dropped 真值）→ 帧显式带 _dropped:true（驱动 FE 退场）；
+    #   item._seq（流内 eager 稳定生成序）→ 帧 seq 用它而非 index（不漂移）。
+    state = {
+        "items": [
+            {"stem": "kept", "_seq": 1, "check": {"badge": "ok", "verify": "sympy_pass", "tier": "verified"}},
+            {"stem": "dropped", "_seq": 2, "_dropped": "note", "gene": {"gate": "pass"}},
+        ]
+    }
+    art = variant_mod._artifact_payload(state)
+    kept, dropped = art["items"]
+    assert kept["seq"] == 1 and "_dropped" not in kept  # 存活题：稳定 seq、无哨兵
+    assert dropped["seq"] == 2 and dropped["_dropped"] is True  # 剔除题：稳定 seq + 显式哨兵
+    # _seq 是内部键，绝不外漏（FE 只认 seq）
+    assert "_seq" not in kept and "_seq" not in dropped
 
 
 # ---------------------------------------------------------------------------
@@ -409,17 +429,36 @@ def test_generate_eager_judges_items_and_emits_partial_frames_in_order(monkeypat
     assert all(it["gene"]["gate"] == "pass" for it in out["items"])
     assert all(it["check"]["badge"] == "ok" for it in out["items"])
 
-    # partial frames: cumulative, generation order, expected_total stamped
-    # (frames written from inside create_task children -> writer reachable there)
+    # P2b-BE 逐题上屏（PRD-C-013）：出卡与过闸解耦 —— 每题先出**无 tier** 帧（spawn 上卡），
+    # 后出**带 tier** 帧（过闸定状态）。所有帧 partial=true + expected_total 钉 3。
     partials = [a for a in _artifact_frames(captured) if a.get("partial")]
-    assert [len(a["items"]) for a in partials] == [1, 2, 3]
     assert all(a["partial"] is True and a["expected_total"] == 3 for a in partials)
+    # spawn 阶段累计无 tier 帧：1→2→3 道，全 tier=None（出卡先行）
+    assert [len(a["items"]) for a in partials[:3]] == [1, 2, 3]
+    for a in partials[:3]:
+        assert all(it["tier"] is None for it in a["items"])
+    # 每道题的帧序契约：先有一帧它 tier=None，再有一帧它带 tier（同 seq 原位重发）
+    for stem in ("s0", "s1", "s2"):
+        seen_no_tier = False
+        seen_tier = False
+        for a in partials:
+            for it in a["items"]:
+                if it["stem"] != stem:
+                    continue
+                if it["tier"] is None and not seen_tier:
+                    seen_no_tier = True
+                if it["tier"] is not None:
+                    assert seen_no_tier, f"{stem}: 带 tier 帧必须晚于无 tier 帧"
+                    seen_tier = True
+        assert seen_no_tier and seen_tier
+    # 终帧三题全带 tier，按生成序
     assert [it["stem"] for it in partials[-1]["items"]] == ["s0", "s1", "s2"]
+    assert all(it["tier"] == "verified" for it in partials[-1]["items"])
     for a in partials:
         for it in a["items"]:
             assert "verify_payload" not in it and "_dropped" not in it
 
-    # thought-bar narration: per-item completion progress
+    # thought-bar narration: per-item completion progress（已过闸计数）
     details = [s.get("detail") for s in _stage_frames(captured)]
     assert "第 1/3 道完成" in details and "第 3/3 道完成" in details
 
@@ -433,14 +472,62 @@ def test_generate_eager_drop_becomes_sentinel_then_solve_explain_collects(monkey
     assert [it.get("stem") for it in out["items"]] == ["s0", "s1", "s2"]
     assert out["items"][1].get("_dropped") == "note-1"  # sentinel, not silently lost
     assert "check" not in out["items"][1]
-    # partial frames never show the dropped item
+    # P2b-BE：spawn 阶段 s1 以无 tier 帧上卡（出卡先行），过闸验出真 fail → 后续帧带 _dropped 退场。
     partials = [a for a in _artifact_frames(captured) if a.get("partial")]
-    assert [len(a["items"]) for a in partials] == [1, 1, 2]
+    # spawn 阶段累计无 tier：1→2→3（含 s1，尚未过闸）
+    assert [len(a["items"]) for a in partials[:3]] == [1, 2, 3]
+    # 🔴 对抗审①：剔除题不再压缩 index 隐式挤掉——s1 以 _dropped:true 显式入帧驱动 FE 退场，
+    #   稳定 seq 不漂移（s0=1/s1=2/s2=3）。终帧「存活题」（非 _dropped）= s0,s2。
+    final_live = [it["stem"] for it in partials[-1]["items"] if not it.get("_dropped")]
+    assert final_live == ["s0", "s2"]
+    s1_dropped = [it for a in partials for it in a["items"] if it["stem"] == "s1" and it.get("_dropped")]
+    assert s1_dropped, "s1 应以 _dropped:true 帧退场"
+    s1_tiers = [it["tier"] for a in partials for it in a["items"] if it["stem"] == "s1"]
+    assert s1_tiers and all(t is None for t in s1_tiers)  # s1 只以无 tier 帧露过脸
 
     # downstream solve_explain (macro DAG unchanged) removes the sentinel + keeps narration
     out2 = asyncio.run(solve_explain(dict(_FACTS_STATE, items=out["items"]), {}))
     assert [it["stem"] for it in out2["items"]] == ["s0", "s2"]
     assert out2["dropped_notes"] == ["note-1"]
+
+
+def test_generate_eager_drop_keeps_stable_seq_and_emits_dropped_frame(monkeypatch):
+    # 🔴 对抗审① — 中间题 eager 剔除后：剩余题 seq 不漂移（稳定 = 生成序）、剔除题显式带
+    #   _dropped 入帧、整组无重复 seq。修复前剔除题靠压缩 index 隐式挤掉 → 后题 index 前移
+    #   → FE 按 seq 原位 merge 把 A 卡换成 B（嫁接）且旧 seq 永删不掉（残留重复卡）。
+    captured = _capture_frames(monkeypatch)
+    _patch_gate_chain(monkeypatch, drop_idx=1)  # 中间题（idx=1）eager 流内真 fail 剔除
+    _patch_streaming_llm(monkeypatch, 3)
+
+    asyncio.run(generate(_gen_state(), {}))
+    partials = [a for a in _artifact_frames(captured) if a.get("partial")]
+
+    # ① 每帧内 seq 唯一（无重复 seq）
+    for a in partials:
+        seqs = [it["seq"] for it in a["items"]]
+        assert len(seqs) == len(set(seqs)), f"重复 seq: {seqs}"
+
+    # ② seq = 稳定生成序，剔除题不让后题前移：s0→seq1 / s1→seq2(剔除) / s2→seq3，全程不变
+    seq_of = {}
+    for a in partials:
+        for it in a["items"]:
+            prev = seq_of.get(it["stem"])
+            assert prev is None or prev == it["seq"], f"{it['stem']} seq 漂移 {prev}->{it['seq']}"
+            seq_of[it["stem"]] = it["seq"]
+    assert seq_of["s0"] == 1 and seq_of["s1"] == 2 and seq_of["s2"] == 3
+
+    # ③ 剔除题 s1 显式带 _dropped:true 入帧（驱动 FE 退场），而非从帧里消失
+    s1_dropped_frames = [
+        it for a in partials for it in a["items"]
+        if it["stem"] == "s1" and it.get("_dropped") is True
+    ]
+    assert s1_dropped_frames, "剔除题 s1 应显式发 _dropped:true 帧"
+    # 保留题从不带 _dropped
+    assert all(
+        not it.get("_dropped")
+        for a in partials for it in a["items"]
+        if it["stem"] in ("s0", "s2")
+    )
 
 
 def test_generate_shape_retry_discards_eager_results(monkeypatch):

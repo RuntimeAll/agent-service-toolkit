@@ -100,6 +100,24 @@ def _chat(relay: Relay) -> ChatOpenAI:
     return c
 
 
+def _chat_override(relay: Relay, model: str) -> ChatOpenAI:
+    """per-call 模型覆盖（S1.1）：同站点 base_url/api_key、只换 model 字段，按 (站名|model)
+    缓存独立实例（不污染整站缓存 _chat_cache）。轻活模型（nano）走这条不动主链路。"""
+    ck = f"{relay.name}|{model}"
+    c = _chat_cache.get(ck)
+    if c is None:
+        c = ChatOpenAI(
+            model=model,
+            temperature=0.5,
+            streaming=True,
+            stream_usage=True,
+            openai_api_base=relay.base_url,
+            openai_api_key=relay.api_key,
+        )
+        _chat_cache[ck] = c
+    return c
+
+
 def _breaker(name: str) -> _Breaker:
     b = _breakers.get(name)
     if b is None:
@@ -114,6 +132,7 @@ async def ainvoke_failover(
     max_tokens: int,
     tags: list[str] | None = None,
     on_delta: Callable[[str], None] | None = None,
+    model: str | None = None,
 ) -> tuple[Any, str, str, int]:
     """按主→备顺序调用，熔断转移。
 
@@ -127,6 +146,9 @@ async def ainvoke_failover(
     on_delta：流内回调（每个 chunk 后拿到【累计文本】），用于 generate 出题进度计数。
     给了 on_delta 走 astream 手动聚合（stream_usage 开着，聚合块仍有 usage_metadata）；
     回调异常静默吞，绝不影响主流程。首 chunk 后失败不再 failover（半截流不可重放）。
+    model：per-call 模型覆盖（S1.1，nano 降本前置）。给了就只换该次请求的 model 字段
+    （站点 base_url/api_key 不变，绕过 _chat 缓存临时 bind 模型），返回的 relay_model
+    仍归因到实际成交站名 + 这个覆盖模型；None = 完全沿用各站配置 model（旧行为不变）。
     """
     relays = _relays()
     # 🔴 单站无备援时禁用熔断跳过：开闸 fail-fast 只降可用性（30s 内全灭且 last_exc=None
@@ -141,14 +163,18 @@ async def ainvoke_failover(
             fallback += 1  # 跳过开闸的主站 = 一次转移
             continue
         try:
-            model = _chat(relay).bind(max_tokens=max_tokens)
+            # per-call 模型覆盖（S1.1）：换 model 字段须重建 ChatOpenAI（model 是构造期字段，
+            # 非 per-call kwarg），缓存的整站实例不动；relay_model 归因到这个覆盖模型。
+            chat = _chat(relay) if model is None else _chat_override(relay, model)
+            relay_model = relay.model if model is None else model
+            llm = chat.bind(max_tokens=max_tokens)
             if on_delta is None:
                 # cfg 为空不传（兼容测试桩的窄签名 ainvoke(messages)）
-                resp = await (model.ainvoke(messages, config=cfg) if cfg else model.ainvoke(messages))
+                resp = await (llm.ainvoke(messages, config=cfg) if cfg else llm.ainvoke(messages))
             else:
                 resp = None
                 acc = ""
-                async for chunk in model.astream(messages, config=cfg):
+                async for chunk in llm.astream(messages, config=cfg):
                     resp = chunk if resp is None else resp + chunk
                     try:
                         c = chunk.content
@@ -161,7 +187,7 @@ async def ainvoke_failover(
                     raise RuntimeError("empty stream")
             br.fails = 0
             br.open_until = 0.0  # 成功即复位
-            return resp, relay.name, relay.model, fallback
+            return resp, relay.name, relay_model, fallback
         except Exception as e:  # noqa: BLE001 — 失败 → trip 计数 + 切下一个
             last_exc = e
             br.fails += 1

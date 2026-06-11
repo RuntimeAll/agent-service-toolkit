@@ -347,9 +347,12 @@ def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
         bo["answer"] = facts["mother_answer"]
     if facts.get("mother_solution"):
         bo["analyze"] = facts["mother_solution"]
+    # 🔴 biz_question.difficult 是 NOT NULL 且无 DB 默认值（book-server 实测：缺列 → SQLException
+    #   "Field 'difficult' doesn't have a default value" → create 500）。故难度缺/非数时必兜底，绝不省列。
     difficult = _clamp_difficult(facts.get("mother_difficulty"))
-    if difficult is not None:
-        bo["difficult"] = difficult
+    if difficult is None:
+        difficult = 2  # 常规档兜底
+    bo["difficult"] = difficult
     if facts.get("subject_id"):
         bo["subjectId"] = str(facts["subject_id"])
     if facts.get("image_url"):
@@ -377,9 +380,15 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
     analyze = item.get("solution") or item.get("analyze")
     if analyze:
         bo["analyze"] = analyze
+    # 🔴 biz_question.difficult 是 NOT NULL 且无 DB 默认值（缺列 → create 500）。难度缺/非数时
+    #   按 item → 母题 → 2(常规) 兜底链，绝不省列。二期 P8 _grade_difficulty 降级可能留下非数难度，
+    #   旧代码 `if difficult is not None` 会漏列 → c012 P5b item#0 入库 500 的真因。
     difficult = _clamp_difficult(item.get("difficulty"))
-    if difficult is not None:
-        bo["difficult"] = difficult
+    if difficult is None:
+        difficult = _clamp_difficult(facts.get("mother_difficulty"))
+    if difficult is None:
+        difficult = 2  # 常规档兜底
+    bo["difficult"] = difficult
 
     # 知识点编码：classify 锚定到的真实节点 code（落 subjectId）
     subject_id = facts.get("subject_id")

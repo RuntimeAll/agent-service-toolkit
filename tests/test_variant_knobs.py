@@ -23,9 +23,11 @@ from langchain_core.messages import HumanMessage
 
 import agents.variant as variant_mod
 from agents.variant import (
+    DIFFICULTY_CAP,
     GENERATE_PROMPT,
     PLAN_INCREASING,
     _gene_judge_prompt,
+    _grade_difficulty,
     _is_proof_like,
     _mother_facts,
     analyze,
@@ -183,12 +185,13 @@ def test_shape_check_increasing_with_mother_difficulty_uses_gate_a_ruler():
     (expected exactly [3,4,5]) so the group retry gets a chance to fix it —
     instead of the code gate passing and gate A inevitably warning."""
     knobs = {"difficulty_plan": PLAN_INCREASING}
-    defects = shape_check(_items(("解答", 3), ("解答", 3), ("解答", 4)), knobs, 3)
+    # md=2 -> expected exactly [2,3,4]; [2,2,3] is a defect
+    defects = shape_check(_items(("解答", 2), ("解答", 2), ("解答", 3)), knobs, 2)
     assert any("难度档与计划不符" in d for d in defects)
-    assert shape_check(_items(("解答", 3), ("解答", 4), ("解答", 5)), knobs, 3) == []
-    # cap at 5 deep into the plan
-    items = _items(("解答", 4), ("解答", 5), ("解答", 5))
-    assert shape_check(items, knobs, 4) == []
+    assert shape_check(_items(("解答", 2), ("解答", 3), ("解答", 4)), knobs, 2) == []
+    # cap at DIFFICULTY_CAP (=4) deep into the plan: md=3 -> [3,4,4]
+    items = _items(("解答", 3), ("解答", 4), ("解答", 4))
+    assert shape_check(items, knobs, 3) == []
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +226,17 @@ def test_recipe_empty_knobs_is_legacy_default():
     assert recipe_from_knobs(None, None)["spec"] == ""
 
 
-def test_recipe_increasing_caps_difficulty_at_5():
+def test_recipe_increasing_caps_difficulty_at_cap():
+    # S1.3: DIFFICULTY_CAP 5->4，递增计划逐题 +1 封顶 4（对齐绝对 rubric 1-4）。
+    assert DIFFICULTY_CAP == 4
     knobs = {"count": 5, "difficulty_plan": PLAN_INCREASING}
-    recipe = recipe_from_knobs(knobs, 4)
+    recipe = recipe_from_knobs(knobs, 2)
     assert recipe["n"] == 5
-    assert recipe["expected_difficulties"] == [4, 5, 5, 5, 5]
+    assert recipe["expected_difficulties"] == [2, 3, 4, 4, 4]  # 从 md=2 起逐题 +1，封顶 4
     assert "老师指定配方" in recipe["spec"]
     assert "共 5 道" in recipe["spec"]
+    # 起始难度已达上限 -> 全程封顶
+    assert recipe_from_knobs(knobs, 4)["expected_difficulties"] == [4, 4, 4, 4, 4]
 
 
 def test_recipe_spec_carries_dist_and_note():
@@ -250,13 +257,13 @@ def test_gene_spec_empty_knobs_or_irrelevant_knobs_is_none():
     assert gene_judge_knobs_spec({"count": 5, "note": "x"}, 3) is None
 
 
-def test_gene_spec_increasing_uses_item_level_expected_difficulty():
-    """Expected difficulty comes from the item-level stamp (set by generate), not
-    from the live list index — so remove/add rounds never shift the bar."""
+def test_gene_spec_increasing_no_longer_injects_difficulty(monkeypatch):
+    """P12.1 (PRD-C-013): difficulty_match deleted from Gate-A -> an increasing plan
+    with no qtype_dist now injects NOTHING (difficulty consistency moved to the pure
+    function difficulty_consistency_defects, warn-only, zero LLM)."""
     knobs = {"difficulty_plan": PLAN_INCREASING, "count": 3}
-    assert "预期难度档 = 3" in gene_judge_knobs_spec(knobs, 3)
-    assert "预期难度档 = 5" in gene_judge_knobs_spec(knobs, 5)
-    # increasing plan but no stamp (edit-round item) -> no difficulty section at all
+    assert gene_judge_knobs_spec(knobs, 3) is None
+    assert gene_judge_knobs_spec(knobs, 5) is None
     assert gene_judge_knobs_spec(knobs, None) is None
 
 
@@ -277,19 +284,20 @@ def test_gene_judge_prompt_formats_with_and_without_knobs_spec():
     )
     with_spec = _gene_judge_prompt(item, dict(facts, knobs_spec=spec))
     assert with_spec.startswith(base)
-    assert "老师指定配方" in with_spec and "预期难度档 = 4" in with_spec
+    # P12.1: only the qtype realignment survives; no difficulty section anymore
+    assert "老师指定配方" in with_spec and "qtype_match 改判" in with_spec
+    assert "预期难度档" not in with_spec
 
 
-def test_gene_gate_node_injects_per_item_spec(monkeypatch):
-    """Wiring: gene_gate hands each from_recipe item a facts copy with its own spec,
-    reading the item-level expected_difficulty stamp."""
+def test_gene_gate_node_injects_qtype_spec_for_recipe_items(monkeypatch):
+    """Wiring: gene_gate hands each from_recipe item a facts copy carrying the qtype
+    realignment spec (P12.1: difficulty spec is gone; qtype-dist spec remains)."""
     seen = []
 
     async def judge_spy(item, facts):
         seen.append(facts.get("knobs_spec"))
         return {
             "qtype_match": True,
-            "difficulty_match": True,
             "structure_match": True,
             "surface_swapped": True,
         }
@@ -302,16 +310,16 @@ def test_gene_gate_node_injects_per_item_spec(monkeypatch):
     state = dict(
         _FACTS_STATE,
         items=[
-            {"stem": "a", "from_recipe": True, "expected_difficulty": 3},
-            {"stem": "b", "from_recipe": True, "expected_difficulty": 4},
+            {"stem": "a", "qtype": "选择", "from_recipe": True, "expected_difficulty": 3},
+            {"stem": "b", "qtype": "选择", "from_recipe": True, "expected_difficulty": 4},
         ],
-        knobs={"difficulty_plan": PLAN_INCREASING, "count": 2},
+        knobs={"qtype_dist": {"选择": 2}, "count": 2},
     )
     out = asyncio.run(gene_gate(state, {}))
     assert out["messages"] == []
     assert len(seen) == 2
-    assert "预期难度档 = 3" in seen[0]
-    assert "预期难度档 = 4" in seen[1]
+    assert all("qtype_match 改判" in s for s in seen)
+    assert all("预期难度档" not in s for s in seen)
 
 
 def test_gene_gate_edit_round_items_not_judged_by_stale_recipe(monkeypatch):
@@ -427,13 +435,13 @@ def test_generate_extracts_knobs_from_first_round_text(monkeypatch):
                 ensure_ascii=False,
             )
         # generate round: emit a recipe-conforming group
-        # (increasing plan from mother difficulty 3 -> expected exactly [3,4,5,5,5])
+        # (increasing plan from mother difficulty 3, cap=4 -> expected exactly [3,4,4,4,4])
         items = [
             dict(_ITEM_JSON, qtype="选择", difficulty=3),
             dict(_ITEM_JSON, qtype="选择", difficulty=4),
-            dict(_ITEM_JSON, qtype="填空", difficulty=5, level="hard"),
-            dict(_ITEM_JSON, qtype="填空", difficulty=5, level="hard"),
-            dict(_ITEM_JSON, qtype="解答", difficulty=5, level="hard"),
+            dict(_ITEM_JSON, qtype="填空", difficulty=4, level="hard"),
+            dict(_ITEM_JSON, qtype="填空", difficulty=4, level="hard"),
+            dict(_ITEM_JSON, qtype="解答", difficulty=4, level="hard"),
         ]
         return json.dumps(items, ensure_ascii=False)
 
@@ -451,7 +459,7 @@ def test_generate_extracts_knobs_from_first_round_text(monkeypatch):
     assert len(out["items"]) == 5
     # recipe stamps: gate-A reads these item-level fields, never the live list index
     assert all(it["from_recipe"] is True for it in out["items"])
-    assert [it["expected_difficulty"] for it in out["items"]] == [3, 4, 5, 5, 5]
+    assert [it["expected_difficulty"] for it in out["items"]] == [3, 4, 4, 4, 4]
 
 
 def test_generate_knobs_extraction_failure_falls_back_to_default(monkeypatch):
@@ -531,7 +539,18 @@ def test_knobs_desc_human_readable():
 
 
 def _assembled(state):
-    out = asyncio.run(assemble(state, {}))
+    # assemble 现会先跑 P8 难度总评（一次 nano LLM call）；这些断言不关心难度，
+    # 桩成 identity 让 assemble 纯离线（难度总评本身的行为另有专测）。
+    orig = variant_mod._grade_difficulty
+
+    async def _identity(items):
+        return items
+
+    variant_mod._grade_difficulty = _identity
+    try:
+        out = asyncio.run(assemble(state, {}))
+    finally:
+        variant_mod._grade_difficulty = orig
     return out["messages"][0].content
 
 
@@ -577,6 +596,97 @@ def test_assemble_header_without_knobs_keeps_legacy_text():
     text = _assembled(state)
     assert "配方：默认 3 = 2 普通 + 1 难" in text
     assert "按你的要求" not in text and "配方未完全满足" not in text
+
+
+# ---------------------------------------------------------------------------
+# P8 _grade_difficulty (S1.2): absolute-rubric regrade via nano, G5 degrade
+# ---------------------------------------------------------------------------
+
+
+def _grade_items(*diffs):
+    return [{"stem": f"q{i}", "answer": "a", "solution": "s", "difficulty": d}
+            for i, d in enumerate(diffs)]
+
+
+def test_grade_difficulty_overrides_and_clamps_to_1_4(monkeypatch):
+    """nano 返回值覆盖 item.difficulty，越界钳到 1~4（含 0 和 9 两端越界）。"""
+    captured = {}
+
+    async def fake_llm(messages, retry=True, *, model=None, **kwargs):
+        captured["model"] = model
+        captured["prompt"] = messages[0].content
+        return "[0, 2, 9]"  # 0/9 越界，2 正常
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    out = asyncio.run(_grade_difficulty(_grade_items(3, 3, 3)))
+    assert [it["difficulty"] for it in out] == [1, 2, 4]  # 0->1, 2->2, 9->4
+    # per-call 用轻活模型（S1.1 覆盖），且题面带题干/答案/解析编号
+    assert captured["model"] == variant_mod.settings.LLM_MODEL_LIGHT
+    assert "[1] 题干：q0" in captured["prompt"] and "解析：s" in captured["prompt"]
+
+
+def test_grade_difficulty_parse_failure_preserves_original(monkeypatch):
+    async def fake_llm(messages, retry=True, *, model=None, **kwargs):
+        return "总评不出来，抱歉"  # 非 JSON -> 解析失败
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    out = asyncio.run(_grade_difficulty(_grade_items(2, 4)))
+    assert [it["difficulty"] for it in out] == [2, 4]  # 原值保留，绝不抛
+
+
+def test_grade_difficulty_count_mismatch_preserves_original(monkeypatch):
+    async def fake_llm(messages, retry=True, *, model=None, **kwargs):
+        return "[1, 2]"  # 长度对不上 3 道 -> 整体降级保留原值
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    out = asyncio.run(_grade_difficulty(_grade_items(3, 3, 3)))
+    assert [it["difficulty"] for it in out] == [3, 3, 3]
+
+
+def test_grade_difficulty_llm_exception_preserves_original(monkeypatch):
+    async def boom(messages, retry=True, *, model=None, **kwargs):
+        raise RuntimeError("relay down")
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", boom)
+    out = asyncio.run(_grade_difficulty(_grade_items(1, 2)))
+    assert [it["difficulty"] for it in out] == [1, 2]  # 异常 -> 降级，不卡死
+
+
+def test_grade_difficulty_empty_items_noops(monkeypatch):
+    called = []
+
+    async def fake_llm(messages, retry=True, *, model=None, **kwargs):
+        called.append(1)
+        return "[]"
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    assert asyncio.run(_grade_difficulty([])) == []
+    assert called == []  # 空组不发 LLM call
+
+
+def test_grade_difficulty_unparseable_element_keeps_that_items_original(monkeypatch):
+    async def fake_llm(messages, retry=True, *, model=None, **kwargs):
+        return '[3, "x", 1]'  # 中间项非整数 -> 该项保留原值
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    out = asyncio.run(_grade_difficulty(_grade_items(2, 2, 2)))
+    assert [it["difficulty"] for it in out] == [3, 2, 1]
+
+
+def test_assemble_writes_back_graded_difficulty(monkeypatch):
+    """assemble 回写 P8 覆盖后的 difficulty 进 graph state（入库/快照跟随）。"""
+    async def fake_grade(items):
+        return [dict(it, difficulty=1) for it in items]
+
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", fake_grade)
+    monkeypatch.setattr(variant_mod, "_emit_artifact", lambda *a, **k: None)
+    state = dict(
+        _FACTS_STATE,
+        items=[{"stem": "s", "answer": "a", "solution": "x", "difficulty": 4,
+                "check": {"badge": "ok"}}],
+    )
+    out = asyncio.run(assemble(state, {}))
+    assert out["items"][0]["difficulty"] == 1  # 覆盖值随 node 输出落进 state
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 Contract (see PRD-C-010):
 - single public entry: ``verify(payload: dict) -> dict``
 - payload kinds: ``equation_solve`` / ``expr_equiv`` / ``numeric`` / ``choice``
+  / ``inequality_solve`` / ``rational_roots`` (PRD-C-013 4b 扩面)
 - return: ``{"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}``
 
 Hard rules:
@@ -64,6 +65,11 @@ _PY_TOKEN_RE = re.compile(r"\b(if|else|elif|for|in|lambda|len|range|and|or|not|w
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 _DEFAULT_TOL = 1e-6
+
+# Relational operators for inequality_solve. Order in the split regex matters:
+# multi-char ops ('>=','<=') must come before their single-char prefixes.
+_REL_SPLIT_RE = re.compile(r"(>=|<=|>|<)")
+_REL_FUNCS = {">": sp.Gt, "<": sp.Lt, ">=": sp.Ge, "<=": sp.Le}
 
 # ---------------------------------------------------------------------------
 # Complexity guard (G5, anti-hang): K-12 payloads are tiny. Anything beyond
@@ -267,6 +273,176 @@ def _verify_equation_solve(payload: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# kind: inequality_solve  (PRD-C-013 4b: single-variable inequality solution set)
+# ---------------------------------------------------------------------------
+# Strategy: turn BOTH the inequality and the claimed answer into sympy real
+# solution Sets, then compare the Sets for exact equality. We never trust a
+# raw string match. A chained / compound claimed form ("-2<=x<=2") is the AND
+# of two relationals -> we intersect the per-relational solution sets (solveset
+# rejects a bare And, so intersection is the robust path). Equivalent writings
+# ("x**2-4<=0" vs "-2<=x<=2", "2*x>=6" vs "x>=3") collapse to the same Interval
+# and therefore compare equal; a strict/non-strict boundary mismatch ("x>3" vs
+# "x>=3") yields a non-empty symmetric difference -> fail.
+
+
+def _relational_solution_set(text: str, sym: sp.Symbol) -> Any:
+    """Parse one (possibly chained) relational string into its real solution Set.
+
+    'a<x<b' is split on the relational operators and each piece is solved over
+    the reals; the answer is the intersection. Operands are routed through the
+    module's ``_parse`` so the charset / function whitelist / complexity guard
+    all still apply. Any failure -> _DegradeError.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise _DegradeError(f"not a parseable inequality: {text!r}")
+    raw = text.strip().replace("==", "=")
+    parts = _REL_SPLIT_RE.split(raw)
+    operands = parts[0::2]
+    ops = parts[1::2]
+    if not ops:
+        raise _DegradeError(f"no relational operator in {text!r}")
+    if any(not o.strip() for o in operands):
+        raise _DegradeError(f"malformed relational (empty operand): {text!r}")
+    result: Any = sp.S.Reals
+    sym_name = sym.name
+    for i, op in enumerate(ops):
+        lhs = _parse(operands[i])
+        rhs = _parse(operands[i + 1])
+        free_names = {s.name for s in (lhs - rhs).free_symbols}
+        if sym_name not in free_names:
+            raise _DegradeError(f"unknown {sym_name} absent from relational piece {op!r}")
+        # _parse builds a fresh Symbol with no real-assumption; rebind it to the
+        # real-domain unknown so solveset(..., S.Reals) treats it as real.
+        relation = _REL_FUNCS[op](lhs, rhs).subs(sp.Symbol(sym_name), sym)
+        try:
+            piece = sp.solveset(relation, sym, sp.S.Reals)
+        except Exception as exc:
+            raise _DegradeError(f"sympy cannot solve relational {raw!r}: {exc}") from exc
+        if not isinstance(piece, sp.Set):
+            raise _DegradeError(f"inequality solution is not a Set: {piece!r}")
+        result = result.intersect(piece)
+    return result
+
+
+def _verify_inequality_solve(payload: dict) -> dict:
+    unk_list = _as_list(payload.get("unknown"))
+    if len(unk_list) != 1:
+        raise _DegradeError("inequality_solve supports exactly one unknown")
+    name = str(unk_list[0]).strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise _DegradeError(f"invalid unknown name: {name!r}")
+    sym = sp.Symbol(name, real=True)
+
+    inequality = payload.get("inequality")
+    if not isinstance(inequality, str) or not _REL_SPLIT_RE.search(inequality):
+        raise _DegradeError(f"inequality must contain a relational operator: {inequality!r}")
+
+    true_set = _relational_solution_set(inequality, sym)
+    claimed_set = _relational_solution_set(payload.get("claimed"), sym)
+
+    try:
+        diff = true_set.symmetric_difference(claimed_set)
+        same = (true_set == claimed_set) or (diff == sp.S.EmptySet)
+    except Exception as exc:
+        raise _DegradeError(f"cannot compare solution sets: {exc}") from exc
+
+    detail = (
+        "claimed solution set matches the true solution set"
+        if same
+        else "claimed solution set does NOT match the true solution set"
+    )
+    return _result(PASS if same else FAIL, detail, sp.sstr(true_set))
+
+
+# ---------------------------------------------------------------------------
+# kind: rational_roots  (PRD-C-013 4b: 分式方程舍根/增根子集模式)
+# ---------------------------------------------------------------------------
+# A separate kind (NOT an overload of equation_solve) so the existing
+# polynomial path stays untouched and the rational-equation semantics are
+# explicit. Procedure:
+#   1. parse 'lhs=rhs', form diff = together(lhs - rhs) = num/den
+#   2. candidate roots = roots of the numerator (the "cleared" polynomial)
+#   3. a candidate is SPURIOUS (增根) if it zeroes any denominator of lhs/rhs/diff
+#      -> domain says x must keep every denominator != 0
+#   4. valid roots = candidates that survive the domain check
+#   5. PASS iff claimed (as a set) EXACTLY equals the valid-root set AND the
+#      valid set is non-empty; otherwise FAIL. So claimed that keeps a spurious
+#      root (漏剔增根) fails, claimed that names a denominator-killing root fails,
+#      and the no-valid-root case can never "pass" with a stray claimed root.
+
+
+def _rational_denominators(lhs: sp.Expr, rhs: sp.Expr) -> list[sp.Expr]:
+    """Collect non-constant denominators from lhs, rhs and their combined form."""
+    dens: list[sp.Expr] = []
+    seen: set[str] = set()
+    for side in (lhs, rhs, sp.together(lhs - rhs)):
+        try:
+            _, den = sp.fraction(sp.together(side))
+        except Exception as exc:  # pragma: no cover - defensive
+            raise _DegradeError(f"cannot extract denominator: {exc}") from exc
+        if den.free_symbols:
+            key = sp.sstr(den)
+            if key not in seen:
+                seen.add(key)
+                dens.append(den)
+    return dens
+
+
+def _verify_rational_roots(payload: dict) -> dict:
+    unk_list = _as_list(payload.get("unknowns", payload.get("unknown")))
+    if len(unk_list) != 1:
+        raise _DegradeError("rational_roots supports exactly one unknown")
+    name = str(unk_list[0]).strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise _DegradeError(f"invalid unknown name: {name!r}")
+    sym = sp.Symbol(name)
+
+    eq = _parse_equation(payload.get("equation"))
+    lhs, rhs = eq.lhs, eq.rhs
+    if sym not in (lhs - rhs).free_symbols:
+        raise _DegradeError(f"unknown {name!r} does not appear in the equation")
+
+    diff = sp.together(lhs - rhs)
+    num, _ = sp.fraction(diff)
+    try:
+        candidates = sp.solve(sp.Eq(num, 0), sym)
+    except Exception as exc:
+        raise _DegradeError(f"sympy cannot solve numerator: {exc}") from exc
+    if isinstance(candidates, dict):
+        candidates = [candidates[sym]] if sym in candidates else []
+
+    dens = _rational_denominators(lhs, rhs)
+
+    valid: list = []
+    for c in candidates:
+        if isinstance(c, (tuple, list)):
+            raise _DegradeError("solution shape unsupported (multi-valued)")
+        spurious = False
+        for den in dens:
+            try:
+                if sp.simplify(den.subs(sym, c)) == 0:
+                    spurious = True
+                    break
+            except Exception as exc:
+                raise _DegradeError(f"cannot test denominator at root: {exc}") from exc
+        if not spurious:
+            valid.append(c)
+
+    claimed_exprs = [_parse(c) for c in _as_list(payload.get("claimed"))]
+    computed = "[" + ", ".join(sp.sstr(s) for s in valid) + "]"
+
+    if not valid:
+        # equation has NO valid root (all candidates are spurious / none exist):
+        # the only correct answer is the empty set; any claimed value -> fail.
+        if claimed_exprs:
+            return _result(FAIL, "equation has no valid root (all roots are spurious)", computed)
+        return _result(PASS, "equation has no valid root and claimed set is empty", computed)
+
+    ok, detail = _match_solution_set(valid, claimed_exprs)
+    return _result(PASS if ok else FAIL, detail, computed)
+
+
+# ---------------------------------------------------------------------------
 # kind: expr_equiv
 # ---------------------------------------------------------------------------
 
@@ -418,6 +594,8 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "expr_equiv": _verify_expr_equiv,
     "numeric": _verify_numeric,
     "choice": _verify_choice,
+    "inequality_solve": _verify_inequality_solve,
+    "rational_roots": _verify_rational_roots,
 }
 
 

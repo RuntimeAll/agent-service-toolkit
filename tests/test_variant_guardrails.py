@@ -29,7 +29,9 @@ from agents.variant import (
     INTENT_QA,
     INTENT_REVISE,
     VALID_INTENTS,
+    _is_multi_subquestion,
     route_after_parse,
+    structure_lint,
     validate_instruction,
 )
 
@@ -306,3 +308,130 @@ def test_every_guardrail_intent_routes_to_existing_branch():
     for intent, branch in expected.items():
         state = {"pending": {"intent": intent, "ops": []}}
         assert route_after_parse(state) == branch
+
+
+# ---------------------------------------------------------------------------
+# P11.3: structure_lint —— 单题题型结构纯函数（_QTYPE_CONTRACT 代码镜像）
+# ---------------------------------------------------------------------------
+
+def test_structure_lint_choice_multi_subquestion_caught():
+    # 选择题混入 (1)(2) 多小问 = 嵌合体缺陷（必抓）
+    item = {
+        "qtype": "选择",
+        "stem": "已知函数 f(x)=x+1。(1) 求 f(2)；(2) 求 f(3)。下列说法正确的是",
+        "answer": "A",
+    }
+    defects = structure_lint(item)
+    assert defects, "选择题嵌合体应被抓"
+    assert any("多小问" in d for d in defects)
+
+
+def test_structure_lint_choice_too_few_options_caught():
+    # 只识别到 2 个选项 (<3) → 选项不足缺陷
+    item = {
+        "qtype": "选择题",  # 走 _QTYPE_ALIAS 归一为「选择」
+        "stem": "下列哪个是质数？ A. 4  B. 6",
+        "answer": "A",
+    }
+    defects = structure_lint(item)
+    assert any("选项不足" in d for d in defects)
+
+
+def test_structure_lint_choice_answer_not_letter_caught():
+    item = {
+        "qtype": "选择",
+        "stem": "下列哪个是质数？ A. 2  B. 4  C. 6  D. 8",
+        "answer": "2",  # 标答应是字母 A，不是数值
+    }
+    defects = structure_lint(item)
+    assert any("字母" in d for d in defects)
+
+
+def test_structure_lint_compliant_choice_passes():
+    item = {
+        "qtype": "选择",
+        "stem": "下列哪个是质数？ A. 2  B. 4  C. 6  D. 8",
+        "answer": "A",
+    }
+    assert structure_lint(item) == []
+
+
+def test_structure_lint_fill_blank_missing_blank_caught():
+    item = {"qtype": "填空", "stem": "计算 1+1 的结果是多少", "answer": "2"}
+    defects = structure_lint(item)
+    assert any("空位" in d for d in defects)
+
+
+def test_structure_lint_fill_blank_with_blank_passes():
+    item = {"qtype": "填空题", "stem": "计算 1+1 = ____", "answer": "2"}
+    assert structure_lint(item) == []
+
+
+def test_structure_lint_solve_allows_multi_subquestion():
+    # 解答题允许 (1)(2) 多小问 → 不报缺陷
+    item = {
+        "qtype": "解答",
+        "stem": "已知一元二次方程。(1) 求根；(2) 求判别式。",
+        "answer": "见解析",
+    }
+    assert structure_lint(item) == []
+
+
+def test_structure_lint_degrades_on_garbage_qtype():
+    # 未知题型/异常输入 → 降级放行（绝不卡死）
+    assert structure_lint({"qtype": None, "stem": None, "answer": None}) == []
+    assert structure_lint({"qtype": "未知", "stem": "随便", "answer": "x"}) == []
+
+
+# ---------------------------------------------------------------------------
+# 对抗审④ — _MULTI_SUBQ 误伤函数记号 / 单(1)：收紧为「≥2 连号小问标记」才判嵌合体
+# ---------------------------------------------------------------------------
+
+def test_multi_subq_function_notation_not_flagged():
+    # f(1)/g(2)/点(1)：左括号前是字母/字 → 函数记号，不算多小问（旧正则误伤的核心场景）
+    assert not _is_multi_subquestion("已知 f(1)=2，求 f(2) 的值，下列正确的是")
+    assert not _is_multi_subquestion("设 g(2) 与 h(3) 满足关系，问")
+
+
+def test_multi_subq_single_marker_not_flagged():
+    # 单个 (1) / 单个 ① → 不算嵌合体（需 ≥2 连号）
+    assert not _is_multi_subquestion("根据题意 (1) 处应填什么")
+    assert not _is_multi_subquestion("第 ① 步的结果是")
+
+
+def test_multi_subq_consecutive_paren_flagged():
+    # (1)(2) 连号小问 → 真嵌合体
+    assert _is_multi_subquestion("(1) 求根；(2) 求判别式")
+    # 中文括号 + 句中（左括号前是标点非 \w）
+    assert _is_multi_subquestion("已知方程。（1）求 x；（2）求 y。")
+
+
+def test_multi_subq_consecutive_circled_flagged():
+    # ①② 连续圆圈编号 → 真嵌合体
+    assert _is_multi_subquestion("步骤：① 移项 ② 合并同类项")
+
+
+def test_multi_subq_non_consecutive_not_flagged():
+    # 非连号（如只有 (1) 和 (3)，缺 (2)）→ 不判（保守，避免误伤散落编号）
+    assert not _is_multi_subquestion("参考 (1) 和 (3) 两处")
+
+
+def test_structure_lint_choice_function_notation_passes():
+    # 选择题题干含函数记号 f(1)/f(2) → 不再误报多小问缺陷（白烧预算的根因）
+    item = {
+        "qtype": "选择",
+        "stem": "已知 f(x)=2x，则 f(1)+f(2) 的值是？ A. 4  B. 5  C. 6  D. 7",
+        "answer": "C",
+    }
+    assert structure_lint(item) == []
+
+
+def test_structure_lint_choice_real_chimera_still_caught():
+    # 真嵌合体 (1)(2) 连号 → 仍被抓（收紧没放过真缺陷）
+    item = {
+        "qtype": "选择",
+        "stem": "解方程。(1) 求 x；(2) 验根。下列正确的是 A.1 B.2 C.3 D.4",
+        "answer": "A",
+    }
+    defects = structure_lint(item)
+    assert any("多小问" in d for d in defects)

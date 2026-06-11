@@ -22,6 +22,7 @@ checkpointer 不在此 compile（service lifespan 注入 saver；多轮 state �
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -48,6 +49,59 @@ MAX_HEAL = 1
 DEFAULT_SHAPE = {"normal": 2, "hard": 1}
 # P2 逐题过闸并发上限（PRD-C-012：generate 流内 eager + gene_gate/solve_explain 节点共用口径）
 GATE_CONCURRENCY = 3
+
+# ---------------------------------------------------------------------------
+# P13 预算闸（PRD-C-013）：state 级 LLM 调用计数器（per-round 重置）。
+# 🔴 铁律：是「超限跳过增强类调用」不是「LLM 决定流程」——宏观 DAG 一字不破。
+#   核心链（parse/generate 首稿/grade 难度总评/solve 真解）永不跳；只有**增强类**调用
+#   （闸A rework 回炉 / 闸B heal 回炉 / replenish 补题 / extract 兜底抽载荷）在超限后
+#   跳过，落既有 G5 降级路径（标 ⚠ / 保留原题，绝不卡死）。
+# 实现：contextvar 持一个 {"used":int,"limit":int} 计数器（per graph round 由出题/编辑节点
+#   入口 _budget_begin 重置）。_ainvoke_text 每次成功调用 _budget_tick()+1；增强类调用点
+#   先问 _budget_exhausted() 再决定跳不跳。contextvar 天然随 asyncio task 复制传播 →
+#   eager 并发子 task / gather 并发都共享同一计数器（同一轮预算），单测直调节点（无
+#   begin）时 _budget 为 None → 永不超限（行为回退到老逻辑，零侵入）。
+# ---------------------------------------------------------------------------
+_budget_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "variant_llm_budget", default=None
+)
+
+
+def _budget_begin(limit: int) -> None:
+    """出题/编辑轮入口重置预算（per-round）。limit≤0 视为不设限（关闸）。"""
+    _budget_ctx.set({"used": 0, "limit": int(limit)} if limit and limit > 0 else None)
+
+
+def _budget_tick() -> None:
+    """记一次成功 LLM 调用（_ainvoke_text 内部唯一调用点）。无预算上下文 → no-op。"""
+    b = _budget_ctx.get()
+    if b is not None:
+        b["used"] += 1
+
+
+def _budget_exhausted() -> bool:
+    """增强类调用点的闸：True=预算已耗尽，本次增强调用应跳过走降级。无预算 → 永 False。"""
+    b = _budget_ctx.get()
+    return b is not None and b["used"] >= b["limit"]
+
+
+def _budget_bind(state: VariantState, *, reset_limit: int | None = None) -> dict | None:
+    """节点入口绑定预算到 contextvar，返回 live 计数器 dict（节点须把它放回返回值 state，
+    used 才能跨节点累计——LangGraph 每个 superstep 用新 copy_context，contextvar 不跨节点存活，
+    预算的**事实源是 state.llm_call_budget**，contextvar 只是给无 state 视野的 _ainvoke_text 记账）。
+
+    - reset_limit 非 None（出题/编辑轮**入口**节点）→ 本轮重置 {"used":0,"limit":reset_limit}；
+      limit≤0 视为关闸（返回 None，永不超限）。
+    - reset_limit=None（轮内下游节点 gene_gate/solve_explain/assemble/exec_*）→ 从 state 携带；
+      state 无簿记（单测直调 / 旧线程恢复）→ None（关闸，行为回退老逻辑）。
+    """
+    if reset_limit is not None:
+        b = {"used": 0, "limit": int(reset_limit)} if reset_limit > 0 else None
+    else:
+        carried = state.get("llm_call_budget")
+        b = dict(carried) if isinstance(carried, dict) and "limit" in carried else None
+    _budget_ctx.set(b)
+    return b
 
 # ---------------------------------------------------------------------------
 # 闸B（PRD-C-010）：sympy 程序验算 + 题型分流的标记值
@@ -123,6 +177,16 @@ class VariantState(MessagesState, total=False):
     # 4d 方案A（PRD-C-012）：本轮被剔除题的叙事（sympy 证实标答错且重生未果 → 不外发），
     # solve_explain 每轮重写（非累计），assemble 摘要外显「本组少 N 道」
     dropped_notes: list[str]
+    # 🔴 P9 手排 sticky（对抗审③·PRD-C-013）：exec_reorder 置 True，标记老师已手动排过序。
+    # assemble 见 True 时**跳过** _sort_by_difficulty（默认难度升序排序），不静默重排覆盖手排；
+    # 改变题集的编辑（exec_add/exec_remove）清掉该标记（题集变了，手排次序失效，回默认序）。
+    # exec_regenerate 是原位改单题不变序 → 不清（手排保留）。
+    manual_order: bool
+    # 🔴 P13 预算闸（PRD-C-013）：state 级 LLM 调用计数器 {"used":int,"limit":int}。
+    # 出题/编辑轮**入口**节点（generate / parse_instruction）按 settings 重置；轮内下游节点
+    # （gene_gate/solve_explain/assemble/exec_*）从 state 携带、累计 used，并把它放回返回值
+    # state（跨 superstep 保活）。超限后增强类调用跳过走 G5 降级（_budget_exhausted）。
+    llm_call_budget: dict[str, int] | None
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +321,7 @@ async def _ainvoke_text(
     *,
     public_stream: bool = False,
     on_delta: Any = None,
+    model: str | None = None,
 ) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
@@ -265,6 +330,8 @@ async def _ainvoke_text(
     token 流对用户是乱码，service 按标签丢弃；只有人话型调用（答疑等）传
     public_stream=True，token 才透到前端打字机。on_delta=流内进度回调（拿累计文本），
     generate 用它数「已写到第几题」。
+    model：per-call 模型覆盖（S1.1）。给了就用它换该次请求的 model（站点不变），轻活
+    调用点（nano 降本）传 settings.LLM_MODEL_LIGHT；None = 沿用 relay 配置 model（旧行为不变）。
     """
     label = _trace_label(messages)
     tags = None if public_stream else ["skip_stream"]
@@ -281,14 +348,14 @@ async def _ainvoke_text(
         # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数
         #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
         resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
-            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta
+            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model
         )
         text = _content_text(resp).strip()
         retried = False
         if not text and retry:
             retried = True
             resp, relay, model_used, fb2 = await relay_pool.ainvoke_failover(
-                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta
+                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model
             )
             fallback += fb2
             text = _content_text(resp).strip()
@@ -326,6 +393,9 @@ async def _ainvoke_text(
         response=text, response_raw=raw, duration_ms=dur, retried=retried,
         prompt_tokens=pt, completion_tokens=ct, cost_yuan=cost,
     )
+    # 🔴 P13 预算闸记账：一次成功 LLM 往返 = 一票（per-round 计数，超限后增强类调用跳过）。
+    # 记在「成功返回」处（失败/空返抛异常的早退路径不记——只数真正花掉的调用）。
+    _budget_tick()
     return text
 
 
@@ -450,30 +520,39 @@ def _artifact_payload(
     out_items: list[dict[str, Any]] = []
     for i, it in enumerate(items):
         chk = it.get("check") or {}
-        out_items.append(
-            {
-                "index": i + 1,
-                "stem": str(it.get("stem") or ""),
-                "answer": str(it.get("answer") or ""),
-                "solution": str(it.get("solution") or ""),
-                "qtype": str(it.get("qtype") or ""),
-                "difficulty": _to_int(it.get("difficulty")) or 0,
-                "level": str(it.get("level") or "normal"),
-                # 🔴 verify 与 review 互斥不同键：证明类只有 review（proof_needs_human）
-                "verify": chk.get("verify") or chk.get("review") or None,
-                # 4d 外显层级（FE 徽章唯一依据；旧线程恢复无 tier → FE 按「只说好」兜底）
-                "tier": chk.get("tier") or None,
-                "gene": (it.get("gene") or {}).get("gate") or None,
-                # persisted：flags 优先（persist 节点按回执现算）；否则读 item 簿记
-                # （persist_to_bank 成功后回写 state.items[i].persisted → 后续编辑轮
-                #  assemble 重发快照时「已收录」徽章不回退，G5 二次入库不重复落行）
-                "persisted": (
-                    bool(persisted_flags[i])
-                    if persisted_flags is not None and i < len(persisted_flags)
-                    else bool(it.get("persisted"))
-                ),
-            }
-        )
+        # 🔴 P2b 稳定 seq（PRD-C-013）：item 自带 `_seq`（generate 流内 eager 落的「题原始
+        #   生成序」，整生命周期不变、剔除题不重压缩）优先；缺省（assemble/入库/会话恢复等
+        #   定稿全量帧）回退 index=i+1（一期等价，单键不分叉）。FE pickArtifact 按 seq 原位 merge。
+        seq = _to_int(it.get("_seq")) or (i + 1)
+        cell: dict[str, Any] = {
+            "index": i + 1,
+            "seq": seq,
+            "stem": str(it.get("stem") or ""),
+            "answer": str(it.get("answer") or ""),
+            "solution": str(it.get("solution") or ""),
+            "qtype": str(it.get("qtype") or ""),
+            "difficulty": _to_int(it.get("difficulty")) or 0,
+            "level": str(it.get("level") or "normal"),
+            # 🔴 verify 与 review 互斥不同键：证明类只有 review（proof_needs_human）
+            "verify": chk.get("verify") or chk.get("review") or None,
+            # 4d 外显层级（FE 徽章唯一依据；旧线程恢复无 tier → FE 按「只说好」兜底）
+            "tier": chk.get("tier") or None,
+            "gene": (it.get("gene") or {}).get("gate") or None,
+            # persisted：flags 优先（persist 节点按回执现算）；否则读 item 簿记
+            # （persist_to_bank 成功后回写 state.items[i].persisted → 后续编辑轮
+            #  assemble 重发快照时「已收录」徽章不回退，G5 二次入库不重复落行）
+            "persisted": (
+                bool(persisted_flags[i])
+                if persisted_flags is not None and i < len(persisted_flags)
+                else bool(it.get("persisted"))
+            ),
+        }
+        # 🔴 P2b 退场哨兵（PRD-C-013）：剔除题显式带 `_dropped: true`（字段白名单透传），
+        #   驱动 FE upsertIncremental 走退场过渡（is-dropping/scheduleDropRemoval）后从
+        #   mergedItems 移除——不再靠「压缩 index 隐式挤掉」，避免后题 index 前移嫁接错卡。
+        if it.get("_dropped"):
+            cell["_dropped"] = True
+        out_items.append(cell)
     return {
         "items": out_items,
         "header": {
@@ -717,7 +796,7 @@ async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
 # .format() 的 prompt 模板里使用，不要单独 .format() 它。
 # 排版（吃 aigeek 前缀缓存）：契约属固定段，各 prompt 把它排在变动段（题干/facts）之前。
 # ---------------------------------------------------------------------------
-_PAYLOAD_CONTRACT = """载荷契约（kind 四选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）。
+_PAYLOAD_CONTRACT = """载荷契约（kind 多选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）。
 🔴 表达式硬边界（违反 = 程序直接拒收变 degrade，浪费一次验算机会）：
 - 只允许这些函数：sqrt / Abs / Min / Max（比大小、最值题用 Min(...)/Max(...)，绝对值用 Abs()）。
 - **禁止任何 Python 语法**：不许 if/else 三元、列表推导、len()/range()、布尔 True/False、比较式（< > ==）。
@@ -730,7 +809,32 @@ _PAYLOAD_CONTRACT = """载荷契约（kind 四选一；所有表达式必须是 
 2. 表达式等价(化简/展开/因式分解): {{"kind":"expr_equiv","expr_a":"题面原式","expr_b":"标准答案给的结果式"}}
 3. 数值计算: {{"kind":"numeric","expr":"3*7/2","claimed":"10.5","tol":1e-6}}
 4. 选择题: {{"kind":"choice","ground":{{上述1/2/3任一子载荷}},"options":{{"A":"2","B":"3"}},"claimed_correct":"B"}}
-   （options 的值 = 各选项的数学值；ground = 由题干建立的真值载荷；claimed_correct = 标准答案的选项字母）"""
+   （options 的值 = 各选项的数学值；ground = 由题干建立的真值载荷；claimed_correct = 标准答案的选项字母）
+5. 不等式解集: {{"kind":"inequality_solve","inequality":"2*x-3>1","unknown":["x"],"claimed":"x>2"}}
+   （inequality = 题面不等式，须含关系符 < > <= >= ；claimed = 标答解集，同样写成关系式如 "x>2"、"x<=-1"；
+   程序按解集相等判，单未知数）
+6. 分式方程(含舍根/增根): {{"kind":"rational_roots","equation":"1/(x-1)=2/(x**2-1)","unknowns":["x"],"claimed":["3"]}}
+   （🔴 分式方程标答因「使分母为 0 的增根需舍去」只保留部分解时，用本 kind 而非 kind 1：
+   程序自动求出裸方程候选解、剔除让任一分母为 0 的增根，按存活解集与 claimed 完全相等判；
+   claimed = 标答舍根后保留的解，漏剔增根/把舍掉的根写进 claimed 都会被判 fail）
+🔴 应用题（行程/工程/利润等）：直接复用 kind 1 equation_solve —— 列出题面方程组到 equations、
+   未知数到 unknowns、标答到 claimed（应用题往往有正负/取值约束只取部分解，此时若 claimed 少于
+   裸方程全部解会被误判 fail，应改用 kind 3 numeric 逐解验或输出 kind:none）。"""
+
+# ---------------------------------------------------------------------------
+# 🔴 题型结构契约（PRD-C-013 P11 单一事实源）：GENERATE / REGEN / ADD 共用，
+# 约束「每道题按其 qtype 长成对的结构」。与验算载荷契约正交：那个管「答案能不能被
+# sympy 验」，这个管「题面/选项/答案的形状对不对」。代码级 structure_lint 同口径校验。
+# 排版（吃 aigeek 前缀缓存）：本常量属固定段，各 prompt 把它排在变动段（题干/facts）之前。
+# 同 _PAYLOAD_CONTRACT，以「format 模板片段」形态存在（无 {占位符}，但与会被 .format()
+# 的模板拼接，故文本内若出现花括号须双写——当前无）。
+# ---------------------------------------------------------------------------
+_QTYPE_CONTRACT = """题型结构契约（每道题必须按其 qtype 字段长成对应结构，违反 = 程序结构 lint 抓出并回炉）：
+- 选择：**单一设问** + 恰 4 个选项（A、B、C、D 各一），answer 为选项字母（A/B/C/D 之一）。
+  🔴 禁止把多小问 (1)(2)(3) 或 ①②③ 嵌进一道选择题（那是「解答」题的形态，不是选择题）。
+- 填空：题干含空位标记（____ 下划线 或 ( ) 括号空），answer 为要填的值。
+- 判断：单一陈述句，answer 为「对」或「错」（正确/错误亦可）。
+- 解答：**允许** (1)(2)(3) 多小问，answer/solution 分小问作答；这是唯一可含多小问的题型。"""
 
 # 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
 # 含 {占位符} 的变动段（配方/铁律的考点名、母题 DNA）移到末尾；语义一字不改。
@@ -746,6 +850,10 @@ GENERATE_PROMPT = (
 - 数学式一律用 $...$ 包裹（行间长式用 $$...$$），如 $\\sqrt{{2}}$、$x^2-3x+2=0$；
   **禁止**裸 LaTeX 命令、禁止 \\( \\) / \\[ \\] 定界符。
 - 换行用 JSON 标准转义 \\n（一个反斜杠），不要写成 \\\\n。
+
+"""
+    + _QTYPE_CONTRACT
+    + """
 
 verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题自己的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 该题标准答案）：
 """
@@ -846,7 +954,7 @@ _QTYPE_NOTE_HINTS: dict[str, str] = {"应用": "应用场景", "应用题": "应
 KNOBS_COUNT_MIN, KNOBS_COUNT_MAX = 1, 8
 PLAN_INCREASING = "increasing"
 _PLAN_INCREASING_WORDS = ("increasing", "递增", "越来越难", "逐题变难", "一道比一道难")
-DIFFICULTY_CAP = 5  # 难度封顶（递增计划逐题 +1 的上限）
+DIFFICULTY_CAP = 4  # 难度封顶（递增计划逐题 +1 的上限；S1.3 由 5→4 对齐绝对 rubric 1-4）
 
 
 def normalize_knobs(parsed: Any) -> dict[str, Any]:
@@ -1040,6 +1148,85 @@ def shape_check(
     return defects
 
 
+# ---------------------------------------------------------------------------
+# 🔴 题型结构 lint（PRD-C-013 P11.3 纯函数·与 shape_check 同位）：单题按其 qtype
+# 校验结构对不对（_QTYPE_CONTRACT 的代码侧镜像）。与 shape_check 正交——那个管整组
+# 配方（数量/题型分布/递增），这个管单题形态（选择题别长成多小问嵌合体等）。
+# 🔴 降级铁律：解析不了一律返回 []（视作合规），绝不卡死出题（G5）。判 verdict 仍归
+# sympy（本 lint 不碰答案对错，只碰形状）。
+# ---------------------------------------------------------------------------
+# 多小问标记：(1)(2)... / ①②...。选择题命中即「嵌合体」缺陷。
+# 🔴 对抗审④收紧（PRD-C-013）：旧正则把单个 (1) / 函数记号 f(1)/g(2)/点(1) 误判成多小问嵌合体
+#   → 白烧一次结构 REGEN 预算、假缺陷徽章（预算被假阳性吃掉后真 heal/rework 反被跳过）。
+#   新口径 = 只在「≥2 个连号小问标记」才判嵌合体：
+#   ① 括号数字 (1) 且**左括号前不是 \w**（排除 f(1)/g(2) 函数记号、x(1) 等）——收集编号，
+#      含 ≥2 个连续编号（如同时有 1 和 2 / 2 和 3）才算；单个 (1) 不算。
+#   ② 圆圈数字 ①②③：含 ≥2 个连续编号才算（单个 ① 不算）。
+# 括号小问编号：左括号前非 \w（避免函数记号），(数字) 中文数字一二三四五；用 findall 数命中。
+_PAREN_SUBQ_RE = re.compile(r"(?<![\w])[（(]\s*([1-9]|[一二三四五])\s*[）)]")
+_CIRCLED_SUBQ_RE = re.compile(r"[①②③④⑤⑥]")
+_CN_NUM_ORDER = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5}
+_CIRCLED_ORDER = {"①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5, "⑥": 6}
+
+
+def _has_consecutive(nums: list[int]) -> bool:
+    """有序编号集合里是否存在两个相邻编号（n 与 n+1 都出现）→ 真多小问嵌合体的判据。"""
+    s = set(nums)
+    return any((n + 1) in s for n in s)
+
+
+def _is_multi_subquestion(stem: str) -> bool:
+    """🔴 纯函数（对抗审④）：题干是否含「多小问嵌合体」结构（≥2 连号小问标记）。
+    单个 (1) / 函数记号 f(1) 一律不算；(1)(2) 连号、①② 连号才算。"""
+    paren_nums: list[int] = []
+    for g in _PAREN_SUBQ_RE.findall(stem):
+        if g.isdigit():
+            paren_nums.append(int(g))
+        elif g in _CN_NUM_ORDER:
+            paren_nums.append(_CN_NUM_ORDER[g])
+    if _has_consecutive(paren_nums):
+        return True
+    circled = [_CIRCLED_ORDER[c] for c in _CIRCLED_SUBQ_RE.findall(stem) if c in _CIRCLED_ORDER]
+    return _has_consecutive(circled)
+# 选项行：A. / A、 / A) / （A） / A：  —— 用于数选择题选项个数
+_OPTION_RE = re.compile(r"(?:^|[\s，,；;])[（(]?\s*([A-D])\s*[）).、、：:]")
+# 填空空位：连续下划线 / 全角空格括号 / 中文「填空」括号
+_BLANK_RE = re.compile(r"_{2,}|[（(]\s*[）)]|＿{2,}")
+# 选择题标答：单个 A-D 字母（去空白/标点后恰好一个字母）
+_CHOICE_ANSWER_RE = re.compile(r"^[A-D]$")
+
+
+def structure_lint(item: dict[str, Any]) -> list[str]:
+    """🔴 纯函数·单题结构 lint：按 item['qtype'] 校验题面/选项/答案形态，返回缺陷清单（空=合规）。
+
+    规则（_QTYPE_CONTRACT 的代码镜像）：
+    - 选择：① stem 含 (1)(2)/①② 多小问标记 → 嵌合体缺陷；② 选项数 <3 → 选项不足缺陷；
+      ③ answer 去噪后非单个 A-D 字母 → 答案形态缺陷。
+    - 填空：题干无空位标记（____ / 空括号）→ 缺空位缺陷（宽松，只查空位）。
+    - 判断/解答/其它：不约束（解答允许多小问；判断答案形态宽松）。
+    🔴 qtype 过 _QTYPE_ALIAS 归一；解析异常 → []（降级，不卡死）。
+    """
+    try:
+        qt = _QTYPE_ALIAS.get(str(item.get("qtype") or "").strip(), str(item.get("qtype") or "").strip())
+        stem = str(item.get("stem") or "")
+        defects: list[str] = []
+        if qt == "选择":
+            if _is_multi_subquestion(stem):
+                defects.append("选择题混入多小问 (1)(2)/①② —— 应是单一设问 4 选项，不是解答题嵌合体")
+            n_opt = len(set(m.group(1) for m in _OPTION_RE.finditer(stem)))
+            if n_opt < 3:
+                defects.append(f"选择题选项不足（识别到 {n_opt} 个，至少 3 个）")
+            ans = re.sub(r"[\s。.，,、；;：:]", "", str(item.get("answer") or "")).upper()
+            if not _CHOICE_ANSWER_RE.match(ans):
+                defects.append(f"选择题标答非单个选项字母 A-D（实为「{item.get('answer')}」）")
+        elif qt == "填空":
+            if not _BLANK_RE.search(stem):
+                defects.append("填空题题干无空位标记（____ 或 空括号）")
+        return defects
+    except Exception:  # noqa: BLE001 — lint 解析异常 → 视作合规放行（G5 降级）
+        return []
+
+
 def knobs_desc(knobs: dict[str, Any] | None) -> str:
     """纯函数：knobs → 题组头部人话描述（如「5 道·难度递增·2选择+2填空+1解答」）。空 → ""。"""
     knobs = knobs or {}
@@ -1068,9 +1255,10 @@ def gene_judge_knobs_spec(
     编辑轮（再来2道简单的）新增的题不受旧配方改判，老师点名的简单补题不会被旧递增计划误警。
 
     - qtype_match：按老师指定题型集合判（属于配比内任一题型即 match），不再要求与母题题型一致；
-    - difficulty_match：递增计划按该题 item 级 expected_difficulty 印记判（generate 落印，
-      跟题走 —— remove 位移/add 追加都不会错档），不再按列表下标现算；
-    - knobs 没碰题型/难度（如只给 count/note）→ 返回 None（判别标准保持现状）。
+    - 🔴 P12.1（PRD-C-013）：difficulty_match 已从闸A 删除，本段不再注入任何难度改判
+      （难度一致性走纯函数 difficulty_consistency_defects 组内相对关系，零 LLM）；
+    - knobs 没碰题型（如只给 count/note/难度）→ 返回 None（判别标准保持现状）。
+    expected_difficulty 参数保留签名以免上游调用点改动，本函数已不消费它。
     """
     knobs = knobs or {}
     if not knobs:
@@ -1084,17 +1272,6 @@ def gene_judge_knobs_spec(
             f"- qtype_match 改判：老师指定了题型配比（{'、'.join(f'{k}×{v}' for k, v in dist.items())}），"
             f"变式题型属于 {{{allowed}}} 之一即算 match（不再要求与母题题型一致；配比总量由程序另行校验）。"
         )
-
-    plan = knobs.get("difficulty_plan")
-    if plan == PLAN_INCREASING:
-        exp = _to_int(expected_difficulty)
-        if exp is not None:
-            lines.append(
-                f"- difficulty_match 改判：老师要求难度递增，该题预期难度档 = {exp}"
-                "（该题难度为预期档即算 match，不再按 level=normal/hard 对母题判）。"
-            )
-    elif plan:
-        lines.append(f"- difficulty_match 改判：按老师难度要求「{plan}」判，符合该要求即算 match。")
 
     if not lines:
         return None
@@ -1204,6 +1381,9 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             ]
         }
 
+    # 🔴 P13：出题轮入口重置预算（generate→gene_gate→solve_explain→assemble 同轮共享）。
+    budget = _budget_bind(state, reset_limit=settings.VARIANT_BUDGET_GENERATE)
+
     # 🔴 旋钮：新母题轮 analyze 已抽好随 state 来；库内母题直进 generate（不经 analyze）→ 此处兜底抽
     knobs = state.get("knobs")
     if knobs is None:
@@ -1246,6 +1426,7 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     sem = asyncio.Semaphore(GATE_CONCURRENCY)
     eager_raw: list[dict[str, Any]] = []  # 流内稳收的规整题（生成序；merge/兜底用）
     eager_tasks: list[asyncio.Task] = []
+    spawned: dict[int, dict[str, Any]] = {}  # idx → 刚解析出的题（无 check/无 tier，partial 上卡）
     completed: dict[int, dict[str, Any]] = {}  # idx → 已过闸链的题（剔除题带 _dropped 哨兵）
     # 🔴 stale 标志（对抗审修复）：流重启（中转站中途熔断换站从头重流 / 空返回 retry 二次
     # 开流）或 shape 整组 retry 采纳后，已派发的 eager 闸链全部作废 —— 置位后：①不再派发
@@ -1257,9 +1438,28 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         for t in eager_tasks:
             t.cancel()
 
+    def _emit_eager_frame() -> None:
+        """🔴 P2b-BE 逐题上屏（PRD-C-013）：把「出卡」与「过闸」解耦。按生成序拼累计帧——
+        已过闸的题用 completed[idx]（带 tier 定状态），未过闸但已解析的题用 spawned[idx]
+        （无 check → _artifact_payload 自然 tier=None，FE 按「无tier帧」先上卡）。
+
+        🔴 稳定 seq 不重压缩（对抗审①修复）：每个 cell 带 `_seq = 题原始生成序 k+1`，整生命周期
+        不变（剔除题不让后题 index 前移 → FE 按 seq 原位 merge 不嫁接到别的卡）。剔除题
+        （completed[k]._dropped）**显式入帧带 `_dropped:true`**（而非 `continue` 跳过）——
+        让 FE 收到显式退场哨兵驱动退场过渡 + 从 mergedItems 移除，而不是靠压缩 index 隐式挤掉
+        （后者会残留永删不掉的重复卡）。FE 契约：先收该题无 tier 帧 → 带 tier 帧 →（若被判废）_dropped 帧。"""
+        shown: list[dict[str, Any]] = []
+        for k in sorted(spawned):
+            cell = dict(completed.get(k, spawned[k]))
+            cell["_seq"] = k + 1  # 稳定 merge 键：题原始生成序（1-based），剔除题不重压缩
+            shown.append(cell)  # 剔除题（_dropped）照样入帧 → _artifact_payload 透传哨兵
+        _emit_artifact(
+            dict(state, items=shown, knobs=knobs), partial=True, expected_total=total_n
+        )
+
     async def _eager_chain(idx: int, item: dict[str, Any]) -> None:
-        """单题闸链（闸A → 闸B）+ 完成即发增量 artifact 帧。任何异常静默吞（G5：
-        eager 是增强不是关卡，失败的题留给下游节点照旧串行补判）。"""
+        """单题闸链（闸A → 闸B）+ 完成即**原位重发**该题帧（同 seq，带 tier）。任何异常静默吞
+        （G5：eager 是增强不是关卡，失败的题留给下游节点照旧串行补判）。"""
         try:
             async with sem:
                 judged = await _gene_one_item(item, _gene_facts_for(item, facts, knobs), idx, total_n)
@@ -1268,18 +1468,14 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
                 return  # 本轮 eager 已作废（流重启/整组 retry）→ 不记账、不发作废题的帧
             if kept is None:
                 # 4d 方案A：剔除题转哨兵（带 gene 不带 check）→ 下游 solve_explain 收口
-                # 进 dropped_notes；不出现在增量帧。
+                # 进 dropped_notes；不出现在增量帧（本帧起退场）。
                 kept = dict(judged)
                 kept["_dropped"] = note or "1 道题程序验出标答错误（重生一次仍未过），已剔除"
             completed[idx] = kept
-            # 思路条进度 + 增量 artifact 帧（partial=true；items=按生成序已完成且未剔除的题）
-            _emit_stage("verify", "程序验算", "running", f"第 {len(completed)}/{total_n} 道完成")
-            shown = [
-                completed[k] for k in sorted(completed) if not completed[k].get("_dropped")
-            ]
-            _emit_artifact(
-                dict(state, items=shown, knobs=knobs), partial=True, expected_total=total_n
-            )
+            # 思路条进度（已过闸计数）+ 原位重发该题帧（同 seq，现带 tier 上定状态）
+            done_n = len([k for k in completed if not completed[k].get("_dropped")])
+            _emit_stage("verify", "程序验算", "running", f"第 {done_n}/{total_n} 道完成")
+            _emit_eager_frame()
         except Exception:  # noqa: BLE001 — eager 失败绝不炸 generate；该题留给下游节点补判
             pass
 
@@ -1304,12 +1500,16 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         if stale["flag"]:
             return  # eager 已作废 → 只保留进度叙事，不再派发新闸链
         # P2：增量解析已完整闭合的新题（半截题绝不派发）→ 立即起闸链 task
+        # 🔴 P2b-BE 逐题上屏：一解析出完整题（stem/answer/solution 齐）就立即上卡——记 spawned
+        #   并发**无 tier 的 partial 帧**（出卡与过闸解耦）；闸链 task 跑完再原位重发带 tier 帧。
         try:
             found = _iter_complete_items(acc)
             while len(eager_raw) < len(found):
                 idx = len(eager_raw)
                 item = _stamp_recipe(_normalize_generated_item(found[idx], facts), idx)
                 eager_raw.append(item)
+                spawned[idx] = dict(item)  # 无 check → 帧里该题 tier=None（上卡先行）
+                _emit_eager_frame()
                 eager_tasks.append(
                     asyncio.get_running_loop().create_task(_eager_chain(idx, dict(item)))
                 )
@@ -1371,6 +1571,7 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             "items": [],
             "knobs": knobs,
             "shape_defects": defects,
+            "llm_call_budget": budget,
             "messages": [
                 AIMessage(
                     content="这一轮我没能产出可用的变式题（模型输出解析失败）。"
@@ -1403,7 +1604,15 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         ]
 
     _emit_stage("generate", "生成题目", "done", f"{len(items)} 道")
-    return {"items": items, "knobs": knobs, "shape_defects": defects, "messages": []}
+    return {
+        "items": items,
+        "knobs": knobs,
+        "shape_defects": defects,
+        # 🔴 新一组题 → 复位手排标记（对抗审③）：上一组的 manual_order 绝不泄漏到新母题/新出题轮。
+        "manual_order": False,
+        "llm_call_budget": budget,
+        "messages": [],
+    }
 
 
 # 🔴 排版（PRD-C-012 任务3）：固定契约段前移，变动段（题干）移末尾；语义一字不改。
@@ -1431,6 +1640,10 @@ answer 优先给可计算的数值/表达式（可程序验算），数字设计
   "verify_payload":{{...新题的程序验算载荷，契约见下...}}}}
 
 格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
+
+"""
+    + _QTYPE_CONTRACT
+    + """
 
 verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**新题的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 新题标准答案）：
 """
@@ -1462,7 +1675,15 @@ EXTRACT_PROMPT = (
 参考·另一次独立解答(仅帮助你理解答案格式，不是验算对象): {solved_answer}"""
 )
 
-_PAYLOAD_KINDS = {"equation_solve", "expr_equiv", "numeric", "choice"}
+# 🔴 与 math_verify._HANDLERS 的 kind 名保持一致（PRD-C-013 4b 扩面：+inequality_solve / rational_roots）。
+_PAYLOAD_KINDS = {
+    "equation_solve",
+    "expr_equiv",
+    "numeric",
+    "choice",
+    "inequality_solve",
+    "rational_roots",
+}
 
 # 题型分流（分流键=题型；题干骨架词兜底）：证明/开放/作图类不进 sympy
 _PROOF_QTYPE_RE = re.compile(r"(证明|求证|开放|作图|画图)")
@@ -1554,7 +1775,8 @@ async def _extract_payload(
                 return None  # LLM 明确说抽不成 → degrade，不浪费重试
         feedback = (
             "\n\n[错误反馈] 上次输出不是合法载荷 JSON（kind 必须是 "
-            "equation_solve/expr_equiv/numeric/choice/none 之一，且为合法 JSON）。"
+            "equation_solve/expr_equiv/numeric/choice/inequality_solve/rational_roots/none 之一，"
+            "且为合法 JSON）。"
             "请严格按契约重新只输出 JSON。\n上次输出(截断)：" + (text or "")[:300]
         )
     return None
@@ -1578,11 +1800,15 @@ def _payload_claim_consistent(payload: dict, answer: Any) -> bool:
     if kind == "numeric":
         c = _norm(payload.get("claimed"))
         return bool(c) and (c in ans or ans in c)
-    if kind == "equation_solve":
+    if kind in ("equation_solve", "rational_roots"):
         claimed = payload.get("claimed")
         vals = [_norm(v) for v in claimed] if isinstance(claimed, (list, tuple)) else [_norm(claimed)]
         vals = [v for v in vals if v]
         return bool(vals) and (all(v in ans for v in vals) or ans in ",".join(vals))
+    if kind == "inequality_solve":
+        # claimed = 解集关系串（如 "x>2"）；标答常含同一关系串/解集描述 → 宽松互含。
+        c = _norm(payload.get("claimed"))
+        return bool(c) and (c in ans or ans in c)
     if kind == "choice":
         key = _norm(payload.get("claimed_correct"))
         if not key:
@@ -1614,6 +1840,10 @@ async def _machine_verify(item: dict, solved_answer: Any) -> dict:
         and payload.get("kind") in _PAYLOAD_KINDS
         and _payload_claim_consistent(payload, item.get("answer"))
     ):
+        # 🔴 P13：事后抽取载荷是**增强类**调用（载荷优先的兜底），预算耗尽 → 跳过抽取，
+        #   按 degrade 降级（sympy 吃不下 → 退回 LLM 自检 fallback，语义与抽取失败一致，不卡死）。
+        if _budget_exhausted():
+            return {"verdict": math_verify.DEGRADE, "detail": "预算耗尽，跳过载荷抽取", "computed": None}
         payload = await _extract_payload(
             item.get("stem"), item.get("answer"), solved_answer, item.get("qtype")
         )
@@ -1670,11 +1900,16 @@ async def _solve_one(stem: str) -> dict:
 async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> dict | None:
     """REGEN 回炉一次：返回不带 check 的重生草稿（解析失败/LLM 异常返 None）。
 
-    feedback（如 sympy 的 computed/detail）注回 prompt 的题干段，告诉 LLM 错在哪。
+    feedback（如 sympy 的 computed/detail，或闸A 结构定向反馈）注回 prompt 的题干段。
+    🔴 RC2（PRD-C-013）：item 带 edit_note（老师点名改造的软约束）→ 永远把老师 note 注回
+    prompt，feedback 不能把它冲掉（基因/验算失败原因与老师意志并存，老师意志优先）。
     🔴 LLM 调用异常吞掉返 None（G5）：回炉是增强不是关卡，网关抖动时调用方按
     "重生失败 → 保留原版打 ⚠/warn" 的既有降级路径走，绝不炸掉整轮出题。
     """
     stem = str(item.get("stem") or "")
+    edit_note = str(item.get("edit_note") or "").strip()
+    if edit_note:
+        stem = f"{stem}\n\n[老师要求·须保留] {edit_note}"
     if feedback:
         stem = f"{stem}\n\n[程序验算反馈] {feedback}"
     try:
@@ -1711,6 +1946,10 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
         # 4a：重生稿自带的验算载荷随新题走（旧题载荷绝不沿用——题面已换）
         if isinstance(regen.get("verify_payload"), dict):
             draft["verify_payload"] = regen["verify_payload"]
+        # 🔴 RC2：老师 note + 编辑轮印记跟草稿走，下一次 REGEN 仍能注回老师意志、仍只判不回炉
+        for k in ("edit_note", "from_edit"):
+            if item.get(k):
+                draft[k] = item[k]
         return draft
     return None
 
@@ -1731,7 +1970,44 @@ async def _check_one_item(
     if item.get("check"):  # 已定状态（如自愈过的补题再次流经）→ 不重复
         return item, None
 
-    _emit_stage("verify", "程序验算", "running", f"第 {idx + 1}/{total} 道")
+    # ── 题型结构 lint（P11.3）：先于数学验算，按 qtype 校验形态（选择题别长成多小问
+    # 嵌合体/选项不足/标答非字母；填空缺空位）。命中缺陷 → 走既有题级 REGEN 回炉 1 次
+    # （与下游 sympy 回炉同一通道，不是整组重试）；回炉清掉缺陷 → 顶位继续往下验算。
+    # 🔴 降级（铁律④）：lint 返 []（解析不了/合规）不拦；回炉仍不过 → 标 ⚠ 注记并继续
+    # 进 sympy（绝不卡死、不剔除，结构存疑交给老师人审）。
+    struct_defects = structure_lint(item)
+    if struct_defects:
+        # 🔴 P13 预算闸：结构回炉是增强类调用，预算耗尽 → 跳过回炉，直接标 ⚠ 注记继续走
+        #   sympy（既有降级路径，绝不卡死）。
+        if _budget_exhausted():
+            item["structure_lint"] = {"badge": "warn", "defects": struct_defects}
+        else:
+            _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道结构不合题型，回炉重生中")
+            feedback = (
+                "本题结构不符合其题型契约：" + "；".join(struct_defects) + "。"
+                "请严格按题型结构契约重新出一道同考点同年级的变式（选择题=单一设问+恰 4 选项+"
+                "answer 为选项字母，禁止多小问；填空题题干须含空位 ____）。"
+            )
+            draft = await _regen_once(item, facts, feedback=feedback)
+            if draft and not structure_lint(draft):
+                # 回炉稿结构合规 → 顶位（保留闸A gene 印记，下游 sympy 照常验答案）
+                draft["gene"] = item.get("gene")
+                item = draft
+            else:
+                # 回炉失败/仍不合规 → 降级：item 保持原样继续往下走 sympy，记结构存疑注记。
+                item["structure_lint"] = {"badge": "warn", "defects": struct_defects}
+        # 断言：到此处 item 要么结构合规、要么已记 warn 注记（绝不卡死）。
+    else:
+        # 结构合规留痕（审计：本题进过结构闸且通过）
+        item["structure_lint"] = {"badge": "ok", "defects": []}
+
+    # 🔴 P14 叙事修正（RC3·PRD-C-013）：per-item 闸并发跑，旧「第 N/total 道」会让老师误读成
+    #   顺序进度（实际三题同时验）。改为「第 N 题验算中」——只点本题号，不带误导性的「/总数」。
+    #   编辑轮（from_edit 单题重验）明示「只重验第 N 题」——别让老师把题号读成「全部重验」。
+    _emit_stage(
+        "verify", "程序验算", "running",
+        (f"只重验第 {idx + 1} 题" if item.get("from_edit") else f"第 {idx + 1} 题验算中"),
+    )
 
     # ── 闸B·题型分流：证明/开放/作图 → 不进 sympy，软校验 + 人审标记 ──
     if _is_proof_like(item.get("qtype") or facts["qtype"], item.get("stem")):
@@ -1766,9 +2042,26 @@ async def _check_one_item(
         return item, None
 
     if verdict == math_verify.FAIL:
+        # 🔴 RC2「老师意志优先」补齐闸B（对抗审②修复）：编辑轮老师点名改造的题（item.from_edit，
+        #   带 edit_note）即便 sympy 判 FAIL 也**不回炉/不换题/不剔除**——保留老师编辑的原题、
+        #   标 ⚠ 注记（verify=fail_after_regen，走 4d both_low/silent 外显）交老师人审。否则
+        #   回炉换题会用模型重出覆盖老师意志、剔除路径连 edit_note 一起丢 = 隐性数据丢失，与
+        #   闸A from_edit 短路语义矛盾。降级不抛（G5）。
+        if item.get("from_edit"):
+            item["check"] = {
+                "badge": "warn",
+                "solved_answer": solved_answer,
+                "verify": VERIFY_FAIL_AFTER_REGEN,
+                "verify_detail": res.get("detail"),
+                "computed": res.get("computed"),
+            }
+            _apply_visibility(item)
+            return item, None
         # sympy 判定标答真错 → 既有回炉机制重生 1 次，computed/detail 注回 prompt
+        # 🔴 P13 预算闸：heal/replenish 都是增强类调用，预算耗尽 → 跳过，直接走「剔除不外发」
+        #   降级（4d 方案A，本组少一道 dropped 叙事）。绝不卡死、绝不抛。
         healed = None
-        if MAX_HEAL >= 1:
+        if MAX_HEAL >= 1 and not _budget_exhausted():
             _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道回炉重生中")
             feedback = (
                 f"程序(sympy)验算判定该题题面标答错误：程序算得 computed={res.get('computed')}；"
@@ -1820,7 +2113,8 @@ async def _check_one_item(
             f"详情：{res.get('detail')}）。请重新出一道全新的等价变式补足数量："
             "题面与标答自洽、经得起程序验算。"
         )
-        repl = await _regen_once(item, facts, feedback=repl_feedback)
+        # 🔴 P13：补题是增强类调用，预算耗尽 → 跳过补题，直接落 dropped 叙事（本组少一道）。
+        repl = None if _budget_exhausted() else await _regen_once(item, facts, feedback=repl_feedback)
         if repl:
             r_solved = await _solve_one(repl.get("stem", ""))
             if r_solved.get("solution"):
@@ -1868,8 +2162,9 @@ async def _check_one_item(
         return item, None
 
     # 独立解 ≠ 标答（LLM 自检）→ 既有自愈：重生 1 次 → 重解 + 守恒
+    # 🔴 P13：degrade 自愈也是增强类调用，预算耗尽 → 跳过自愈，落下方 warn 保留（不抛）。
     healed = None
-    if MAX_HEAL >= 1:
+    if MAX_HEAL >= 1 and not _budget_exhausted():
         _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道回炉重生中")
         draft = await _regen_once(item, facts)
         if draft:
@@ -1920,6 +2215,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
     （item._dropped=叙事）在此收口进 dropped_notes（语义不变：每轮重写）。
     🔴 凡进 items 的题一律过本节点，无 check 不许进 assemble（remove 后旧题带 check 原样通过）。
     """
+    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（闸B heal/replenish 受闸）
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
     total = len(items)
@@ -1943,7 +2239,7 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
         _emit_stage("verify", "程序验算", "done", f"剔除 {len(dropped)} 道，保留 {len(out)} 道")
     else:
         _emit_stage("verify", "程序验算", "done")
-    return {"items": out, "dropped_notes": dropped, "messages": []}
+    return {"items": out, "dropped_notes": dropped, "llm_call_budget": budget, "messages": []}
 
 
 # ---------------------------------------------------------------------------
@@ -1954,16 +2250,17 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
 # ---------------------------------------------------------------------------
 # 🔴 排版（PRD-C-012 任务3）：判别标准/输出契约固定段前移，变动段（母题摘要/变式题）
 # 移末尾（runtime 追加的 knobs_spec 改判段照旧排在最后）；语义一字不改。
-GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下面这道变式是否是母题的「平行题」：骨架基因(题型/难度/解法结构)必须一致，皮肤(数字/场景)必须已换。
+GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下面这道变式是否是母题的「平行题」：骨架基因(题型/解法结构)必须一致，皮肤(数字/场景)必须已换。
 
 判别标准：
 - qtype_match: 变式题型与母题一致。
-- difficulty_match: level=normal 应与母题难度相同；level=hard 允许且应当比母题高一档（恰高一档算 match；高两档以上或反而变简单不算）。
 - structure_match: 解法主结构/骨架与母题一致（难题在主骨架外综合一个相邻考点不算破坏结构）。
 - surface_swapped: 数字/场景至少一类已换；与母题题面几乎相同(只是复读) = false。
 
+🔴 难度不是本闸判项：难度一致性由程序按组内相对关系另行校验（hard 题难度 ≥ 同组 normal 题），你**不要**因为「感觉难一点/简单一点」打回——只看题型与解法骨架是否平行、皮肤是否已换。
+
 只输出一个 JSON（不要解释）：
-{{"qtype_match": true/false, "difficulty_match": true/false, "structure_match": true/false, "surface_swapped": true/false, "reason": "一句话依据"}}
+{{"qtype_match": true/false, "structure_match": true/false, "surface_swapped": true/false, "reason": "一句话依据"}}
 
 母题摘要：
 - 主考点: {kp_name} / 年级: {grade}
@@ -1975,7 +2272,10 @@ GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下
 {variant_stem}"""
 
 # 骨架基因键（必须全 match）；皮肤键（必须 swapped）
-_GENE_SKELETON_KEYS = ("qtype_match", "difficulty_match", "structure_match")
+# 🔴 P12.1（PRD-C-013）：difficulty_match 从闸A 删除 —— judge 主观目测对赌 generate 算术
+# 申报值是两个噪声源互比（最近 40 次失败 difficulty 占 28，完美平行题被「感觉难一点」打回）。
+# 难度一致性下沉为纯函数组内相对关系校验（difficulty_consistency_defects，零 LLM），只 warn 不回炉。
+_GENE_SKELETON_KEYS = ("qtype_match", "structure_match")
 
 
 def _clip(s: Any, n: int = 300) -> str:
@@ -2007,22 +2307,75 @@ def gene_gate_decision(judge: dict) -> Literal["pass", "rework"]:
     return "pass" if (skeleton_ok and surface_ok) else "rework"
 
 
-def _gene_feedback(judge: dict) -> str:
-    """rework 时给 REGEN 回炉的人话反馈：点名哪条基因不过 + LLM 的 reason。"""
-    fails = []
+def _gene_feedback(judge: dict, facts: dict | None = None, target_qtype: str | None = None) -> str:
+    """rework 时给 REGEN 回炉的**结构定向**反馈（P12.3·PRD-C-013）。
+
+    旧版只点名「难度档不对/解法结构变了」却不把**母题骨架**给回炉端 —— prompt 里没有
+    母题骨架却要求「与母题一致」，收敛率≈随机。本版把母题 stem/skeleton 直接放进反馈，
+    明示「符合目标题型规范结构 + 解法核心步骤同源(考点级)」。
+    - difficulty 已不是闸A 判项（P12.1），不再产难度类反馈；
+    - target_qtype 非空（转题型场景，RC1）→ 结构标准对齐**目标题型规范结构**，不再让回炉
+      端去贴母题原骨架（否则规范单问选择题会被反复打回成嵌合体）。
+    """
+    fails: list[str] = []
     if not _gene_bool(judge.get("qtype_match")):
-        fails.append("题型变了")
-    if not _gene_bool(judge.get("difficulty_match")):
-        fails.append("难度档不对")
+        fails.append("题型不在目标范围")
     if not _gene_bool(judge.get("structure_match")):
-        fails.append("解法结构变了")
+        fails.append("解法核心步骤未与母题同源")
     if not _gene_bool(judge.get("surface_swapped")):
         fails.append("皮肤没换(数字/场景照抄母题)")
     reason = str(judge.get("reason") or "").strip()
-    return (
+    facts = facts or {}
+    skeleton = _clip(facts.get("skeleton"), 400)
+    mother_stem = _clip(facts.get("stem"), 400)
+    parts = [
         "基因闸判定与母题平行度不足：" + ("、".join(fails) or "未知")
         + (f"（{reason}）" if reason else "")
-        + "。请重出一道：题型/难度档/解法结构与母题保持一致，只换数字与场景。"
+    ]
+    if mother_stem:
+        parts.append(f"母题题干：{mother_stem}")
+    if skeleton:
+        parts.append(f"母题解法骨架：{skeleton}")
+    if target_qtype:
+        parts.append(
+            f"请重出一道「{target_qtype}」题：① 符合「{target_qtype}」的**规范结构**"
+            "（不必照搬母题原题型的骨架形态）；② 解法核心步骤与母题**同源（考点级）**；"
+            "③ 只换数字与场景，不照抄母题题面。"
+        )
+    else:
+        parts.append(
+            "请重出一道：题型与母题一致；**解法核心步骤同源（考点级，可参照上面骨架）**；"
+            "只换数字与场景，不照抄母题题面。"
+        )
+    return "\n".join(parts)
+
+
+def _gene_target_qtype(item: dict, facts: dict) -> str | None:
+    """🔴 RC1（PRD-C-013）：判变式是否在做**题型转换**（变式 qtype ≠ 母题 qtype，过别名归一后）。
+
+    返回目标题型规范名（归一后，如「选择」）当且仅当确实转了题型；否则 None（同题型，
+    结构闸照旧对照母题原骨架）。用于把 structure_match 改判为「符合目标题型规范结构」，
+    避免规范的单问选择题被按母题解答题骨架判成「解法结构变了」→ 嵌合体回炉死循环。
+    """
+    v_raw = str(item.get("qtype") or "").strip()
+    m_raw = str(facts.get("qtype") or "").strip()
+    v = _QTYPE_ALIAS.get(v_raw, v_raw)
+    m = _QTYPE_ALIAS.get(m_raw, m_raw)
+    if not v or v == m:
+        return None
+    return v
+
+
+def _gene_target_qtype_spec(target_qtype: str) -> str:
+    """🔴 RC1：转题型时注入 judge 的 structure_match 改判段 —— 以 S2 的 _QTYPE_CONTRACT 为
+    目标题型规范依据，把结构标准从「贴母题原骨架」改成「符合目标题型规范结构 + 解法核心步骤同源」。"""
+    return (
+        f"🔴 题型转换语境（最高优先级，覆盖上面 structure_match 标准）：本变式在把母题改造成「{target_qtype}」题。\n"
+        f"- structure_match 改判：只要求 ① 符合「{target_qtype}」的**规范结构**（见下方题型结构契约）"
+        "② 解法核心步骤与母题**同源（考点级）**；**不再**要求与母题原题型的骨架形态一致"
+        "（规范的单问选择题不算「解法结构变了」）。\n"
+        f"- qtype_match：变式题型为「{target_qtype}」即算 match（老师指定的转题型，不要求与母题题型一致）。\n\n"
+        + _QTYPE_CONTRACT
     )
 
 
@@ -2030,24 +2383,31 @@ def _gene_judge_prompt(item: dict, facts: dict) -> str:
     """组装基因比对 prompt（纯函数，可单测格式化不炸）。
 
     🔴 闸A·配方对齐：facts 带 knobs_spec（gene_gate 按 state.knobs + 题序注入）时追加
-    「老师指定配方」改判段 —— qtype 按老师指定题型集合判、difficulty 按递增计划预期档位判，
-    否则递增难度的合法变式会被按母题基准误判 rework。knobs 为空 → 无此段，判别标准保持现状。
+    「老师指定配方」改判段（P12.1 后只剩 qtype 改判，难度不再判）。
+    🔴 RC1·转题型：facts 带 target_qtype_spec（_gene_facts_for 在变式 qtype≠母题 qtype 时注入）
+    时追加「目标题型规范结构」改判段，structure_match 不再对照母题原骨架。knobs 为空且未转
+    题型 → 无附加段，判别标准保持现状。
     """
+    # 🔴 P12.2（PRD-C-013）：judge 输入不再 _clip(300) 砍半多小问解答 —— 母题/变式题干放宽到
+    # 1200，骨架放宽到 400。判错维度的一大根因是 judge 只看到半截解答就误判结构变了。
     prompt = GENE_JUDGE_PROMPT.format(
         kp_name=facts["kp_name"],
         grade=facts["grade"],
         qtype=facts["qtype"],
         difficulty=facts.get("mother_difficulty") or "?",
-        skeleton=_clip(facts.get("skeleton"), 200),
-        mother_stem=_clip(facts.get("stem"), 300),
+        skeleton=_clip(facts.get("skeleton"), 400),
+        mother_stem=_clip(facts.get("stem"), 1200),
         level=item.get("level") or "normal",
         v_qtype=item.get("qtype") or "?",
         v_difficulty=item.get("difficulty") or "?",
-        variant_stem=_clip(item.get("stem"), 300),
+        variant_stem=_clip(item.get("stem"), 1200),
     )
     spec = facts.get("knobs_spec")
     if spec:
         prompt += "\n\n" + str(spec)
+    tq_spec = facts.get("target_qtype_spec")
+    if tq_spec:
+        prompt += "\n\n" + str(tq_spec)
     return prompt
 
 
@@ -2063,33 +2423,45 @@ async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
 
 def _gene_facts_for(item: dict, facts: dict, knobs: dict[str, Any] | None) -> dict:
     """🔴 闸A·配方对齐 facts（gene_gate 节点与 generate 流内 eager 共用的单一事实源）：
-    只对带 from_recipe 印记的题（产生该配方那一轮生成的）注入改判段，递增预期档读
-    item 级 expected_difficulty（generate 落印，跟题走不随下标位移）。编辑轮 add 的
-    新题无印记 → 按默认标准判，绝不被旧配方（如「5道递增」）误改判。"""
+    只对带 from_recipe 印记的题（产生该配方那一轮生成的）注入 qtype 改判段。编辑轮 add 的
+    新题无印记 → 按默认标准判，绝不被旧配方（如「5道递增」）误改判。
+    🔴 RC1（PRD-C-013）：变式 qtype≠母题 qtype（转题型）→ 注入 target_qtype_spec，让
+    structure_match 按目标题型规范结构判（与 from_recipe 无关，任何轮转题型都注入）。"""
+    out = facts
     if knobs and item.get("from_recipe"):
         spec = gene_judge_knobs_spec(knobs, item.get("expected_difficulty"))
         if spec:
-            return dict(facts, knobs_spec=spec)
-    return facts
+            out = dict(out, knobs_spec=spec)
+    target_qtype = _gene_target_qtype(item, facts)
+    if target_qtype:
+        out = dict(out, target_qtype_spec=_gene_target_qtype_spec(target_qtype))
+    return out
 
 
 async def _gene_one_item(item: dict, facts_i: dict, idx: int, total: int) -> dict:
     """🔴 闸A per-item 协程（P2 单一事实源：gene_gate 节点与 generate 流内 eager 共用）。
 
     入参 item 视为本协程私有（调用方传副本）；idx/total 只用于思路条叙事编号。
-    判决/降级语义与重排前逐字一致：
+    判决/降级语义：
     - pass → item.gene={gate:"pass"}；
     - rework → 带 reason 走既有 _regen_once 回炉 1 次 → 重生版再判：
         re_judge 过 **且 代码级 _conservation_ok 守恒校验过**（主考点+年级硬守恒贯穿重生，
           不只采信 LLM）→ 换用重生版（gene=pass，🔴 不带 check → 下游闸B 必判，正交不破）；
         仍不过/守恒破/重生失败 → 保留原版 gene={gate:"warn", reason}（v1 只警示不硬拦）；
+    - 🔴 RC2（PRD-C-013）：编辑轮产物（item.from_edit，exec_regenerate 带老师 note 的题）
+      **永不回炉** —— 判不过只标 warn（4d 下沉默），老师意志优先于基因闸；
     - judge 失败 → gene={gate:"skipped"} 放行（闸A是增强不是关卡，G5）。
     已带 gene 的题原样通过（不重判、不发 stage）。
     """
     if item.get("gene"):  # 已判过 → 不重判（旧题预算保护）
         return item
 
-    _emit_stage("gene_gate", "平行度比对", "running", f"第 {idx + 1}/{total} 道")
+    # 🔴 P14 叙事修正（RC3·PRD-C-013）：同 _check_one_item——并发闸去掉误导性「/总数」；
+    #   编辑轮单题重出明示「只重比第 N 题」。
+    _emit_stage(
+        "gene_gate", "平行度比对", "running",
+        (f"只重比第 {idx + 1} 题" if item.get("from_edit") else f"第 {idx + 1} 题比对中"),
+    )
     judge = await _gene_judge_one(item, facts_i)
     if judge is None:
         item["gene"] = {"gate": GENE_GATE_SKIPPED}
@@ -2099,9 +2471,27 @@ async def _gene_one_item(item: dict, facts_i: dict, idx: int, total: int) -> dic
         item["gene"] = {"gate": GENE_GATE_PASS}
         return item
 
-    # rework：既有回炉重生 1 次（基因反馈注回 prompt）→ 重生版再判一次
+    # 🔴 RC2：编辑轮产物只判不回炉（老师已点名改造，重出会丢老师意志）→ 直接落 warn。
+    if item.get("from_edit"):
+        item["gene"] = {
+            "gate": GENE_GATE_WARN,
+            "reason": str(judge.get("reason") or "").strip() or None,
+        }
+        return item
+
+    # 🔴 P13 预算闸：rework 回炉是**增强类**调用，预算耗尽 → 跳过回炉，直接落 warn 走 G5
+    #   降级（保留原版 + 警示，绝不卡死、绝不抛）。宏观 DAG 不破（节点照常往下走）。
+    if _budget_exhausted():
+        item["gene"] = {
+            "gate": GENE_GATE_WARN,
+            "reason": str(judge.get("reason") or "").strip() or None,
+        }
+        return item
+
+    # rework：既有回炉重生 1 次（结构定向反馈含母题骨架 + 转题型目标规范注回 prompt）→ 重生版再判一次
     _emit_stage("gene_gate", "平行度比对", "warn", f"第 {idx + 1} 道回炉重生中")
-    draft = await _regen_once(item, facts_i, feedback=_gene_feedback(judge))
+    feedback = _gene_feedback(judge, facts_i, _gene_target_qtype(item, facts_i))
+    draft = await _regen_once(item, facts_i, feedback=feedback)
     if draft:
         re_judge = await _gene_judge_one(draft, facts_i)
         if re_judge is not None and gene_gate_decision(re_judge) == "pass":
@@ -2129,6 +2519,7 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
     asyncio.gather + Semaphore(GATE_CONCURRENCY=3) 并发，结果按原下标顺序回填。
     🔴 已带 gene 的题（exec_add 追加时的旧题等）原样通过，不重判不重复花预算。
     """
+    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（出题/编辑轮共用本节点）
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
     knobs = state.get("knobs") or {}
@@ -2144,7 +2535,7 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
 
     out = list(await asyncio.gather(*(_run(i, it) for i, it in enumerate(items))))
     _emit_stage("gene_gate", "平行度比对", "done")
-    return {"items": out, "messages": []}
+    return {"items": out, "llm_call_budget": budget, "messages": []}
 
 
 def _status_summary(items: list[dict]) -> str:
@@ -2162,17 +2553,131 @@ def _status_summary(items: list[dict]) -> str:
     return "、".join(parts) or f"{len(items)} 道已生成"
 
 
+# --- P8 难度总评（S1.2）：assemble 前一次 nano call 按绝对 rubric 复评全组难度 -----
+# 绝对锚浙教版初中：不与母题相对，让一组题难度可比、入库 difficult/dim4 更准。
+_GRADE_DIFFICULTY_PROMPT = """你是浙教版初中数学难度评定器。下面是同一组变式题（已编号），请按【绝对 rubric】给每道题打 1-4 的难度档（不是相对母题，是绝对难度）：
+
+1 = 送分概念直读（直接套定义/公式，一眼出答案）
+2 = 常规（单步套用 ~ 两三步常规综合）
+3 = 多步综合，或需构造、转化才能解
+4 = 压轴级（多知识点交汇、难想到的关键转化/分类讨论）
+
+只输出 JSON 数组，每项是一个整数难度档，顺序、个数与下面题目严格一一对应，禁止多写少写、禁止解释：
+例：[2,2,3,1]
+
+题目：
+{items}
+"""
+
+
+def _grade_difficulty_payload(items: list[dict[str, Any]]) -> str:
+    """组装评分用题面（题干+答案+解析），编号 1..n。纯函数、可单测。"""
+    lines: list[str] = []
+    for i, it in enumerate(items, 1):
+        stem = str(it.get("stem") or "").strip()
+        answer = str(it.get("answer") or "").strip()
+        sol = str(it.get("solution") or "").strip()
+        lines.append(f"[{i}] 题干：{stem}\n答案：{answer}\n解析：{sol}")
+    return "\n\n".join(lines)
+
+
+async def _grade_difficulty(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """P8 难度总评（S1.2）：一次 nano call 按绝对 rubric 复评全组，覆盖 item['difficulty']。
+
+    🔴 G5 降级：items 空 / LLM 异常 / 解析失败 / 个数对不上 → 保留各 item 原 difficulty 值，
+    绝不抛、绝不卡死。逐项越界钳到 1-4（与 _clamp_difficult 入库口径一致）。
+    返回新 list（不原地改入参）；用 LLM_MODEL_LIGHT 经 _ainvoke_text 的 per-call model 覆盖。
+    """
+    out = [dict(it) for it in items]
+    if not out:
+        return out
+    try:
+        prompt = _GRADE_DIFFICULTY_PROMPT.format(items=_grade_difficulty_payload(out))
+        text = await _ainvoke_text(
+            [HumanMessage(content=prompt)], model=settings.LLM_MODEL_LIGHT
+        )
+        parsed = _parse_json(text)
+    except Exception:  # noqa: BLE001 — 难度总评是增强不是关卡，失败保留原值
+        return out
+    if not isinstance(parsed, list) or len(parsed) != len(out):
+        return out  # 个数对不上 → 整体降级保留原值（不冒险错位覆盖）
+    for it, raw in zip(out, parsed):
+        d = _to_int(raw)
+        if d is not None:
+            it["difficulty"] = max(1, min(DIFFICULTY_CAP, d))  # 越界钳 1-4
+        # d 解析不出 → 该题保留原 difficulty（不动）
+    return out
+
+
+def difficulty_consistency_defects(items: list[dict[str, Any]]) -> list[str]:
+    """🔴 纯函数·难度一致性（P12.1·PRD-C-013，零 LLM）：难度从闸A 删除后下沉到这里，按
+    **组内相对关系**校验 —— level=hard 题的总评难度应 ≥ 同组 level=normal 题（hard 不该比
+    normal 还简单）。读 S1 _grade_difficulty 已覆盖的 item['difficulty'] 绝对档值。
+
+    判错维度根因：judge 主观目测对赌 generate 算术申报值（两个噪声源互比，完美平行题被
+    「感觉难一点」打回）。改为纯函数比相对关系，不再 LLM 自评、不再因难度回炉，只在 assemble
+    头部 warn（铁律④降级：永不卡死、永不剔题）。
+
+    返回缺陷清单（空=一致）。难度缺失/不可解析的题不参与比较（宽松，不误报）。
+    """
+    normals: list[int] = []
+    hards: list[tuple[int, int]] = []  # (1-based 题号, 难度)
+    for i, it in enumerate(items, 1):
+        d = _to_int(it.get("difficulty"))
+        if d is None:
+            continue
+        lvl = str(it.get("level") or "normal").strip().lower()
+        if lvl == "hard":
+            hards.append((i, d))
+        else:
+            normals.append(d)
+    if not hards or not normals:
+        return []
+    max_normal = max(normals)
+    bad = [(i, d) for i, d in hards if d < max_normal]
+    if not bad:
+        return []
+    bad_s = "、".join(f"第{i}道(难度{d})" for i, d in bad)
+    return [f"难度一致性：标注为「难」的 {bad_s} 总评难度低于同组普通题(最高{max_normal})"]
+
+
+def _sort_by_difficulty(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """🔴 P9 默认序（PRD-C-013，纯函数零 LLM 可单测）：按总评难度**升序稳定排序**。
+
+    Python sorted 稳定 → 同难度档保持原生成序（不打散 generate 的写题顺序）。难度缺失/
+    不可解析 → 钳为 0（排最前，与 _artifact_payload 的 difficulty or 0 同口径），不抛、不丢题。
+    返回新 list（不原地改入参）；item 整体随槽位移动，persisted/check/gene 等簿记字段跟题走、
+    不错位（seq 由下游 index=i+1 按新序现编）。
+    """
+    return sorted(items, key=lambda it: _to_int(it.get("difficulty")) or 0)
+
+
 async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     """题组摘要（P1 聊天瘦身·PRD-C-012）：左栏只发摘要头——配方/守恒DNA/状态计数/旋钮提示；
-    题干/答案/解析全文**只走右栏 artifact 题卡**，聊天流不再复读（用户拍板 2026-06-11）。"""
-    items = state.get("items") or []
+    题干/答案/解析全文**只走右栏 artifact 题卡**，聊天流不再复读（用户拍板 2026-06-11）。
+
+    🔴 P8 难度总评（S1.2）：摘要前一次 nano call 按绝对 rubric 复评全组难度，覆盖 item
+    ['difficulty']（入库 difficult/dim4 跟随），失败降级保留原值。P9 排序在 S4 做。"""
+    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（难度总评 nano call 也记票）
+    items = await _grade_difficulty(state.get("items") or [])
+    # 🔴 P9 默认序（PRD-C-013）：assemble 前按总评难度**升序稳定排序**（同难度保持生成序）。
+    #   seq 由 _artifact_payload/入库按当前 list 序现编（index=i+1），persisted 簿记跟 item 走
+    #   （persisted 是 item 字段，排序不丢、不错位）。指令排序走 exec_reorder（纯代码重排）。
+    # 🔴 跨轮 sticky（对抗审③修复）：老师手排过（state.manual_order）→ 跳过默认排序，否则
+    #   手排后再走 remove/add/regenerate 路径过 assemble 会被静默重排，手排（及入库序）丢失。
+    #   exec_add/exec_remove 改了题集会清掉该标记（次序失效回默认）；regenerate 原位改单题不清。
+    if not state.get("manual_order"):
+        items = _sort_by_difficulty(items)
+    state = {**state, "items": items}  # 覆盖后的 difficulty + 排序后的序随 state 流给快照/入库
     facts = _mother_facts(state)
 
     # 配方外显：有 knobs → "按你的要求: ..."；无 → 旧默认文案（行为不变）
     desc = knobs_desc(state.get("knobs"))
     recipe_s = f"按你的要求：{desc}" if desc else "配方：默认 3 = 2 普通 + 1 难"
     # 代码级配方校验缺陷（generate 整组 retry 1 次后仍不符）→ 头部外显 ⚠，不拦截
-    defects = state.get("shape_defects") or []
+    # 🔴 P12.1：难度一致性（纯函数组内相对关系，零 LLM）并入配方缺陷外显，只 warn 不回炉。
+    defects = list(state.get("shape_defects") or [])
+    defects += difficulty_consistency_defects(items)
     defect_s = ("\n\n⚠ 配方未完全满足：" + "；".join(defects)) if defects else ""
     # 4d 方案A：被剔除题的摘要说明（过程已在思路条叙事，这里收口"本组为何少了"）
     dropped = state.get("dropped_notes") or []
@@ -2187,7 +2692,8 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     )
     # artifact 快照帧（PRD-C-011）：每轮题组变化都过 assemble → FE 题卡每轮拿最新快照
     _emit_artifact(state)
-    return {"messages": [AIMessage(content=head)]}
+    # 🔴 回写 items：P8 难度总评覆盖的 difficulty + P9 排序后的序必须落进 graph state，入库/快照才跟随
+    return {"items": items, "llm_call_budget": budget, "messages": [AIMessage(content=head)]}
 
 
 # ===========================================================================
@@ -2201,7 +2707,9 @@ INTENT_CONFIRM = "确认"  # 任务口径里的 confirm
 INTENT_QA = "答疑"  # 任务口径里的 qa
 INTENT_CLARIFY = "clarify"
 VALID_INTENTS = {INTENT_REVISE, INTENT_EDIT, INTENT_CONFIRM, INTENT_QA, INTENT_CLARIFY}
-EDIT_ACTIONS = {"remove", "regenerate", "add"}
+# 🔴 P9（PRD-C-013）：+reorder —— 纯代码 list 重排（零 LLM 改题），与 remove/regenerate/add
+# 同走指令通道；越界/缺序/混类 → clarify（永不默认重排）。
+EDIT_ACTIONS = {"remove", "regenerate", "add", "reorder"}
 ADD_COUNT_MAX = 5  # 与 exec_add 单轮上限同口径（min(n,5)），护栏在源头就钳掉
 
 # 🔴 排版（PRD-C-012 任务3）：分类标准/输出契约/硬约束固定段前移，变动段
@@ -2214,6 +2722,7 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 2. "编辑"+remove —— 判别：点名删掉某道题，且能给出 1~{n} 内的题号。例：「第2题删掉」→ ops=[{{"action":"remove","index":2}}]
 3. "编辑"+regenerate —— 判别：点名重出/换掉/改造某道题，且能给出 1~{n} 内的题号。例：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
 4. "编辑"+add —— 判别：要求再加 N 道题（N 为正整数，单轮最多 5）。例：「再来2道难的」→ ops=[{{"action":"add","count":2,"note":"难的"}}]
+4b. "编辑"+reorder —— 判别：只调整题目**顺序**（不改题/不增删），且能给出一个**覆盖全部 {n} 道**的新次序。例（共3道）：「把顺序换成 3 1 2」→ ops=[{{"action":"reorder","order":[3,1,2]}}]。order 必须是 1~{n} 的**全排列**（每个题号恰出现一次）；只说「按难度排」「倒过来」这种没给出明确全排列的，**不要自己编 order**，留空 ops、intent 取 "clarify" 让老师给次序。
 5. "修正" —— 判别：老师纠正的是母题的年级或考点本身（不是改某道变式）。例：「这其实是八年级的题」→ mother_correction={{"grade":"八年级","kp":null}}
 6. "确认" —— 判别：老师对这组题满意，要入库/保存/结束。例：「这组可以了，入库吧」
 7. "clarify" —— 判别：撞硬守恒（要换主考点/改年级）、题号给不出或超出 1~{n}、或意图真说不清。例：「改成考函数的题」（撞守恒）
@@ -2222,7 +2731,7 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 {{
   "intent": "修正|编辑|确认|答疑|clarify",   // 5 选 1
   "ops": [                                  // intent=编辑 时的操作列表（其余为空数组）
-    {{"action":"remove|regenerate|add", "index": 1, "count": 1, "note":"自由约束/旋钮说明"}}
+    {{"action":"remove|regenerate|add|reorder", "index": 1, "count": 1, "order": [3,1,2], "note":"自由约束/旋钮说明"}}
   ],
   "knobs": {{"count":null, "number":null, "scene":null, "difficulty":null, "qtype":null, "method":null}},
   "comp": "可被旋钮吸收的软约束(超旋钮但 best-effort 能顺的)，没有填 null",
@@ -2232,9 +2741,11 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 }}
 
 硬约束（违反任何一条，程序护栏会把你的输出整体降级为 clarify）：
-- intent 只能是上述 5 个枚举值之一；ops.action 只能是 remove/regenerate/add。
+- intent 只能是上述 5 个枚举值之一；ops.action 只能是 remove/regenerate/add/reorder。
 - remove/regenerate 的 index 从 1 起、必须 ≤ {n}；拿不准题号时 ops 留空、intent 取 "clarify"。
+- reorder 的 order 必须是 1~{n} 的全排列（长度={n}、每号恰一次）；给不全/有重复/越界 → ops 留空、intent 取 "clarify"。
 - add 的 count 必须是正整数；intent=答疑/确认/修正/clarify 时 ops 必须为空数组。
+- 同一句里不要混多类操作（如又删又排）；混了 → intent 取 "clarify" 请老师分句说。
 - 解析不出来 = "clarify"，绝不猜成删题。
 
 母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
@@ -2284,6 +2795,8 @@ def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]
          执行层（dispatch→exec_*）单轮只走一类分支，混类会被静默丢弃半截，且
          remove 后题号位移会使同句其它 index 失效 —— 与 R3「绝不部分执行」同哲学。
          同类多 op（删第2、3题 / 重出第1、2题）合法保留，exec_* 一次吃完。
+    - R8 reorder（P9·PRD-C-013）：order 必须是 1..current_item_count 的**全排列**（长度=N、
+         每号恰一次）；缺序/重复/越界/混类 → clarify（永不默认重排）。
     """
 
     def _normalized(p: dict) -> dict[str, Any]:
@@ -2337,6 +2850,18 @@ def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]
             if idx is None or not (1 <= idx <= current_item_count):
                 return _clarify(base)  # R3：越界/缺号 → 反问，绝不乱删
             clean["index"] = idx
+        elif action == "reorder":
+            # 🔴 R8（P9·PRD-C-013）：order 必须是 1..N 的**全排列**（长度=N、每号恰一次）。
+            #   缺序/重复/越界/混类 → 整体降级 clarify（永不默认重排，与 R3 同哲学）。
+            raw_order = op.get("order")
+            if not isinstance(raw_order, list) or len(raw_order) != current_item_count:
+                return _clarify(base)
+            order = [_to_int(x) for x in raw_order]
+            if any(x is None for x in order):
+                return _clarify(base)
+            if sorted(order) != list(range(1, current_item_count + 1)):
+                return _clarify(base)  # 非全排列（重复/越界/缺号）→ 反问
+            clean["order"] = order
         else:  # add
             cnt = _to_int(op.get("count"))
             if cnt is None or cnt <= 0:
@@ -2356,6 +2881,9 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
 
     解析结果塞 state['pending']（含 intent/ops/knobs/comp/extra_constraints/mother_correction）。
     """
+    # 🔴 P13：编辑轮入口重置预算（parse→dispatch/patch→exec_*→gene_gate→solve_explain→assemble
+    #   同轮共享）。parse 本身是核心分类调用（受预算约束但不被跳过）。
+    budget = _budget_bind(state, reset_limit=settings.VARIANT_BUDGET_EDIT)
     utterance = _latest_human_text(state.get("messages", []))
     facts = _mother_facts(state)
     items = state.get("items") or []
@@ -2384,12 +2912,16 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
             "- 真说不清（与年级/考点/题型无关的闲聊）→ clarify。\n"
             "- 禁止输出任何编辑类 ops（无题可编），禁止判「确认/答疑」。"
         )
-    text = await _ainvoke_text([HumanMessage(content=prompt)])
+    # 🔴 P12.4（PRD-C-013）：parse 是受约束分类器（5 意图闭集 + 物理护栏兜底），nano 足够 →
+    # 走 LLM_MODEL_LIGHT(gpt-5-nano) 降本；语义不动，c017 探针把关。闸A judge 不在本阶段切 nano。
+    text = await _ainvoke_text(
+        [HumanMessage(content=prompt)], model=settings.LLM_MODEL_LIGHT
+    )
     parsed = _parse_json(text)
     # 🔴 物理护栏（G4/FP4）：白名单 + 越界钳制 + 解析失败整体降级 clarify（永不默认成 remove）
     pending = validate_instruction(parsed, len(items))
     pending["utterance"] = utterance
-    return {"pending": pending, "messages": []}
+    return {"pending": pending, "llm_call_budget": budget, "messages": []}
 
 
 def route_after_parse(
@@ -2408,8 +2940,8 @@ def route_after_parse(
     return "ask_clarify"
 
 
-def dispatch(state: VariantState) -> Literal["remove", "regenerate", "add", "ask_clarify"]:
-    """三层漏斗收口：硬旋钮命中 → remove/regenerate/add；ops 空/说不清 → clarify。"""
+def dispatch(state: VariantState) -> Literal["remove", "regenerate", "add", "reorder", "ask_clarify"]:
+    """三层漏斗收口：硬旋钮命中 → remove/regenerate/add/reorder；ops 空/说不清 → clarify。"""
     ops = (state.get("pending") or {}).get("ops") or []
     actions = {str(op.get("action")) for op in ops if isinstance(op, dict)}
     # 🔴 护栏 R7（validate_instruction）保证 ops 只含单一 action 类（混类已降级 clarify），
@@ -2420,6 +2952,8 @@ def dispatch(state: VariantState) -> Literal["remove", "regenerate", "add", "ask
         return "regenerate"
     if "add" in actions:
         return "add"
+    if "reorder" in actions:
+        return "reorder"
     return "ask_clarify"
 
 
@@ -2467,6 +3001,7 @@ async def answer_question(state: VariantState, config: RunnableConfig) -> Varian
 
 # --- 编辑·remove：删 + 重编号（删完的题不再过 solve，直接 ASM） -----------------
 async def exec_remove(state: VariantState, config: RunnableConfig) -> VariantState:
+    budget = _budget_bind(state)  # P13：携带编辑轮预算（remove 不调 LLM，仅透传给下游）
     items = list(state.get("items") or [])
     ops = (state.get("pending") or {}).get("ops") or []
     drop = set()
@@ -2480,12 +3015,21 @@ async def exec_remove(state: VariantState, config: RunnableConfig) -> VariantSta
     kept = [it for i, it in enumerate(items) if i not in drop]
     # 🔴 shape_defects 只属于 generate 当轮：老师显式编辑 = 对配方的人工接管，旧缺陷清单
     #   不再陈旧外显（且不在 assemble 重算 —— 那会把老师主动删/换题误报为缺陷）。
-    return {"items": kept, "pending": None, "shape_defects": [], "messages": []}
+    return {
+        "items": kept,
+        "pending": None,
+        "shape_defects": [],
+        # 🔴 改变题集 → 清手排标记（对抗审③）：删题后旧手排次序已失效，assemble 回默认难度序。
+        "manual_order": False,
+        "llm_call_budget": budget,
+        "messages": [],
+    }
 
 
 # --- 编辑·regenerate：改造指定题 → 过 solve_explain（清 check 触发重判） ----------
 async def exec_regenerate(state: VariantState, config: RunnableConfig) -> VariantState:
     """改造某道（按 note 软约束）→ 该题清 check 重入 solve_explain（每题状态须重新定）。"""
+    budget = _budget_bind(state)  # P13：携带编辑轮预算（REGEN 调 LLM，记票）
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
     ops = (state.get("pending") or {}).get("ops") or []
@@ -2541,9 +3085,21 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
             for k in ("from_recipe", "expected_difficulty"):
                 if old.get(k) is not None:
                     new_item[k] = old[k]
+            # 🔴 RC2（PRD-C-013）：编辑轮产物打 from_edit 印记 → 重入 gene_gate 时只判不回炉
+            # （老师已点名改造，基因闸判不过只标 warn，不重出覆盖老师意志）；老师 note 存 edit_note，
+            # 任何下游 REGEN（闸B 验算回炉）都注回，不被失败原因冲掉。
+            new_item["from_edit"] = True
+            if t in notes:
+                new_item["edit_note"] = notes[t]
             items[t] = new_item
     # 🔴 编辑轮清陈旧缺陷外显（同 exec_remove 注释）
-    return {"items": items, "pending": None, "shape_defects": [], "messages": []}
+    return {
+        "items": items,
+        "pending": None,
+        "shape_defects": [],
+        "llm_call_budget": budget,
+        "messages": [],
+    }
 
 
 # --- 编辑·add：生成 N 道新题（吸收软约束/旋钮）→ 过 solve_explain ----------------
@@ -2558,6 +3114,10 @@ ADD_PROMPT = (
   "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
 
 格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
+
+"""
+    + _QTYPE_CONTRACT
+    + """
 
 verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题自己的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 该题标准答案）：
 """
@@ -2580,6 +3140,7 @@ verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题�
 
 async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
     """补题（设计 §5 三层漏斗②：超旋钮软约束 best-effort 吸收 + 外显）→ 追加 → 过 solve_explain。"""
+    budget = _budget_bind(state)  # P13：携带编辑轮预算（ADD 调 LLM，记票）
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
     pending = state.get("pending") or {}
@@ -2630,7 +3191,56 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
         # 不落 from_recipe 印记：补题轮的题不受首轮配方（递增/题型配比）改判。
         items.append(_normalize_generated_item(it, facts))
     # 🔴 编辑轮清陈旧缺陷外显（同 exec_remove 注释）
-    return {"items": items, "pending": None, "shape_defects": [], "messages": []}
+    return {
+        "items": items,
+        "pending": None,
+        "shape_defects": [],
+        # 🔴 改变题集 → 清手排标记（对抗审③）：加题后旧手排次序不覆盖全部题，回默认难度序。
+        "manual_order": False,
+        "llm_call_budget": budget,
+        "messages": [],
+    }
+
+
+# --- 编辑·reorder（P9·PRD-C-013）：纯代码 list 重排 + seq 重编，零 LLM 改题 -----------
+async def exec_reorder(state: VariantState, config: RunnableConfig) -> VariantState:
+    """🔴 指令排序（P9）：按 order（1-based 全排列，护栏已保证合法）纯代码重排 items。
+
+    零 LLM、零改题——只挪槽位（check/gene/persisted 等簿记字段跟题走、不错位）；seq 由
+    _artifact_payload 按新 list 序现编（index=i+1）。**不过 assemble**（避免默认难度升序排序
+    覆盖老师手排）→ 整帧重发 artifact + 简短确认，入库顺序 = 当前显示序。
+    护栏失守（order 缺失/长度不符等罕见兜底）→ 原序不动、友好提示，绝不抛、绝不丢题（G5）。
+    """
+    budget = _budget_bind(state)  # P13：reorder 不调 LLM，仅透传预算
+    items = list(state.get("items") or [])
+    ops = (state.get("pending") or {}).get("ops") or []
+    order: list[int] | None = None
+    for op in ops:
+        if isinstance(op, dict) and op.get("action") == "reorder" and isinstance(op.get("order"), list):
+            order = op["order"]
+            break
+    # 护栏兜底：order 非全排列（validate_instruction 应已拦，此处纯防御）→ 原序不动
+    if not order or sorted(order) != list(range(1, len(items) + 1)):
+        _emit_artifact({**state, "items": items})
+        return {
+            "items": items,
+            "pending": None,
+            "shape_defects": [],
+            "llm_call_budget": budget,
+            "messages": [AIMessage(content="我没拿准你要的新次序（请给出覆盖全部题的完整顺序），这次先没调整。")],
+        }
+    reordered = [items[i - 1] for i in order]  # 1-based → 0-based 取位
+    _emit_artifact({**state, "items": reordered})  # 整帧重发（seq 按新序现编）
+    return {
+        "items": reordered,
+        "pending": None,
+        "shape_defects": [],
+        # 🔴 跨轮 sticky（对抗审③修复）：置位后即便后续走 remove/regenerate 过 assemble，
+        #   也不被默认难度升序排序覆盖手排（assemble 读 manual_order 跳过 _sort_by_difficulty）。
+        "manual_order": True,
+        "llm_call_budget": budget,
+        "messages": [AIMessage(content=f"已按你给的次序重排这组题（共 {len(reordered)} 道），入库会按当前顺序。")],
+    }
 
 
 # --- 修正：patch 母题字段 → 只重算受影响下游（设计 §6 中途修正） ----------------
@@ -2836,6 +3446,7 @@ graph.add_node("answer_question", answer_question)
 graph.add_node("exec_remove", exec_remove)
 graph.add_node("exec_regenerate", exec_regenerate)
 graph.add_node("exec_add", exec_add)
+graph.add_node("exec_reorder", exec_reorder)  # P9·指令排序（纯代码重排，不过 assemble）
 graph.add_node("patch", patch)
 graph.add_node("ask_clarify", ask_clarify)
 graph.add_node("persist_to_bank", persist_to_bank)
@@ -2903,12 +3514,13 @@ graph.add_conditional_edges(
 # 三层漏斗：编辑意图 → 选 remove/regenerate/add（route_after_parse 的 "dispatch" 实由本函数收口）
 def route_dispatch(
     state: VariantState,
-) -> Literal["exec_remove", "exec_regenerate", "exec_add", "ask_clarify"]:
+) -> Literal["exec_remove", "exec_regenerate", "exec_add", "exec_reorder", "ask_clarify"]:
     target = dispatch(state)
     return {
         "remove": "exec_remove",
         "regenerate": "exec_regenerate",
         "add": "exec_add",
+        "reorder": "exec_reorder",
         "ask_clarify": "ask_clarify",
     }[target]
 
@@ -2923,6 +3535,7 @@ graph.add_conditional_edges(
         "exec_remove": "exec_remove",
         "exec_regenerate": "exec_regenerate",
         "exec_add": "exec_add",
+        "exec_reorder": "exec_reorder",
         "ask_clarify": "ask_clarify",
     },
 )
@@ -2932,6 +3545,9 @@ graph.add_conditional_edges(
 graph.add_edge("exec_remove", "solve_explain")
 graph.add_edge("exec_regenerate", "gene_gate")
 graph.add_edge("exec_add", "gene_gate")
+# 🔴 reorder 只挪槽位、不产新题、不重判 → 直连 END（已自发 artifact 整帧；**不过 assemble**，
+# 否则 assemble 的默认难度升序排序会覆盖老师手排）。
+graph.add_edge("exec_reorder", END)
 
 # 答疑/clarify → END（不改 items，回等待下一句）
 graph.add_edge("answer_question", END)

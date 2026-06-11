@@ -443,3 +443,249 @@ def test_non_whitelisted_function_degrades():
     # factorial parses in raw sympy but is outside our function whitelist
     res = _v({"kind": "numeric", "expr": "factorial(20)", "claimed": "1"})
     assert res["verdict"] == "degrade"
+
+
+# ---------------------------------------------------------------------------
+# PRD-C-013 4b (1): inequality_solve — claimed solution SET vs true solution SET
+# Sets are compared symbolically (Interval/Set equality), never by string. So a
+# strict/non-strict boundary mismatch fails, equivalent writings pass, and any
+# non-relational / NL garbage degrades.
+# ---------------------------------------------------------------------------
+
+def test_inequality_solve_linear_pass():
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "2*x-3>5",
+        "unknown": "x",
+        "claimed": "x>4",
+    })
+    assert res["verdict"] == "pass"
+    assert res["computed"] == "Interval.open(4, oo)"
+
+
+def test_inequality_solve_wrong_set_fail():
+    # true set is x>4; claiming x>3 is a different (larger) set -> fail
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "2*x-3>5",
+        "unknown": "x",
+        "claimed": "x>3",
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_inequality_solve_boundary_strictness_fail():
+    # 2x>=6 -> x>=3 (closed at 3); claiming x>3 (open) misses the boundary -> fail
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "2*x>=6",
+        "unknown": "x",
+        "claimed": "x>3",
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_inequality_solve_compound_quadratic_pass():
+    # x**2-4<=0 has solution set [-2, 2]; the compound form -2<=x<=2 is equal
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "x**2-4<=0",
+        "unknown": "x",
+        "claimed": "-2<=x<=2",
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_inequality_solve_equivalent_writing_pass():
+    # 2x>=6 and the reversed/equivalent 3<=x denote the same set -> pass
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "2*x>=6",
+        "unknown": "x",
+        "claimed": "3<=x",
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_inequality_solve_closed_boundary_pass():
+    # exact boundary match: 2x>=6 -> x>=3, claimed x>=3 -> pass
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "2*x>=6",
+        "unknown": "x",
+        "claimed": "x>=3",
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_inequality_solve_nl_garbage_degrades():
+    # natural-language "inequality" has no relational operator -> degrade, no raise
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "画一个开口向上的抛物线",
+        "unknown": "x",
+        "claimed": "x>0",
+    })
+    assert res["verdict"] == "degrade"
+
+
+def test_inequality_solve_garbage_claimed_degrades():
+    # claimed side is prose -> cannot build a comparable set -> degrade
+    res = _v({
+        "kind": "inequality_solve",
+        "inequality": "2*x-3>5",
+        "unknown": "x",
+        "claimed": "x 大于 四",
+    })
+    assert res["verdict"] == "degrade"
+
+
+# ---------------------------------------------------------------------------
+# PRD-C-013 4b (2): rational_roots — 分式方程舍根/增根子集模式
+# Design choice: a DEDICATED kind (not an equation_solve overload) so the
+# polynomial path stays untouched. PASS iff claimed EXACTLY equals the set of
+# domain-valid roots (roots that do not zero any denominator) and that set is
+# non-empty. 漏剔增根 / 申报使分母为 0 的根 / 漏根 都 -> fail; 解析不了 -> degrade.
+# ---------------------------------------------------------------------------
+
+def test_rational_roots_no_spurious_pass():
+    # 1/(x-1)=2 -> x=3/2, no spurious root, denominator nonzero there
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "1/(x-1)=2",
+        "unknowns": ["x"],
+        "claimed": ["3/2"],
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_rational_roots_correctly_dropped_spurious_pass():
+    # x**2/(x-2)=4/(x-2): candidates {2,-2}; x=2 zeroes denom (增根) -> only -2 valid.
+    # claimed correctly剔除 x=2 and keeps -2 -> pass
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "x**2/(x-2)=4/(x-2)",
+        "unknowns": ["x"],
+        "claimed": ["-2"],
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_rational_roots_kept_spurious_fail():
+    # same equation; claimed keeps the spurious root x=2 (漏剔增根) -> fail
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "x**2/(x-2)=4/(x-2)",
+        "unknowns": ["x"],
+        "claimed": ["-2", "2"],
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_rational_roots_denominator_zero_root_fail():
+    # 5/(x-2)=(x+3)/(x-2): only candidate x=2 zeroes the denominator -> no valid
+    # root at all; claiming x=2 (a分母为0的根) -> fail
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "5/(x-2)=(x+3)/(x-2)",
+        "unknowns": ["x"],
+        "claimed": ["2"],
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_rational_roots_missing_valid_root_fail():
+    # valid root is 3/2 but claimed set is empty -> misses -> fail
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "1/(x-1)=2",
+        "unknowns": ["x"],
+        "claimed": [],
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_rational_roots_unknown_singular_key_pass():
+    # accepts the singular 'unknown' alias as well as 'unknowns'
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "1/(x-1)=2",
+        "unknown": "x",
+        "claimed": ["3/2"],
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_rational_roots_nl_garbage_degrades():
+    # natural-language equation -> degrade, never raise
+    res = _v({
+        "kind": "rational_roots",
+        "equation": "求三角形ABC的面积",
+        "unknowns": ["x"],
+        "claimed": ["2"],
+    })
+    assert res["verdict"] == "degrade"
+
+
+# ---------------------------------------------------------------------------
+# PRD-C-013 4b (3): 应用题建模验算 — REUSES equation_solve, NO new function.
+# These prove that a 4a application-problem payload (modelled equation +
+# reported answer) verifies through the existing equation_solve path: the
+# equation's root must equal the申报答案. correct answer -> pass, wrong -> fail.
+# ---------------------------------------------------------------------------
+
+def test_word_problem_travel_pass():
+    # 行程: speed*time = distance, 60*t = 180 -> t = 3 hours
+    res = _v({
+        "kind": "equation_solve",
+        "equations": ["60*t = 180"],
+        "unknowns": ["t"],
+        "claimed": ["3"],
+    })
+    assert res["verdict"] == "pass"
+    assert res["computed"] == "[3]"
+
+
+def test_word_problem_work_rate_pass():
+    # 工程: 1/a + 1/15 = 1/6 (combined rate) -> a = 10 days
+    res = _v({
+        "kind": "equation_solve",
+        "equations": ["1/a + 1/15 = 1/6"],
+        "unknowns": ["a"],
+        "claimed": ["10"],
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_word_problem_concentration_pass():
+    # 浓度: 0.2*x + 0.5*(10-x) = 3 -> x = 20/3 (claimed as fraction, equiv to float)
+    res = _v({
+        "kind": "equation_solve",
+        "equations": ["0.2*x + 0.5*(10-x) = 3"],
+        "unknowns": ["x"],
+        "claimed": ["20/3"],
+    })
+    assert res["verdict"] == "pass"
+
+
+def test_word_problem_wrong_answer_fail():
+    # 行程 model is right but the reported answer is wrong -> fail (catches a
+    # correct equation paired with a miscomputed final number)
+    res = _v({
+        "kind": "equation_solve",
+        "equations": ["60*t = 180"],
+        "unknowns": ["t"],
+        "claimed": ["4"],
+    })
+    assert res["verdict"] == "fail"
+
+
+def test_word_problem_price_discount_pass():
+    # 销售: original price x, 20% off then -5 = 75 -> 0.8*x - 5 = 75 -> x = 100
+    res = _v({
+        "kind": "equation_solve",
+        "equations": ["0.8*x - 5 = 75"],
+        "unknowns": ["x"],
+        "claimed": ["100"],
+    })
+    assert res["verdict"] == "pass"

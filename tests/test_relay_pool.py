@@ -77,3 +77,27 @@ def test_multi_relay_open_main_is_skipped(monkeypatch):
     resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
     assert calls == ["backup"]  # open main skipped (breaker semantics intact with a backup)
     assert name == "backup" and model == "m-backup" and fallback == 1
+
+
+def test_per_call_model_override_swaps_model_only(monkeypatch):
+    """S1.1: per-call model 覆盖只换 model 字段，站点不变；relay_model 归因到覆盖模型；
+    走 _chat_override（不动整站 _chat 缓存）。model=None 时行为完全不变（旧测已覆盖）。"""
+    relay = Relay(name="main", base_url="http://x", api_key="k", model="m-main")
+    monkeypatch.setattr(rp, "_relays", lambda: [relay])
+    seen = []
+
+    def chat_override(r, m):
+        seen.append((r.name, r.base_url, m))
+        return _FakeChat("RESP")
+
+    # 若误走整站 _chat（不该），让它炸出来
+    monkeypatch.setattr(rp, "_chat", lambda r: (_ for _ in ()).throw(AssertionError("should use override")))
+    monkeypatch.setattr(rp, "_chat_override", chat_override)
+    rp._breakers.clear()
+
+    resp, name, model, fallback = asyncio.run(
+        ainvoke_failover([], max_tokens=10, model="gpt-5-nano")
+    )
+    assert resp == "RESP" and name == "main" and fallback == 0
+    assert model == "gpt-5-nano"  # 归因到覆盖模型，不再是 relay.model
+    assert seen == [("main", "http://x", "gpt-5-nano")]  # 站点不变，只换 model

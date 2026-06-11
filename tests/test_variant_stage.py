@@ -256,10 +256,11 @@ def test_gene_gate_emits_per_item_running_warn_on_rework_then_done(monkeypatch):
     state = dict(_FACTS_STATE, items=[{"stem": "v1"}, {"stem": "v2"}])
     out = asyncio.run(gene_gate(state, {}))
     assert all(it["gene"]["gate"] == "warn" for it in out["items"])
+    # P14 叙事修正（RC3）：per-item running 去掉误导性「/总数」→「第 N 题比对中」
     assert calls == [
-        ("gene_gate", "平行度比对", "running", "第 1/2 道"),
+        ("gene_gate", "平行度比对", "running", "第 1 题比对中"),
         ("gene_gate", "平行度比对", "warn", "第 1 道回炉重生中"),
-        ("gene_gate", "平行度比对", "running", "第 2/2 道"),
+        ("gene_gate", "平行度比对", "running", "第 2 题比对中"),
         ("gene_gate", "平行度比对", "warn", "第 2 道回炉重生中"),
         ("gene_gate", "平行度比对", "done", None),
     ]
@@ -283,9 +284,10 @@ def test_solve_explain_emits_per_item_progress_then_done(monkeypatch):
     state = dict(_FACTS_STATE, items=items)
     out = asyncio.run(solve_explain(state, {}))
     assert all(it["check"]["badge"] == "ok" for it in out["items"])
+    # P14 叙事修正（RC3）：per-item running 去掉误导性「/总数」→「第 N 题验算中」
     assert calls == [
-        ("verify", "程序验算", "running", "第 1/2 道"),
-        ("verify", "程序验算", "running", "第 2/2 道"),
+        ("verify", "程序验算", "running", "第 1 题验算中"),
+        ("verify", "程序验算", "running", "第 2 题验算中"),
         ("verify", "程序验算", "done", None),
     ]
 
@@ -366,6 +368,13 @@ def _capture_frames(monkeypatch):
     """Monkeypatch get_stream_writer with a capturer; returns the frame list."""
     captured: list = []
     monkeypatch.setattr(variant_mod, "get_stream_writer", lambda: captured.append)
+
+    # assemble 现会先跑 P8 难度总评（一次 nano LLM call）；artifact 契约测试不关心难度，
+    # 桩成 identity 让 assemble 纯离线、difficulty 断言稳定（难度总评行为另有专测）。
+    async def _identity_grade(items):
+        return items
+
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", _identity_grade)
     return captured
 
 
@@ -408,6 +417,7 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
     # items[0] 契约字段齐 + verify/gene 透传
     assert art["items"][0] == {
         "index": 1,
+        "seq": 1,  # P2b 稳定 merge 键：定稿帧 seq=index（无 _seq → 回退 i+1）
         "stem": "解方程 2x+1=5",
         "answer": "x=2",
         "solution": "移项得 2x=4，x=2",
@@ -444,6 +454,7 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
     art = _artifact_frames(captured)[0]
     assert art["items"][0] == {
         "index": 1,
+        "seq": 1,  # P2b：无 _seq → 回退 index
         "stem": "裸题",
         "answer": "",
         "solution": "",
@@ -514,6 +525,11 @@ def test_assemble_survives_raising_writer(monkeypatch):
         raise RuntimeError("transport down")
 
     monkeypatch.setattr(variant_mod, "get_stream_writer", lambda: boom)
+
+    async def _identity_grade(items):
+        return items
+
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", _identity_grade)
     state = dict(_FACTS_STATE, items=[dict(_RICH_ITEM)])
     out = asyncio.run(variant_mod.assemble(state, {}))
     assert "举一反三" in out["messages"][0].content
