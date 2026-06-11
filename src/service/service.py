@@ -477,6 +477,114 @@ async def variant_artifact(input: ChatHistoryInput) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
+# ---------------------------------------------------------------------------
+# 题组编辑器三端点（PRD-C-009 二期）：reorder / edit-item / reverify。
+# 同 /variant/persist 直连范式：aget_state → 调 variant.py 纯逻辑 → aupdate_state(as_node)
+# → 返回 {ok, artifact:<_artifact_payload>}。题组是 toolkit 会话状态、编辑不落库 →
+# 无需 ruoyi_token（"全部入库"仍走 /variant/persist 带 token 那条）。FE 刷新走 /variant/artifact 重建。
+# ---------------------------------------------------------------------------
+class VariantReorderInput(BaseModel):
+    """题组重排请求：order = 1-based 全排列（长度=当前题数，每号恰一次）。"""
+
+    thread_id: str
+    order: list[int]
+
+
+class VariantEditItemInput(BaseModel):
+    """单题手动编辑请求：index=1-based；只 patch 传入字段（None=不动）。"""
+
+    thread_id: str
+    index: int
+    stem: str | None = None
+    answer: str | None = None
+    solution: str | None = None
+
+
+class VariantReverifyInput(BaseModel):
+    """单题重跑闸B 请求：index=1-based。"""
+
+    thread_id: str
+    index: int
+
+
+async def _variant_apply(thread_id: str, fn) -> dict[str, Any]:
+    """题组编辑器三端点共用：取 state → fn(state) 算 update + 错误 → 回写 → 组帧返回。
+
+    fn(values) 同步/异步均可，返回 (update, error)：error 非空 → 400；否则
+    aupdate_state(as_node='__editor__') 回写 checkpointer → 返回最新 _artifact_payload。
+    """
+    from agents.variant import _artifact_payload
+
+    agent: AgentGraph = get_agent("variant")
+    cfg = RunnableConfig(configurable={"thread_id": thread_id})
+    try:
+        snapshot = await agent.aget_state(config=cfg)
+        values: dict[str, Any] = snapshot.values or {}
+        result = fn(values)
+        if inspect.isawaitable(result):
+            result = await result
+        update, error = result
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        # 回写 checkpointer（as_node 任取一个图内节点名：编辑只覆盖 items/manual_order，
+        # 后续轮 assemble/persist 读到的就是编辑后的题组；不触发图继续跑）
+        await agent.aupdate_state(cfg, update, as_node="exec_reorder")
+        merged = {**values, **update}
+        return {"ok": True, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"_variant_apply error: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error")
+
+
+@router.post("/variant/reorder")
+async def variant_reorder(input: VariantReorderInput) -> dict[str, Any]:
+    """题组重排（零 LLM）：按 1-based 全排列 order 纯代码挪槽位 + seq 重编。
+
+    非法 order（给不全/重复/越界）→ 400。簿记字段（check/gene/persisted/_seq）随题搬位、
+    不错位（与 graph 节点 exec_reorder 共用 _reorder_items 纯函数）。
+    """
+    from agents.variant import reorder_items_state
+
+    return await _variant_apply(
+        input.thread_id, lambda values: reorder_items_state(values, input.order)
+    )
+
+
+@router.post("/variant/edit-item")
+async def variant_edit_item(input: VariantEditItemInput) -> dict[str, Any]:
+    """单题手动编辑（零 LLM）：只 patch 传入字段 → 净化富文本 → 标手动编辑 + check 置 manual。
+
+    index 越界 → 400。manual_edited/from_edit 内部键不入库（白名单挡）；artifact 透传 tier='manual'。
+    """
+    from agents.variant import edit_item_state
+
+    def _fn(values):
+        update, _item, error = edit_item_state(
+            values, input.index, stem=input.stem, answer=input.answer, solution=input.solution
+        )
+        return update, error
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
+@router.post("/variant/reverify")
+async def variant_reverify(input: VariantReverifyInput) -> dict[str, Any]:
+    """单题重跑闸B（on-demand，单题 LLM+sympy）：复用 _check_one_item 判决路径，更新该题徽章。
+
+    index 越界 → 400。判决仍只读 sympy verdict（铁律不破）；跑完 tier 变真实验算结果，
+    洗掉 manual 的"待验算"语义。
+    """
+    from agents.variant import reverify_item_state
+
+    async def _fn(values):
+        update, _item, error = await reverify_item_state(values, input.index)
+        return update, error
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

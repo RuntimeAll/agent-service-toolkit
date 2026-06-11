@@ -133,6 +133,7 @@ TIER_SELF_OK = "self_ok"  # 轻正面：程序不可验，LLM 独立复算一致
 TIER_PROOF = "proof"  # 中性：证明/开放类转人审
 TIER_SILENT = "silent"  # 沉默：单闸存疑（不说坏）
 TIER_BOTH_LOW = "both_low"  # ⚠：双闸皆存疑
+TIER_MANUAL = "manual"  # 中性：老师手动编辑、验算待重跑（题组编辑器 /variant/edit-item）
 
 # ---------------------------------------------------------------------------
 # 闸A·基因闸（验"是不是平行题"，与闸B"答案对不对"正交。依据 12-题目DNA方法论 §2/§5）：
@@ -3203,6 +3204,27 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
 
 
 # --- 编辑·reorder（P9·PRD-C-013）：纯代码 list 重排 + seq 重编，零 LLM 改题 -----------
+def _is_full_permutation(order: Any, n: int) -> bool:
+    """order 是否为 1..n 的全排列（长度=n、每号恰一次、无越界/重复/缺失）。"""
+    return (
+        isinstance(order, list)
+        and len(order) == n
+        and sorted(int(x) for x in order if isinstance(x, int))  # 全 int 才纳入
+        == list(range(1, n + 1))
+        and all(isinstance(x, int) for x in order)
+    )
+
+
+def _reorder_items(items: list[dict[str, Any]], order: list[int]) -> list[dict[str, Any]]:
+    """🔴 纯重排（零 LLM / 零改题）：按 1-based 全排列 order 挪槽位，整 item 对象跟着走。
+
+    exec_reorder（graph 节点）与 /variant/reorder（端点）共用的单一事实源：check/gene/
+    persisted/_seq 等簿记字段随 item 整体搬位、绝不错位。调用方须先用 _is_full_permutation
+    校验 order 合法（本函数假定 order 已是 1..len(items) 全排列，不再二次防御）。
+    """
+    return [items[i - 1] for i in order]
+
+
 async def exec_reorder(state: VariantState, config: RunnableConfig) -> VariantState:
     """🔴 指令排序（P9）：按 order（1-based 全排列，护栏已保证合法）纯代码重排 items。
 
@@ -3220,7 +3242,7 @@ async def exec_reorder(state: VariantState, config: RunnableConfig) -> VariantSt
             order = op["order"]
             break
     # 护栏兜底：order 非全排列（validate_instruction 应已拦，此处纯防御）→ 原序不动
-    if not order or sorted(order) != list(range(1, len(items) + 1)):
+    if not order or not _is_full_permutation(order, len(items)):
         _emit_artifact({**state, "items": items})
         return {
             "items": items,
@@ -3229,7 +3251,7 @@ async def exec_reorder(state: VariantState, config: RunnableConfig) -> VariantSt
             "llm_call_budget": budget,
             "messages": [AIMessage(content="我没拿准你要的新次序（请给出覆盖全部题的完整顺序），这次先没调整。")],
         }
-    reordered = [items[i - 1] for i in order]  # 1-based → 0-based 取位
+    reordered = _reorder_items(items, order)  # 1-based → 0-based 取位（公共纯函数）
     _emit_artifact({**state, "items": reordered})  # 整帧重发（seq 按新序现编）
     return {
         "items": reordered,
@@ -3394,6 +3416,84 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     lines.append("\n可回平台「我的题库」找题、组卷、导出 PDF。")
     update["messages"] = [AIMessage(content="\n".join(lines))]
     return update
+
+
+# ---------------------------------------------------------------------------
+# 题组编辑器直连动作（PRD-C-009 二期）：reorder / edit-item / reverify。
+# 与 /variant/persist 同范式——确定性/单题动作不过 LLM 意图分类器，service 端点按
+# thread_id 取 state → 调下面纯逻辑函数 → aupdate_state 回写 → 返回 _artifact_payload。
+# 业务逻辑收在 variant.py（单一事实源），service.py 只做取/写/组帧的薄壳。
+# ---------------------------------------------------------------------------
+def reorder_items_state(state: VariantState, order: list[int]) -> tuple[VariantState, str | None]:
+    """题组重排（零 LLM）：order=1-based 全排列 → _reorder_items 纯重排 + manual_order sticky。
+
+    返回 (update, error)：order 非全排列 → (空 update, 错误串) 让端点回 400；合法 →
+    (含 items/manual_order 的 update, None)。簿记字段（check/gene/persisted/_seq）随题搬位。
+    与 exec_reorder 共用 _reorder_items / _is_full_permutation，重排语义零分叉。
+    """
+    items = list(state.get("items") or [])
+    if not _is_full_permutation(order, len(items)):
+        return {}, f"order 必须是 1..{len(items)} 的全排列（每号恰一次，长度={len(items)}）"
+    reordered = _reorder_items(items, order)
+    return {"items": reordered, "manual_order": True}, None
+
+
+def edit_item_state(
+    state: VariantState,
+    index: int,
+    stem: str | None = None,
+    answer: str | None = None,
+    solution: str | None = None,
+) -> tuple[VariantState, dict[str, Any] | None, str | None]:
+    """单题手动编辑（零 LLM）：只 patch 传入字段（其余不动）→ 净化富文本 → 标手动编辑。
+
+    返回 (update, edited_item, error)：index 越界 → (空, None, 错误串) 让端点回 400。
+    - 标记：manual_edited=True + from_edit=True（复用"老师意志优先"语义，下游 reverify/入库
+      闸B 见 from_edit 不回炉换题）；这俩内部键不入库（build_create_bo/_artifact_payload 白名单挡）。
+    - check 置中性 {'tier':'manual'}：清掉旧 verify/badge 误导，artifact 透传 tier='manual' 给 FE。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
+    new_items = [dict(it) for it in items]
+    it = new_items[index - 1]
+    if stem is not None:
+        it["stem"] = _sanitize_rich_text(stem)
+    if answer is not None:
+        it["answer"] = _sanitize_rich_text(answer)
+    if solution is not None:
+        it["solution"] = _sanitize_rich_text(solution)
+    it["manual_edited"] = True
+    it["from_edit"] = True
+    # check 置中性：手动编辑、验算待重跑（清旧 verify/badge/tier，避免徽章误导）
+    it["check"] = {"tier": TIER_MANUAL}
+    return {"items": new_items}, it, None
+
+
+async def reverify_item_state(
+    state: VariantState, index: int
+) -> tuple[VariantState, dict[str, Any] | None, str | None]:
+    """单题重跑闸B（on-demand，单题 LLM+sympy）：清旧 check → _check_one_item 同款判决路径。
+
+    返回 (update, rechecked_item, error)：index 越界 → (空, None, 错误串) 让端点回 400。
+    复用 solve_explain 节点对单题的同一函数 _check_one_item（_solve_one + _machine_verify →
+    check{badge,solved_answer,verify,tier}），判决仍只读 sympy verdict（铁律不破）。跑完
+    tier 变成真实验算结果（verified/self_ok/both_low/silent 按 4d 矩阵），洗掉 manual 的"待验算"。
+    剔除（sympy 证实标答错且重生失败）情形：from_edit 题不剔除（_check_one_item 保留打 ⚠），
+    故此处 rechecked 必非 None；万一仍 None 兜底保留原题不丢（G5）。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
+    facts = _mother_facts(state)
+    new_items = [dict(it) for it in items]
+    target = dict(new_items[index - 1])
+    target.pop("check", None)  # 清旧 check → _check_one_item 重判（否则带 check 会原样跳过）
+    target["from_edit"] = True  # 编辑后重验：保留老师意志（FAIL 不回炉换题，打 ⚠ 交人审）
+    rechecked, _dropped = await _check_one_item(target, facts, index - 1, len(items))
+    # from_edit 短路保证 rechecked 非 None；兜底（极端降级）保留原题不丢
+    new_items[index - 1] = rechecked if rechecked is not None else new_items[index - 1]
+    return {"items": new_items}, new_items[index - 1], None
 
 
 # --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------
