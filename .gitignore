@@ -191,3 +191,9 @@ cython_debug/
 # Private Credentials, ignore everything in the folder but the .gitkeep file
 privatecredentials/*
 !privatecredentials/.gitkeep
+
+# C线运行时产物（审计/基准回放输出，不入库）
+data/agent.db-shm
+data/agent.db-wal
+data/llm_trace.jsonl
+tools/c018_result.json
