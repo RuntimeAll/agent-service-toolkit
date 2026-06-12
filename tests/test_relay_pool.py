@@ -96,8 +96,8 @@ def test_per_call_model_override_swaps_model_only(monkeypatch):
     rp._breakers.clear()
 
     resp, name, model, fallback = asyncio.run(
-        ainvoke_failover([], max_tokens=10, model="gpt-5-nano")
+        ainvoke_failover([], max_tokens=10, model="gpt-5.4-nano")
     )
     assert resp == "RESP" and name == "main" and fallback == 0
-    assert model == "gpt-5-nano"  # 归因到覆盖模型，不再是 relay.model
-    assert seen == [("main", "http://x", "gpt-5-nano")]  # 站点不变，只换 model
+    assert model == "gpt-5.4-nano"  # 归因到覆盖模型，不再是 relay.model
+    assert seen == [("main", "http://x", "gpt-5.4-nano")]  # 站点不变，只换 model

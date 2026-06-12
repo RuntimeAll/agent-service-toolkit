@@ -180,7 +180,7 @@ class Settings(BaseSettings):
     RELAY_NAME: str = "lk888"  # 单中转站时的展示名（也是 conv_trace.relay 列默认值）
     # 轻活模型（S1.1）：难度总评等无识图、可降本的调用点经 per-call model 覆盖走它；
     # 留空 → 各调用点退回默认（relay 配置 model），行为不变。
-    LLM_MODEL_LIGHT: str = "gpt-5-nano"
+    LLM_MODEL_LIGHT: str = "gpt-5.4-nano"
 
     # === 按环节分档模型路由（PRD-C-009 变式·2026-06-12）===
     # 举一反三管线按「环节」分档配模型：前置抽取环节降本（nano），深度思考档（gpt-5.4）只留
@@ -308,11 +308,18 @@ class Settings(BaseSettings):
         - 返回 None → 沿用 relay 配置 model（= COMPATIBLE_MODEL，深度思考档），旧行为。
 
         缺省（对应 VARIANT_MODEL_* 为 None）即「回退现行为」：
-        - analyze   → None（多模态读图保深度档 gpt-5.4；nano 视觉实测 2/3 空返、1/3 站点 404，不可降）
+        - analyze   → None（多模态读图回退深度档；🔴 2026-06-13 A/B 实测：真名 gpt-5.4-nano
+                      读图 3/3 准、parsed_ok=true（25-37s），可降——经 .env VARIANT_MODEL_ANALYZE
+                      显式切 nano；deepseek-v4-flash 读图会幻觉年级（confidence 0.9 却错档），禁用于读图）
         - dna       → LLM_MODEL_LIGHT（锚定/标签是池内选 id 的分类活，本就走 nano）
-        - solve     → None（闸B 独立重解+载荷抽取，nano-vs-5.4 对照一致率 66.7%<90% 且 nano
-                      多 1 个 degrade（分式方程），不达标 → 保深度档；数据见 tools/solve_model_ab.out）
-        - generate  → None（出题/回炉/补题/重写，红线不降档，保 COMPATIBLE_MODEL）
+        - solve     → None（闸B 独立重解+载荷抽取回退深度档；🔴 2026-06-13 A/B 实测：真名
+                      gpt-5.4-nano vs gpt-5.4 sympy 判决一致率 3/3=100%、degrade 0/3、同速 9.4s/题
+                      → 达标，经 .env VARIANT_MODEL_SOLVE 显式切 nano）
+        - generate  → None（出题/回炉/补题/重写，红线不降档，保 COMPATIBLE_MODEL=gpt-5.4）
+
+        🔴 昨晚（2026-06-12）误评根因：旧默认名 gpt-5-nano 属 gpt-5 老系、中转站 not found/空返，
+           非 nano 能力问题。真名 gpt-5.4-nano 两站点皆挂。证据=tools/model_ab_nano_vs_deepseek 产物
+           （model_ab_vision_nano.out / model_ab_solve_nano.out / model_ab_models_inventory.out）。
         """
         override = {
             "analyze": self.VARIANT_MODEL_ANALYZE,

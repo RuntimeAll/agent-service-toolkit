@@ -3332,7 +3332,7 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
             "- 禁止输出任何编辑类 ops（无题可编），禁止判「确认/答疑」。"
         )
     # 🔴 P12.4（PRD-C-013）：parse 是受约束分类器（5 意图闭集 + 物理护栏兜底），nano 足够 →
-    # 走 LLM_MODEL_LIGHT(gpt-5-nano) 降本；语义不动，c017 探针把关。闸A judge 不在本阶段切 nano。
+    # 走 LLM_MODEL_LIGHT(gpt-5.4-nano) 降本；语义不动，c017 探针把关。闸A judge 不在本阶段切 nano。
     text = await _ainvoke_text(
         [HumanMessage(content=prompt)], model=settings.LLM_MODEL_LIGHT
     )

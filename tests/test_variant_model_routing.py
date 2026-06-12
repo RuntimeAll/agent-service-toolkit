@@ -24,17 +24,29 @@ from core.settings import settings
 # ---------------------------------------------------------------------------
 # settings.variant_model() 回退链 + 覆盖
 # ---------------------------------------------------------------------------
-def test_variant_model_defaults_match_current_behavior():
-    """缺省（VARIANT_MODEL_* 均 None）= 现行为：analyze/solve/generate 走深度档(None→relay model)，
-    dna 走 LLM_MODEL_LIGHT(nano)。solve 默认深度档：nano-vs-5.4 对照一致率 66.7%<90% 不达标，不降。"""
-    assert settings.VARIANT_MODEL_ANALYZE is None
-    assert settings.VARIANT_MODEL_DNA is None
-    assert settings.VARIANT_MODEL_SOLVE is None
-    assert settings.VARIANT_MODEL_GENERATE is None
+def test_variant_model_fallback_chain_when_unset(monkeypatch):
+    """代码回退链（VARIANT_MODEL_* 均未配 → None）= 现行为：analyze/solve/generate 走深度档
+    (None→relay model)，dna 走 LLM_MODEL_LIGHT(nano)。验回退逻辑本身，与 .env 实配解耦。
+
+    🔴 2026-06-13 A/B 实测后维护者拍板：analyze/dna/solve 经 .env 显式切 gpt-5.4-nano
+    （读图 3/3 准、solve 判决 3/3=100% 一致），故 .env 实配下三者非 None；本测用 monkeypatch
+    把字段清回 None，单测回退分支。generate 红线永不降档（默认 None=COMPATIBLE_MODEL）。"""
+    for f in ("VARIANT_MODEL_ANALYZE", "VARIANT_MODEL_DNA", "VARIANT_MODEL_SOLVE", "VARIANT_MODEL_GENERATE"):
+        monkeypatch.setattr(settings, f, None)
     assert settings.variant_model("analyze") is None
     assert settings.variant_model("generate") is None
     assert settings.variant_model("solve") is None
     assert settings.variant_model("dna") == settings.LLM_MODEL_LIGHT
+
+
+def test_variant_model_env_config_routes_prefrontal_to_nano():
+    """.env 实配（维护者拍板 2026-06-13）：前置 analyze/dna/solve 全走 gpt-5.4-nano；
+    generate 留空 → 回退 COMPATIBLE_MODEL（深度档，红线不降）。"""
+    assert settings.variant_model("analyze") == "gpt-5.4-nano"
+    assert settings.variant_model("dna") == "gpt-5.4-nano"
+    assert settings.variant_model("solve") == "gpt-5.4-nano"
+    # generate 显式留空（.env VARIANT_MODEL_GENERATE=）→ None → relay 配置 model（COMPATIBLE_MODEL）
+    assert settings.variant_model("generate") is None
 
 
 def test_variant_model_env_override_wins(monkeypatch):
