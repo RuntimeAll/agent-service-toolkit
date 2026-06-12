@@ -1,0 +1,18 @@
+=== 两站点相关型号清单（GET /models 实拉，2026-06-13）===
+中转池：aigeek 主（https://www.aigeek.life/v1，438 模型）/ lk888 备（https://api.lk888.ai/api/v1，40 模型）
+
+--- nano/mini 系（gpt-5.4）---
+gpt-5.4-nano            : aigeek, lk888   ← 本次评测用真名（昨晚误用 gpt-5-nano）
+gpt-5.4-nano-2026-03-17 : aigeek
+gpt-5.4-mini            : aigeek, lk888
+gpt-5.4-mini-2026-03-17 : aigeek
+（旧名 gpt-5-nano 仍挂在 aigeek，但属 gpt-5 老系，非 5.4 系 → settings.py:183 旧名落后）
+
+--- deepseek v4 系 ---
+deepseek-v4-flash : aigeek, lk888   ← 本次评测用名
+deepseek-v4-pro   : aigeek, lk888
+deepseek-v3.2     : aigeek, lk888
+deepseek-chat / deepseek-r1* / deepseek-v3* : 仅 aigeek（lk888 不挂）
+
+结论：gpt-5.4-nano、gpt-5.4-mini、deepseek-v4-flash、deepseek-v4-pro 四者两站皆挂，
+熔断主备（aigeek→lk888）对这几个型号均可用，无单站缺挂风险。
