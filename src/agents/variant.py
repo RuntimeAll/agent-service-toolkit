@@ -899,7 +899,12 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
     if not emitted.get("done"):  # 大调用先于 10s 完成 → 首灯由真实完成翻绿（min 语义）
         emitted["done"] = True
         _emit_stage("classify", "锚定考点", "done")
-    data = _parse_json(text) or {}
+    # 🔴 防御（2026-06-13 冒烟实测）：思考型/nano 偶发返回 JSON 数组而非对象 → _parse_json
+    #   出 list，旧 `or {}` 不挡（非空 list 为真）→ data.get 抛 AttributeError 炸整轮。非 dict
+    #   一律降级空 dict 走「未识别」兜底（G5 不卡死），不让一次模型抽风炸掉 analyze 节点。
+    data = _parse_json(text)
+    if not isinstance(data, dict):
+        data = {}
 
     if data.get("is_question_image") is False:
         _emit_stage("knobs", "解析配方", "warn", "未识别为题目图")
