@@ -724,6 +724,100 @@ def test_analyze_same_url_repaste_preserves_knobs(monkeypatch):
     assert out["knobs"] == {"count": 5, "difficulty_plan": PLAN_INCREASING}
 
 
+# ---------------------------------------------------------------------------
+# 改动1（PRD-C-009 整改）：配方 knobs 并入读图（analyze）同一次调用，省独立 _extract_knobs
+# 串行往返。合并调用产出 knobs 段 → 直接采信；缺/非 dict → 兜底走原 _extract_knobs（降级）。
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_merged_knobs_from_single_call_no_separate_extraction(monkeypatch):
+    """合并调用同出 analysis + knobs → 不再发独立 _extract_knobs 往返（核心提速点）。"""
+    extract_called = []
+
+    async def fake_llm(messages, retry=True, **kwargs):
+        # 母题分析 + knobs 段一次返回（老师附带「出3道，难度递增」）
+        return json.dumps(
+            {
+                "is_question_image": True,
+                "grade": {"value": "七年级上学期", "confidence": 0.9},
+                "kp": {"value": "一元一次方程", "confidence": 0.8},
+                "qtype": {"value": "解答", "confidence": 0.9},
+                "stem": "题干", "answer": "x=1", "difficulty": 3,
+                "knobs": {"count": 3, "difficulty_plan": "递增", "qtype_dist": None, "note": ""},
+            },
+            ensure_ascii=False,
+        )
+
+    async def fake_extract(state):
+        extract_called.append(1)
+        return {"count": 99}  # 若被调到（不该）→ count 会变 99，断言会抓
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    monkeypatch.setattr(variant_mod, "_extract_knobs", fake_extract)
+    state = {"messages": [HumanMessage(content="https://oss/q.png 出3道，难度递增")]}
+    out = asyncio.run(analyze(state, {}))
+    assert extract_called == []  # 🔴 合并产出 knobs → 零独立抽取往返
+    assert out["knobs"] == {"count": 3, "difficulty_plan": PLAN_INCREASING}
+
+
+def test_analyze_merged_knobs_missing_falls_back_to_extract(monkeypatch):
+    """合并调用没给 knobs 段（老模型/解析丢字段）+ 老师有要求 → 兜底走一次 _extract_knobs，不挂死。"""
+    extract_called = []
+
+    async def fake_llm(messages, retry=True, **kwargs):
+        return json.dumps(  # 故意不含 knobs 键
+            {
+                "is_question_image": True,
+                "grade": {"value": "七年级上学期", "confidence": 0.9},
+                "kp": {"value": "一元一次方程", "confidence": 0.8},
+                "qtype": {"value": "解答", "confidence": 0.9},
+                "stem": "题干", "answer": "x=1", "difficulty": 3,
+            },
+            ensure_ascii=False,
+        )
+
+    async def fake_extract(state):
+        extract_called.append(1)
+        return {"count": 4}
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    monkeypatch.setattr(variant_mod, "_extract_knobs", fake_extract)
+    state = {"messages": [HumanMessage(content="https://oss/q.png 出4道")]}
+    out = asyncio.run(analyze(state, {}))
+    assert extract_called == [1]  # 🔴 缺 knobs 段 → 兜底独立抽取（降级路径）
+    assert out["knobs"] == {"count": 4}
+
+
+def test_analyze_merged_empty_knobs_is_trusted_no_fallback(monkeypatch):
+    """合并给了 dict 但全 null（老师没提）→ 归一成 {}，采信、不再兜底重抽（不浪费一次往返）。"""
+    extract_called = []
+
+    async def fake_llm(messages, retry=True, **kwargs):
+        return json.dumps(
+            {
+                "is_question_image": True,
+                "grade": {"value": "七年级上学期", "confidence": 0.9},
+                "kp": {"value": "一元一次方程", "confidence": 0.8},
+                "qtype": {"value": "解答", "confidence": 0.9},
+                "stem": "题干", "answer": "x=1", "difficulty": 3,
+                "knobs": {"count": None, "difficulty_plan": None, "qtype_dist": None, "note": ""},
+            },
+            ensure_ascii=False,
+        )
+
+    async def fake_extract(state):
+        extract_called.append(1)
+        return {"count": 9}
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    monkeypatch.setattr(variant_mod, "_extract_knobs", fake_extract)
+    # 老师附带了人话但无配方词 → 合并产出全 null knobs → 采信 {}，不兜底
+    state = {"messages": [HumanMessage(content="https://oss/q.png 这题挺好的")]}
+    out = asyncio.run(analyze(state, {}))
+    assert extract_called == []
+    assert out["knobs"] == {}
+
+
 def test_generate_re_extracts_after_analyze_reset(monkeypatch):
     """End-to-end of the leak fix: knobs reset to None (new mother) -> generate
     extracts fresh from the current human text."""

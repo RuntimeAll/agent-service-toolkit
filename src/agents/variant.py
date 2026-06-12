@@ -730,27 +730,63 @@ def route_entry(
 # 节点
 # ---------------------------------------------------------------------------
 ANALYZE_PROMPT = """你是浙教版初中数学命题专家。看这张题目图，**流式**输出母题分析。
+🔴 老师贴图时可能附带了出题要求（出几道、难度安排、题型配比等），如下：
+{utterance}
+（上面为空 = 老师没提要求，knobs 段一律 null/""，绝不脑补默认值。）
 
 只输出一个 JSON（不要解释），结构：
-{
+{{
   "is_question_image": true/false,   // 非题目图(风景/截图/空白)填 false
   "images_count": 1,                  // 检测到几张图
   "questions_in_image": 1,            // 这张图里有几道题
-  "grade": {"value": "七年级上学期", "confidence": 0.0~1.0},
+  "grade": {{"value": "七年级上学期", "confidence": 0.0~1.0}},
   "subject": "数学",
-  "kp": {"value": "核心考点粗描述(如:一元二次方程求根)", "confidence": 0.0~1.0},
-  "qtype": {"value": "选择/填空/解答", "confidence": 0.0~1.0},
+  "kp": {{"value": "核心考点粗描述(如:一元二次方程求根)", "confidence": 0.0~1.0}},
+  "qtype": {{"value": "选择/填空/解答", "confidence": 0.0~1.0}},
   "stem": "题干(Markdown+LaTeX)",
   "answer": "标准答案(图里没有就先解母题得出)",
   "difficulty": 1~5,
   "structure": "结构指纹/解法骨架简述",
-  "solution_skeleton": "解法骨架(步骤)"
-}
-🔴 无答案先解母题得答案/解法骨架(作 verify 基准)。各锚(年级/考点/题型)如实给 confidence。"""
+  "solution_skeleton": "解法骨架(步骤)",
+  "knobs": {{                          // 🔴 出题配方旋钮（受约束抽取：只抽老师上面明说的，没说一律 null/""）
+    "count": null,                     // 要出几道题(正整数 1~8)；没说填 null
+    "difficulty_plan": null,           // "increasing"=难度递增/越来越难/一道比一道难；没提填 null；其它难度要求填原话(如"都出难题")
+    "qtype_dist": null,                // 题型配比如 {{"选择":2,"填空":2,"解答":1}}；题型只能用 选择/填空/解答(应用题/计算题/证明题等都归"解答")；没说填 null
+    "note": ""                         // 其余装不进上面旋钮的自由要求原话(如"贴近生活场景")；没有填 ""
+  }}
+}}
+🔴 无答案先解母题得答案/解法骨架(作 verify 基准)。各锚(年级/考点/题型)如实给 confidence。
+🔴 knobs 段只抽老师上面明确说了的；老师没附要求或某旋钮没提 → 一律 null/""，绝不脑补。"""
+
+
+# 🔴 阶段灯·锚定考点首灯定时翻绿（PRD-C-009 整改·改动2）：合并读图+配方+锚定后，
+#   「锚定考点」这盏首灯背后是一次大调用（multimodal 读图 ~63s），没法真实分段。维护者拍板
+#   折中——首灯在 min(STAGE1_TIMER_S, 大调用真实完成) 时翻绿（cosmetic，用户已认可）。
+#   实现 = 一个 asyncio 定时任务与大调用 await 竞速：谁先到谁发 done，另一方被取消/跳过。
+#   定时任务在节点 active context 内 spawn（get_stream_writer contextvar 随 create_task 复制
+#   传播），且节点返回前必 join/cancel —— 不留游离 task。
+STAGE1_TIMER_S = 10.0
+
+
+async def _stage1_timer_done(emitted: dict) -> None:
+    """首灯（锚定考点）定时翻绿：睡 STAGE1_TIMER_S 后若大调用还没发过 done → 由定时发 done。
+    emitted 是与主协程共享的哨兵 {"done": bool}，保证「定时 / 真实完成」只翻绿一次（去重）。"""
+    try:
+        await asyncio.sleep(STAGE1_TIMER_S)
+    except asyncio.CancelledError:  # 大调用先完成 → 取消定时（真实完成路径）
+        return
+    if not emitted.get("done"):
+        emitted["done"] = True
+        _emit_stage("classify", "锚定考点", "running", "读图中…")
+        _emit_stage("classify", "锚定考点", "done")
 
 
 async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
-    """① 分析：multimodal 读图 → 年级/学科/粗考点/题型 + 题干/答案/难度/结构 + 几图几题 + 各锚置信。"""
+    """① 分析：multimodal 读图 → 年级/学科/粗考点/题型 + 题干/答案/难度/结构 + 几图几题 + 各锚置信
+    + 🔴 出题配方旋钮（改动1：knobs 并入读图同一次调用，省掉独立 _extract_knobs 串行往返）。
+
+    🔴 阶段灯（改动2）：首灯「锚定考点」在 min(10s 定时, 大调用真实完成) 翻绿（cosmetic）；
+       次灯「解析配方」由 classify 在锚定真实完成后发 done（带道数）。读图/配方/锚定共一灯首段。"""
     # 🔴 本轮消息里的 URL 优先（跨轮新图 = 新母题，必须分析新图）；无则沿用在途母题图。
     #   旧序（state 优先）会让同 thread 第二张图被静默忽略、永远重分析第一张。
     url = _extract_image_url(_latest_human_text(state.get("messages", []))) or state.get(
@@ -761,19 +797,36 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
             "messages": [AIMessage(content="请先贴一张题目图的 OSS URL，我才能开始举一反三。")]
         }
 
-    _emit_stage("analyze", "读图分析", "running")
-    # 🔴 多模态走 LangChain HumanMessage(content=[text, image_url]) → model.ainvoke
+    # 🔴 首灯（锚定考点）running + 次灯（解析配方）running：两灯先点亮，done 各自在后。
+    _emit_stage("classify", "锚定考点", "running", "读图中…")
+    _emit_stage("knobs", "解析配方", "running")
+    # 🔴 配方旋钮并入读图：把老师附带的人话填进 ANALYZE_PROMPT 的 {utterance} 段，一次调用同出
+    #   analysis + knobs（省一次 ~55s 纯 reasoning 的独立 _extract_knobs 往返）。
+    user_text = _strip_urls(_latest_human_text(state.get("messages", [])))
     msg = HumanMessage(
         content=[
-            {"type": "text", "text": ANALYZE_PROMPT},
+            {"type": "text", "text": ANALYZE_PROMPT.format(utterance=user_text or "（无）")},
             {"type": "image_url", "image_url": {"url": url}},
         ]
     )
-    text = await _ainvoke_text([msg])
+    # 首灯定时翻绿 vs 大调用真实完成竞速（共享 emitted 哨兵去重，只翻绿一次）
+    emitted = {"done": False}
+    timer = asyncio.create_task(_stage1_timer_done(emitted))
+    try:
+        text = await _ainvoke_text([msg])
+    finally:
+        timer.cancel()  # 大调用结束 → 取消定时（无论成功/异常都不留游离 task）
+        try:
+            await timer  # join 已取消的 task，吞 CancelledError，免「Task was destroyed」告警
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+    if not emitted.get("done"):  # 大调用先于 10s 完成 → 首灯由真实完成翻绿（min 语义）
+        emitted["done"] = True
+        _emit_stage("classify", "锚定考点", "done")
     data = _parse_json(text) or {}
 
     if data.get("is_question_image") is False:
-        _emit_stage("analyze", "读图分析", "warn", "未识别为题目图")
+        _emit_stage("knobs", "解析配方", "warn", "未识别为题目图")
         return {
             "image_url": url,
             "messages": [
@@ -794,14 +847,20 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
         "structure": data.get("structure"),
         "solution_skeleton": data.get("solution_skeleton"),
     }
-    _emit_stage("analyze", "读图分析", "done")
     # 🔴 旋钮跨母题防泄漏 + clarify 迂回防丢：
     #   - 本轮人话抽出新配方 → 覆盖旧配方（新母题新要求，跨轮第二张图的文字不再被丢）；
     #   - 没抽出新配方：同图重贴（clarify 迂回/澄清应答）→ 保留首轮已抽配方；
     #     新图 → 重置 {}（旧母题的「5道递增」绝不错套到新母题上）。
     # shape_defects 一并清零（上一母题的缺陷外显不带进新母题轮）。
-    user_text = _strip_urls(_latest_human_text(state.get("messages", [])))
-    new_knobs = await _extract_knobs(state) if user_text else {}
+    # 🔴 改动1·容错降级：合并调用产出的 knobs 段缺失/不是 dict → 兜底走一次原 _extract_knobs
+    #   （独立串行往返，但仅在合并没正常给出 knobs 段时才付这次代价，不让首轮挂死）。
+    #   合并给了 dict（含老师没提时全 null 归一成 {}）→ 直接采信，不再额外重抽。
+    if not user_text:
+        new_knobs = {}
+    elif isinstance(data.get("knobs"), dict):
+        new_knobs = normalize_knobs(data["knobs"])  # 合并正常产出（{} = 老师没提）→ 采信
+    else:
+        new_knobs = await _extract_knobs(state)  # 合并缺 knobs 段/非 dict → 兜底独立抽取
     if not new_knobs and url == state.get("image_url") and state.get("knobs") is not None:
         knobs = state.get("knobs")  # 同图重贴且本轮无新配方 → 保留
     else:
@@ -861,13 +920,16 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     except Exception as e:  # noqa: BLE001 — 池拉取故障 → 空池（不 silent-fail，转 clarify）
         analysis["_anchor_error"] = str(e)
 
-    _emit_stage("classify", "锚定考点", "running")
+    # 🔴 首灯「锚定考点」running 已由 analyze 点亮（且可能定时翻过绿）→ 此处不重发 running
+    #   防绿→running 回闪；只在锚定真实有结论时发终态 done/warn。
 
     if not leaf_pool:
         # 库/网络故障或年级池为空 → 锚定不可用 → 不抬置信 → clarify（既有降级路径）
         await client.aclose()
         analysis.setdefault("_anchor_error", "知识点叶子池不可用（库未起/年级未识别）")
         _emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
+        # 次灯「解析配方」：锚定不可用也要给个终态，免得灯永远停在 running
+        _emit_stage("knobs", "解析配方", "warn", "待老师确认母题后再定配方")
         return {"analysis": analysis, "mother_confirmed": False, "messages": []}
 
     # --- DNA 抽取（两步锚定第二步：LLM 池内选 id；禁造词由 dna_extract 校验闸把关） ---
@@ -935,6 +997,14 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         "锚定考点",
         "done" if confirmed else "warn",
         f"考点「{kp_name}」·年级「{grade_name}」",
+    )
+    # 🔴 次灯「解析配方」（改动2）：合并调用 + 锚定真实完成后发 done，带道数（knobs 已由
+    #   analyze 抽好随 state 来）。confirmed 才落定配方进 generate；未 confirmed 走 clarify，
+    #   配方虽已抽出但本轮不出题 → 给 warn 终态（不停在 running）。
+    knobs = state.get("knobs")
+    recipe = knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
+    _emit_stage(
+        "knobs", "解析配方", "done" if confirmed else "warn", recipe
     )
     return {
         "analysis": analysis,
@@ -1740,13 +1810,17 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     # 🔴 P13：出题轮入口重置预算（generate→gene_gate→solve_explain→assemble 同轮共享）。
     budget = _budget_bind(state, reset_limit=settings.VARIANT_BUDGET_GENERATE)
 
-    # 🔴 旋钮：新母题轮 analyze 已抽好随 state 来；库内母题直进 generate（不经 analyze）→ 此处兜底抽
+    # 🔴 旋钮：新母题轮 analyze 已抽好随 state 来；库内母题直进 generate（不经 analyze）→ 此处兜底抽。
+    #   🔴 改动2·阶段灯归属：图片首轮的「解析配方」灯由 classify 真实完成时发 done（带道数）——
+    #   此处仅当 knobs 为 None（= 库内母题路径，跳过 analyze/classify）时兜底抽 + 补发该灯，
+    #   不在图片路径重复发（防覆盖 classify 已发的终态）。
     knobs = state.get("knobs")
     if knobs is None:
         knobs = await _extract_knobs(state)
-    _emit_stage(
-        "knobs", "解析配方", "done", knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
-    )
+        _emit_stage(
+            "knobs", "解析配方", "done",
+            knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）",
+        )
 
     facts = _mother_facts(state)
     # 🔴 W2 守恒守门（T1）：母题 DNA 白名单为空集 → 不放行生成，降级回 clarify 语义（不裸出）。

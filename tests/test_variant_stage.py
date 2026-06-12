@@ -125,7 +125,10 @@ def test_node_survives_raising_writer_end_to_end(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_analyze_emits_running_then_done(monkeypatch):
+def test_analyze_emits_anchor_running_and_done_with_recipe_running(monkeypatch):
+    # 🔴 改动2（PRD-C-009）：合并读图+配方+锚定后，analyze 不再发「读图分析」灯，改为
+    #   点亮两盏灯 —— 首灯「锚定考点」running（读图中…）→ 大调用真实完成（先于 10s 定时）翻 done；
+    #   次灯「解析配方」running（done 由 classify 在锚定真实完成后补发，带道数）。
     calls = _record_stages(monkeypatch)
 
     async def fake_llm(messages, retry=True, **kwargs):
@@ -140,6 +143,7 @@ def test_analyze_emits_running_then_done(monkeypatch):
                 "stem": "题干",
                 "answer": "x=1",
                 "difficulty": 3,
+                "knobs": {"count": None, "difficulty_plan": None, "qtype_dist": None, "note": ""},
             },
             ensure_ascii=False,
         )
@@ -148,10 +152,44 @@ def test_analyze_emits_running_then_done(monkeypatch):
     state = {"messages": [HumanMessage(content="https://oss.example.com/q.png")]}
     out = asyncio.run(analyze(state, {}))
     assert out["mother_dna"]["stem"] == "题干"
+    # 大调用瞬时返回（先于 10s 定时）→ 首灯由真实完成翻绿（min 语义）；次灯停在 running 待 classify
     assert calls == [
-        ("analyze", "读图分析", "running", None),
-        ("analyze", "读图分析", "done", None),
+        ("classify", "锚定考点", "running", "读图中…"),
+        ("knobs", "解析配方", "running", None),
+        ("classify", "锚定考点", "done", None),
     ]
+
+
+def test_analyze_first_light_turns_green_by_timer_when_call_is_slow(monkeypatch):
+    # 🔴 改动2·竞速：大调用慢于定时 → 首灯「锚定考点」由定时翻绿（cosmetic），
+    #   不等大调用完成。把 STAGE1_TIMER_S 压到极小，让定时必先到。
+    calls = _record_stages(monkeypatch)
+    monkeypatch.setattr(variant_mod, "STAGE1_TIMER_S", 0.01)
+
+    async def slow_llm(messages, retry=True, **kwargs):
+        await asyncio.sleep(0.1)  # 慢于 0.01s 定时
+        return json.dumps(
+            {
+                "is_question_image": True,
+                "grade": {"value": "七年级上学期", "confidence": 0.9},
+                "kp": {"value": "一元一次方程", "confidence": 0.8},
+                "qtype": {"value": "解答", "confidence": 0.9},
+                "stem": "题干", "answer": "x=1", "difficulty": 3,
+                "knobs": {"count": None, "difficulty_plan": None, "qtype_dist": None, "note": ""},
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", slow_llm)
+    state = {"messages": [HumanMessage(content="https://oss/q.png")]}
+    asyncio.run(analyze(state, {}))
+    # 定时翻绿这盏在前两条 running 之后发出（running×2 → 定时 running「读图中…」+ done）；
+    # 大调用完成后因 emitted.done 已置位，不再二次发首灯 done（去重）。
+    done_idx = calls.index(("classify", "锚定考点", "done", None))
+    running_idx = [i for i, c in enumerate(calls) if c[:3] == ("classify", "锚定考点", "running")]
+    assert done_idx > max(running_idx)  # done 在所有 running 之后
+    # 全程「锚定考点 done」只发一次（定时 / 真实完成 二选一，emitted 哨兵去重）
+    assert sum(1 for c in calls if c == ("classify", "锚定考点", "done", None)) == 1
 
 
 def test_analyze_emits_warn_on_non_question_image(monkeypatch):
@@ -163,7 +201,8 @@ def test_analyze_emits_warn_on_non_question_image(monkeypatch):
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
     state = {"messages": [HumanMessage(content="https://oss.example.com/cat.png")]}
     asyncio.run(analyze(state, {}))
-    assert calls[-1] == ("analyze", "读图分析", "warn", "未识别为题目图")
+    # 非题目图：首灯仍翻绿（大调用完成），次灯「解析配方」给 warn 终态（不停 running）
+    assert calls[-1] == ("knobs", "解析配方", "warn", "未识别为题目图")
 
 
 def test_classify_emits_done_with_kp_and_grade(monkeypatch):
@@ -192,10 +231,11 @@ def test_classify_emits_done_with_kp_and_grade(monkeypatch):
     state = dict(_FACTS_STATE)
     out = asyncio.run(classify(state, {}))
     assert out["mother_confirmed"] is True
-    # B1: 先 running 后 done（两步锚定有 HTTP 阶段，先点亮 running）
+    # 🔴 改动2：首灯 running 已由 analyze 点亮 → classify 不重发 running（防绿→running 回闪），
+    #   只发首灯终态 done；并补发次灯「解析配方」done（带道数，knobs 缺 → 默认配方文案）。
     assert calls == [
-        ("classify", "锚定考点", "running", None),
         ("classify", "锚定考点", "done", "考点「一元一次方程」·年级「七年级上学期」"),
+        ("knobs", "解析配方", "done", "未指定，走默认配方（3 道 = 2 普通 + 1 难）"),
     ]
 
 
