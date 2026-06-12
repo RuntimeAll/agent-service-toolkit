@@ -42,6 +42,7 @@ from agents import conv_trace, dna_extract, math_verify
 from agents.qtype_format import format_by_qtype
 from agents.variant_support import (
     RuoyiClient,
+    _is_review_book,
     anchor_subject,
     leaf_pool_for_grade,
     persist_items,
@@ -520,6 +521,11 @@ _REVIEW_INTENT_RE = re.compile(r"中考|复习|专题|模考|一模|二模")
 def _wants_review_books(text: str | None) -> bool:
     """老师文本是否明确要复习/模考类题（决定复习册是否并入锚定池）。"""
     return bool(_REVIEW_INTENT_RE.search(str(text or "")))
+
+
+def _book_name_of(node_id: Any) -> str:
+    """叶子/年级 code → 所属册名（前 4 位映射；复用 dna_extract 单一映射，未知前缀 → 空串）。"""
+    return dna_extract._book_of(node_id)
 
 
 def _grade_to_code(grade_value: Any) -> str | None:
@@ -1038,29 +1044,100 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     }
 
 
+# ---------------------------------------------------------------------------
+# 🔴 「定死」硬闸（批2·2026-06-13）：缺锚必停确认，从机制上绝迹「未解析+未知年级进出题」。
+# 「定死」三件同时满足：
+#   ① 年级学期归一出 4 位教材册 code（grade.code 命中，非复习册前缀）；
+#   ② main_kp 锚到该册真叶子（kp.anchored.code 有值，in pool 且非复习册——classify 已校验）；
+#   ③ 置信达既有 CONF_GATE（_conf_ok 三锚通过）。
+# 任一缺 → 没定死 → 一律停 clarify/确认态（不进 generate）。
+# ---------------------------------------------------------------------------
+def _pin_status(state: VariantState) -> dict[str, Any]:
+    """盘点母题是否「定死」。返回 {pinned, grade_code, grade_text, kp_code, kp_name, kp_book,
+    reasons:[缺项]}（reasons 非空 = 没定死，每项 ∈ {grade, kp, confidence}）。"""
+    analysis = state.get("analysis") or {}
+    g = analysis.get("grade") or {}
+    k = analysis.get("kp") or {}
+    anchored = (k.get("anchored") or {}) if isinstance(k, dict) else {}
+    grade_code = str(g.get("code") or "").strip()
+    kp_code = str(anchored.get("code") or "").strip()
+
+    reasons: list[str] = []
+    # ① 年级 4 位教材册 code（复习册前缀不算定死的教材年级）
+    if not grade_code or _is_review_book(grade_code):
+        reasons.append("grade")
+    # ② main_kp 锚到真叶子（非复习册）
+    if not kp_code or _is_review_book(kp_code):
+        reasons.append("kp")
+    # ③ 三锚置信
+    if not _conf_ok(analysis):
+        reasons.append("confidence")
+
+    return {
+        "pinned": not reasons,
+        "grade_code": grade_code or None,
+        "grade_text": g.get("value"),
+        "kp_code": kp_code or None,
+        "kp_name": anchored.get("name") or k.get("value"),
+        "kp_book": _book_name_of(kp_code),
+        "reasons": reasons,
+    }
+
+
 def gate_after_classify(state: VariantState) -> Literal["generate", "clarify"]:
-    """🔴 DNA 闸：三锚高置信 或 已确认 → 造题；否则先 clarify。"""
-    if state.get("mother_confirmed"):
+    """🔴 定死闸（批2）：定死（年级册 code + main_kp 锚真叶子 + 置信达标）→ 直通 generate；
+    没定死（缺任一）→ 一律停 clarify 确认态（不进 generate），从机制上绝迹缺锚出题。
+
+    mother_confirmed 由 classify 按同口径（_conf_ok + anchored）置位，这里用 _pin_status
+    再加「年级册 code + 非复习册」收口（mother_confirmed=True 但年级 code 缺/是复习册的边角
+    路径也会被本闸拦住，不直通）。"""
+    if state.get("mother_confirmed") and _pin_status(state)["pinned"]:
         return "generate"
     return "clarify"
 
 
 async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
-    """DNA 置信不足 → 回问老师确认（只问不造，进 WAIT 等下一句）。"""
+    """没定死 → 回问老师确认（只问不造，进 WAIT 等下一句）。
+
+    🔴 批2：确认态如实回报「年级学期（推断值或未识别）+ 主考点（锚值+所属册 或 未锚定）」，
+    复用既有 clarify 聊天气泡协议（book-ui 既有确认/chip 修改能力，不动 book-ui）。
+    """
     analysis = state.get("analysis") or {}
-    asks = []
+    pin = _pin_status(state)
     g = analysis.get("grade") or {}
     k = analysis.get("kp") or {}
     q = analysis.get("qtype") or {}
-    if float(g.get("confidence", 0) or 0) < CONF_GATE:
-        asks.append(f"年级我拿不准（看着像「{g.get('value') or '?'}」），是几年级上/下学期？")
-    if float(k.get("confidence", 0) or 0) < CONF_GATE:
+
+    # 状态回报：年级学期 + 主考点（锚值+册 或 未锚定）—— 让老师一眼看到缺哪一项
+    grade_line = (
+        f"年级学期：**{pin['grade_text']}**（已识别）"
+        if "grade" not in pin["reasons"] and pin["grade_text"]
+        else f"年级学期：**未识别**（看着像「{g.get('value') or '?'}」，请确认是几年级上/下学期）"
+    )
+    if "kp" not in pin["reasons"] and pin["kp_name"]:
+        book = f"·{pin['kp_book']}" if pin["kp_book"] else ""
+        kp_line = f"主考点：**{pin['kp_name']}**（已锚定{book}）"
+    else:
+        kp_line = f"主考点：**未锚定**（粗看是「{k.get('value') or '?'}」，请确认或指正考点）"
+
+    asks: list[str] = []
+    if "grade" in pin["reasons"]:
+        asks.append(f"年级我没定死（看着像「{g.get('value') or '?'}」），请告诉我是几年级上/下学期？")
+    if "kp" in pin["reasons"]:
         asks.append(f"核心考点我没锚准（粗看是「{k.get('value') or '?'}」），对吗？或请指正。")
-    if float(q.get("confidence", 0) or 0) < CONF_GATE:
+    if (
+        "confidence" in pin["reasons"]
+        and float(q.get("confidence", 0) or 0) < CONF_GATE
+    ):
         asks.append(f"题型我读着像「{q.get('value') or '?'}」，对吗？")
     if not asks:
         asks.append("我对母题 DNA 还不够确定，请确认下年级/考点/题型再继续。")
-    body = "我先确认母题 DNA，确认后再造变式：\n\n" + "\n".join(f"- {a}" for a in asks)
+
+    body = (
+        "我得先把母题**定死**才能造变式（年级 + 主考点缺一不可）。当前状态：\n\n"
+        f"- {grade_line}\n- {kp_line}\n\n"
+        "请补充/纠正：\n" + "\n".join(f"- {a}" for a in asks)
+    )
     return {"messages": [AIMessage(content=body)]}
 
 
@@ -1829,6 +1906,28 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         return {
             "messages": [
                 AIMessage(content="母题 DNA 还没确认，我先不造题。请确认年级/考点/题型。")
+            ]
+        }
+
+    # 🔴 批2·generate 入口防御断言（从机制上绝迹「未解析+未知年级进出题」）：facts 缺年级
+    #   或主考点 → 拒绝出题、回确认态。多入口（route_entry 库内母题直进 / patch 重造 / 兜底）
+    #   都必过此闸，gate_after_classify 之外的旁路也兜得住。
+    _facts_pre = _mother_facts(state)
+    _missing_grade = (str(_facts_pre.get("grade") or "").strip() in ("", "未知年级"))
+    _missing_kp = (
+        str(_facts_pre.get("kp_name") or "").strip() in ("", "未知考点")
+        or not _facts_pre.get("dim1_kp_id")
+    )
+    if _missing_grade or _missing_kp:
+        lack = "、".join(
+            x for x, m in (("年级", _missing_grade), ("主考点（知识点未锚定）", _missing_kp)) if m
+        )
+        _emit_stage("generate", "生成题目", "warn", f"母题未定死（缺{lack}）")
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"母题还没定死（缺{lack}），我不能出题。请先确认年级 + 主考点知识点，我再造变式。"
+                )
             ]
         }
 
