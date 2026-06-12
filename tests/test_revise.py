@@ -131,6 +131,44 @@ def test_revise_text_unparseable_degrades(monkeypatch):
 
 
 # ===========================================================================
+# G12a：skeleton 重做 → _item_dna 反映 item 级新值，母题 dna.skeleton 未动
+# ===========================================================================
+
+
+def test_revise_skeleton_reflected_in_item_dna(monkeypatch):
+    async def fake_llm(messages, *a, **k):
+        return json.dumps({"skeleton": "第一步移项；第二步【合并同类项】；第三步解出 x"})
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+
+    items = [{"stem": "2x+1=5", "answer": "x=2", "qtype": "解答",
+              "difficulty": 3, "level": "normal", "solution": "旧骨架"}]
+    state = _state(items)
+    update, result, err = asyncio.run(revise_item(state, 1, "skeleton", "讲清合并同类项那步"))
+    assert err is None and result["ok"] is True
+    it = update["items"][0]
+
+    # _item_dna(item) 的 skeleton 反映 item 级新值（FE DNA 面板数据源走的就是这个）
+    facts = variant_mod._mother_facts(state)
+    dna_panel = variant_mod._item_dna(it, facts)
+    assert "合并同类项" in (dna_panel["skeleton"] or "")
+    # item 级骨架字段落了
+    assert "合并同类项" in it["skeleton"]
+    # 🔴 母题组级 dna.skeleton（守恒基因）未动
+    assert state["mother_dna"]["dna"]["skeleton"] == ["移项"]
+    assert update.get("mother_dna") is None  # skeleton 路径不改母题级
+
+
+def test_item_dna_skeleton_falls_back_to_mother_when_no_item_override():
+    """item 无 skeleton override → _item_dna 回退母题 dna.skeleton（与 hard_points 同模式）。"""
+    state = _state([{"stem": "q", "answer": "a", "qtype": "解答"}])
+    facts = variant_mod._mother_facts(state)
+    it = {"stem": "q"}  # 无 item 级 skeleton
+    dna_panel = variant_mod._item_dna(it, facts)
+    assert dna_panel["skeleton"] == "移项"  # 母题 ["移项"] → 拼成 str
+
+
+# ===========================================================================
 # whole：REGEN 重出 → 闸B sympy 重验
 # ===========================================================================
 
@@ -150,9 +188,18 @@ def test_revise_whole_regen_then_reverify_pass(monkeypatch):
     async def verify_pass(item, solved_answer):
         return {"verdict": math_verify.PASS, "detail": "ok", "computed": "x=3"}
 
+    grade_seen = {}
+
+    async def grade_stub(items):
+        grade_seen["called"] = True
+        grade_seen["items"] = items
+        # rubric 对新题断言为 4（压轴）→ 难度更新
+        return [{**items[0], "difficulty": 4}]
+
     monkeypatch.setattr(variant_mod, "_regen_once", regen_stub)
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_pass)
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", grade_stub)
 
     items = [{"stem": "2x=4", "answer": "x=2", "qtype": "解答", "difficulty": 2, "_seq": 1}]
     state = _state(items)
@@ -168,6 +215,10 @@ def test_revise_whole_regen_then_reverify_pass(monkeypatch):
     assert it["check"]["tier"] == variant_mod.TIER_VERIFIED
     assert it["manual_edited"] is True
     assert it["_seq"] == 1  # 簿记跟题走
+    # G12b：whole 重做后调用了难度重判（rubric 绝对调用），difficulty 更新、level 同步 hard
+    assert grade_seen["called"] is True
+    assert it["difficulty"] == 4
+    assert it["level"] == "hard"
 
 
 def test_revise_whole_fail_kept_warn_not_dropped(monkeypatch):
@@ -186,9 +237,13 @@ def test_revise_whole_fail_kept_warn_not_dropped(monkeypatch):
     async def verify_fail(item, solved_answer):
         return {"verdict": math_verify.FAIL, "detail": "mismatch", "computed": "x=9"}
 
+    async def grade_stub(items):
+        return [{**items[0], "difficulty": 3}]
+
     monkeypatch.setattr(variant_mod, "_regen_once", regen_stub)
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_fail)
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", grade_stub)
 
     state = _state([{"stem": "2x=4", "answer": "x=2", "qtype": "解答", "difficulty": 2}])
     update, result, err = asyncio.run(revise_item(state, 1, "whole", "改一下"))
@@ -211,6 +266,67 @@ def test_revise_whole_regen_returns_none_degrades(monkeypatch):
     assert result["ok"] is False
     assert "重出失败" in result["error"]
     assert update == {}  # 保留原题不动
+
+
+def test_revise_whole_grade_failure_keeps_old_difficulty(monkeypatch):
+    """G12b 降级：难度重判失败（_grade_difficulty 内部降级返回原值）→ 保留原难度，不崩。"""
+    async def regen_stub(item, facts, feedback=None):
+        return {"stem": "新题", "answer": "x=3", "qtype": "解答", "difficulty": 2}
+
+    async def solve_stub(stem):
+        return {"solved_answer": "x=3", "solution": "解析"}
+
+    async def verify_pass(item, solved_answer):
+        return {"verdict": math_verify.PASS, "detail": "ok", "computed": "x=3"}
+
+    async def grade_degrade(items):
+        # _grade_difficulty 真实降级语义：LLM 异常/解析失败 → 原样返回（difficulty 不动）
+        return [dict(it) for it in items]
+
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_stub)
+    monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_pass)
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", grade_degrade)
+
+    items = [{"stem": "2x=4", "answer": "x=2", "qtype": "解答",
+              "difficulty": 2, "level": "normal"}]
+    state = _state(items)
+    update, result, err = asyncio.run(revise_item(state, 1, "whole", "难一点"))
+    assert err is None and result["ok"] is True
+    it = update["items"][0]
+    # 重判降级保留原难度（draft 给的 2，未被升档），level 不被误标 hard
+    assert it["difficulty"] == 2
+    assert it.get("level") != "hard"  # 未升档 → 不强标 hard
+    assert it["manual_edited"] is True
+
+
+def test_revise_whole_grade_levels_up_when_difficulty_rises(monkeypatch):
+    """G12b：rubric 把新题判得比原值高（2→3）→ level 升 hard（不靠关键词 hack，由 rubric 断言）。"""
+    async def regen_stub(item, facts, feedback=None):
+        return {"stem": "新题", "answer": "x=3", "qtype": "解答", "difficulty": 2}
+
+    async def solve_stub(stem):
+        return {"solved_answer": "x=3", "solution": "解析"}
+
+    async def verify_pass(item, solved_answer):
+        return {"verdict": math_verify.PASS, "detail": "ok", "computed": "x=3"}
+
+    async def grade_up(items):
+        return [{**items[0], "difficulty": 3}]  # rubric 判 3，高于原 2
+
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_stub)
+    monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_pass)
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", grade_up)
+
+    items = [{"stem": "2x=4", "answer": "x=2", "qtype": "解答",
+              "difficulty": 2, "level": "normal"}]
+    state = _state(items)
+    update, result, err = asyncio.run(revise_item(state, 1, "whole", "难一点"))
+    assert err is None and result["ok"] is True
+    it = update["items"][0]
+    assert it["difficulty"] == 3
+    assert it["level"] == "hard"  # 较原值升档 → 同步 hard
 
 
 # ===========================================================================

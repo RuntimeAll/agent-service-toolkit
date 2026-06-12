@@ -570,12 +570,18 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     main_kp = dna.get("main_kp") or {}
     if not isinstance(main_kp, dict):
         main_kp = {}
-    # skeleton 在 DNA 里是 list[str]（dna_extract 抽的步骤序列）→ FE 要 str，按换行拼。
-    skeleton_raw = dna.get("skeleton")
-    if isinstance(skeleton_raw, list):
-        skeleton = "\n".join(str(s) for s in skeleton_raw if str(s).strip())
+    # skeleton：item 级覆盖（revise target=skeleton 落 it["skeleton"]）优先，缺则回退母题
+    # dna.skeleton（与 hard_points 同模式·G12a）。母题骨架是守恒基因，老师改单题骨架只覆盖本题。
+    sk_item = it.get("skeleton")
+    if sk_item is not None and str(sk_item).strip():
+        skeleton = str(sk_item)
     else:
-        skeleton = str(skeleton_raw or "")
+        # 母题 DNA 里 skeleton 是 list[str]（dna_extract 抽的步骤序列）→ FE 要 str，按换行拼。
+        skeleton_raw = dna.get("skeleton")
+        if isinstance(skeleton_raw, list):
+            skeleton = "\n".join(str(s) for s in skeleton_raw if str(s).strip())
+        else:
+            skeleton = str(skeleton_raw or "")
     # hard_points：item 级有则用 item 的，否则母题 DNA 的。
     hp_raw = it.get("hard_points")
     if hp_raw is None:
@@ -3990,6 +3996,20 @@ async def revise_item(
         final = rechecked if rechecked is not None else draft
         final["manual_edited"] = True
         _format_item_stem(final)
+        # 🔴 G12b：whole 重做后难度须重判（守铁律：难度=LLM rubric 评级，不做关键词 hack——
+        #   「难一点」不直接 +1，由 rubric 对新题断言）。复用既有 _grade_difficulty（nano 绝对档），
+        #   失败保留原难度（_grade_difficulty 内部已对 LLM 异常/解析失败/个数对不上整体降级返回原值）。
+        old_difficulty = _to_int(final.get("difficulty"))
+        graded = await _grade_difficulty([final])
+        final = graded[0] if graded else final
+        # level 同步：新难度 ≥4（压轴）或较原值升档 → 标 hard（star/星级跟 difficulty 走，level 一致）。
+        new_difficulty = _to_int(final.get("difficulty"))
+        if new_difficulty is not None and (
+            new_difficulty >= DIFFICULTY_CAP
+            or (old_difficulty is not None and new_difficulty > old_difficulty)
+        ):
+            final["level"] = "hard"
+        final["manual_edited"] = True  # _grade_difficulty 复制了 dict，重申 manual 印记
         new_items[index - 1] = final
         return {"items": new_items}, {"ok": True}, None
 
@@ -4023,8 +4043,11 @@ async def revise_item(
 
     update: VariantState = {}
     if target == "skeleton":
-        # 解法骨架落 item.solution（题级解析载体）；diff 锁：不动 qtype/answer/difficulty/kp
+        # 🔴 G12a：解法骨架同时落两处——① item.solution（题级解析载体，照旧）；② item.skeleton
+        #   （item 级骨架覆盖，给 _item_dna 读，FE DNA 面板 skeleton 字段才反映本次改动）。
+        #   母题组级 mother_dna.dna.skeleton 是守恒基因，绝不动；item 级优先、缺则回退母题。
         it["solution"] = revised_text
+        it["skeleton"] = revised_text
     else:  # scene：母题级表皮维 → mother_dna.dna.scene
         mother_dna = dict(state.get("mother_dna") or {})
         dna = dict(mother_dna.get("dna") or {})
