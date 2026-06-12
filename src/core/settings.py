@@ -312,9 +312,10 @@ class Settings(BaseSettings):
                       读图 3/3 准、parsed_ok=true（25-37s），可降——经 .env VARIANT_MODEL_ANALYZE
                       显式切 nano；deepseek-v4-flash 读图会幻觉年级（confidence 0.9 却错档），禁用于读图）
         - dna       → LLM_MODEL_LIGHT（锚定/标签是池内选 id 的分类活，本就走 nano）
-        - solve     → None（闸B 独立重解+载荷抽取回退深度档；🔴 2026-06-13 A/B 实测：真名
-                      gpt-5.4-nano vs gpt-5.4 sympy 判决一致率 3/3=100%、degrade 0/3、同速 9.4s/题
-                      → 达标，经 .env VARIANT_MODEL_SOLVE 显式切 nano）
+        - solve     → None（闸B 独立重解+载荷抽取回退深度档=gpt-5.4。🔴 2026-06-13 维护者裁定
+                      **留空回退 5.4，不切 nano**：独立重解是阅卷角色，nano 误判 FAIL 会触发假回炉
+                      （2026-06-13 nano 冒烟疑点：3/3 全回炉），且 5.4 与 nano 速度本就相当(9.4s vs 8s)。
+                      先前「A/B 判决 3/3=100% 一致可降」结论被该冒烟疑点推翻；ANALYZE/DNA 仍 nano）
         - generate  → None（出题/回炉/补题/重写，红线不降档，保 COMPATIBLE_MODEL=gpt-5.4）
 
         🔴 昨晚（2026-06-12）误评根因：旧默认名 gpt-5-nano 属 gpt-5 老系、中转站 not found/空返，

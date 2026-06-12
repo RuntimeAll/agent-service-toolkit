@@ -55,6 +55,31 @@ FLAG_TAG_POOL_EMPTY = "tag_pool_empty"  # 复用池拉空（降级继续，T4）
 FLAG_LLM_PARSE_FAIL = "llm_parse_fail"  # LLM 返回非 JSON / 解析失败 → 空 DNA 兜底
 FLAG_LLM_ERROR = "llm_error"  # LLM 调用异常 → 空 DNA 兜底
 
+# 🔴 册子归属（2026-06-13 整改）：知识点 level1 前 4 位 = 学段学科册。给候选行标册名，
+#   并禁 LLM 选复习类册子（除非老师明确要复习/模考）。三复习册前缀与 variant_support
+#   .REVIEW_BOOK_PREFIXES 同源（此处独立一份避免循环导入；号定不改，要改两处同改）。
+_BOOK_NAME_BY_PREFIX: dict[str, str] = {
+    "3071": "七年级上册", "3072": "七年级下册",
+    "3081": "八年级上册", "3082": "八年级下册",
+    "3091": "九年级上册", "3092": "九年级下册",
+    "3010": "中考一轮复习", "3100": "数学解题技巧与专题", "3120": "新题抢先",
+}
+REVIEW_BOOK_PREFIXES: set[str] = {"3010", "3100", "3120"}
+
+FLAG_MAIN_KP_REVIEW_OOB = "main_kp_review_oob"  # 主 kp 锚到复习册且未开放 → 按越界处置
+
+
+def _book_of(pid: Any) -> str:
+    """叶子 id → 所属册名（前 4 位映射）；未知前缀 → 空串。"""
+    s = str(pid or "").strip()
+    return _BOOK_NAME_BY_PREFIX.get(s[:4], "")
+
+
+def _is_review_id(pid: Any) -> bool:
+    s = str(pid or "").strip()
+    return any(s.startswith(p) for p in REVIEW_BOOK_PREFIXES)
+
+
 # 题型别名归一（与 variant_support.QTYPE_MAP 同口径的中文侧）
 _QTYPE_ALIAS: dict[str, str] = {
     "选择": "选择", "选择题": "选择", "单选": "选择", "单选题": "选择",
@@ -100,6 +125,8 @@ DNA_PROMPT = (
 
 🔴 硬约束（违反 = 程序按越界处理）：
 - main_kp / secondary_kps 的 id **只能从下面【知识点候选池】里选**，禁止造词、禁止超纲。
+- **除非老师明确要求复习/模考题，否则禁止选复习类册子（中考一轮复习 / 数学解题技巧与专题 / 新题抢先）的节点**——
+  优先选普通教材册（七~九年级上下册）的同名考点。
 - tags 优先从【标签复用池】里复用；确实没有贴切的才允许造新词，新词必须像池内词一样短。
 - 难点克制：宁空不凑——基础题 hard_points 必须是空数组。
 
@@ -109,7 +136,7 @@ DNA_PROMPT = (
 标准答案：{answer}
 解析：{analyze}
 
-【知识点候选池】（该年级全部叶子知识点，主/副知识点只能从池里选 id）：
+【知识点候选池】（该年级全部叶子知识点，主/副知识点只能从池里选 id；括号内为所属教材册）：
 {kp_pool}
 
 【标签复用池】（线上高频标签，优先复用；为空则按上面规则自拟）：
@@ -165,7 +192,11 @@ def _build_prompt(
     *, stem: str, answer: str, analyze: str, grade: str,
     leaf_pool: list[tuple[str, str]], tag_pool: list[str],
 ) -> str:
-    kp_pool_text = "\n".join(f"{pid} {name}" for pid, name in leaf_pool) or "（空）"
+    def _row(pid: Any, name: Any) -> str:
+        book = _book_of(pid)
+        return f"{pid} {name}（册：{book}）" if book else f"{pid} {name}"
+
+    kp_pool_text = "\n".join(_row(pid, name) for pid, name in leaf_pool) or "（空）"
     tag_pool_text = "、".join(tag_pool) if tag_pool else "（无，请按规则自拟标签）"
     return DNA_PROMPT.format(
         grade=grade or "未知年级",
@@ -178,23 +209,36 @@ def _build_prompt(
     )
 
 
-def _validate(raw: dict[str, Any], pool_ids: set[str], tag_pool: list[str]) -> dict[str, Any]:
+def _validate(
+    raw: dict[str, Any],
+    pool_ids: set[str],
+    tag_pool: list[str],
+    *,
+    include_review_books: bool = False,
+) -> dict[str, Any]:
     """代码校验闸：池内校验 / 越界处置 / 闭集校验 / 难度兜底 / 标签复用统计。
 
     🔴 禁造词铁律：主 kp 越界 → anchored=None（上层据此走 clarify，不放行出题）；
        副 kp 越界 → 丢弃该项 +flag（不报错）。
+    🔴 复习册闸（2026-06-13）：未开放复习册时主 kp 锚到复习册前缀（3010/3100/3120）→
+       按越界处置（main_kp=None + FLAG_MAIN_KP_OOB + FLAG_MAIN_KP_REVIEW_OOB），上层走 clarify
+       （正常池本就剔了复习册，本闸是二道保险：万一 LLM 仍吐复习册 id，代码也不放行）。
     🔴 难点个数代码重算（len(hard_points)），不信 LLM 自报。
     """
     flags: list[str] = []
 
-    # --- 主 kp（池内才算锚定成功） ---
+    # --- 主 kp（池内才算锚定成功；未开放复习册时复习册 id 视同越界） ---
     mk = raw.get("main_kp") or {}
     mk_id = str(mk.get("id") or "").strip()
-    if mk_id and mk_id in pool_ids:
+    if mk_id and mk_id in pool_ids and not (
+        not include_review_books and _is_review_id(mk_id)
+    ):
         main_kp = {"id": mk_id, "name": mk.get("name")}
     else:
-        main_kp = None  # 越界/缺失 = 锚定失败
+        main_kp = None  # 越界/缺失/复习册未开放 = 锚定失败
         flags.append(FLAG_MAIN_KP_OOB)
+        if mk_id and _is_review_id(mk_id) and not include_review_books:
+            flags.append(FLAG_MAIN_KP_REVIEW_OOB)
 
     # --- 副 kp（池内 + ≤3，越界丢弃+flag） ---
     secondary_kps: list[dict[str, Any]] = []
@@ -319,6 +363,7 @@ async def extract_dna(
     tag_pool: list[str] | None = None,
     model: str | None = None,
     invoke: Any = None,
+    include_review_books: bool = False,
 ) -> dict[str, Any]:
     """单题 DNA 抽取（DNA 契约 v1）。
 
@@ -355,7 +400,9 @@ async def extract_dna(
     if not isinstance(raw, dict):
         return empty_dna([FLAG_LLM_PARSE_FAIL, FLAG_MAIN_KP_OOB])
 
-    return _validate(raw, pool_ids, tag_pool)
+    return _validate(
+        raw, pool_ids, tag_pool, include_review_books=include_review_books
+    )
 
 
 # ---------------------------------------------------------------------------

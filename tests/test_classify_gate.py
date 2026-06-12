@@ -56,7 +56,7 @@ def _patch(monkeypatch, *, pool, dna):
     monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
     monkeypatch.setattr(variant_mod, "_emit_stage", lambda *a, **k: None)
 
-    async def fake_leaf_pool(grade_code, client):
+    async def fake_leaf_pool(grade_code, client, **kw):
         return pool
 
     async def fake_extract(**kw):
@@ -113,7 +113,7 @@ def test_classify_leaf_pool_fetch_raises_degrades_to_clarify(monkeypatch):
     monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
     monkeypatch.setattr(variant_mod, "_emit_stage", lambda *a, **k: None)
 
-    async def boom(grade_code, client):
+    async def boom(grade_code, client, **kw):
         raise RuntimeError("lazyTree 连不上")
 
     monkeypatch.setattr(variant_mod, "leaf_pool_for_grade", boom)

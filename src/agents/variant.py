@@ -512,6 +512,15 @@ def _conf_ok(analysis: dict[str, Any]) -> bool:
 _GRADE_CN = {"七": "307", "八": "308", "九": "309"}
 _TERM_CN = {"上": "1", "下": "2"}
 
+# 🔴 复习册开关关键词（2026-06-13 整改·批1 step5）：老师文本含下列词 = 明确要中考/复习/专题/
+#   模考题 → include_review_books=True（复习册进锚定池可锚）。简单关键词判，不另起 LLM。
+_REVIEW_INTENT_RE = re.compile(r"中考|复习|专题|模考|一模|二模")
+
+
+def _wants_review_books(text: str | None) -> bool:
+    """老师文本是否明确要复习/模考类题（决定复习册是否并入锚定池）。"""
+    return bool(_REVIEW_INTENT_RE.search(str(text or "")))
+
 
 def _grade_to_code(grade_value: Any) -> str | None:
     """年级文案 → 4 位 code 前缀（如 七年级上 → 3071）；拿不准返回 None。"""
@@ -887,7 +896,11 @@ async def _resolve_grade_code(analysis: dict[str, Any]) -> str | None:
     coarse = (analysis.get("kp") or {}).get("value")
     if coarse:
         try:
-            cands = await asyncio.to_thread(anchor_subject, coarse)
+            # 🔴 2026-06-13 整改：反查年级排除复习册候选——同名考点双挂复习册会把 grade_code
+            #   反推成 3010/3100/3120（复习册前缀，非教材册年级），出题年级就跑偏成「未知年级」。
+            cands = await asyncio.to_thread(
+                anchor_subject, coarse, exclude_review_books=True
+            )
             if cands and cands[0].get("grade_code"):
                 return str(cands[0]["grade_code"])
         except Exception:  # noqa: BLE001 — 名匹配降级失败 → None（全量池兜底）
@@ -908,6 +921,12 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     dna_obj = state.get("mother_dna") or {}
     mother_dna = dict(dna_obj)
 
+    # 🔴 复习册开关（批1 step5）：老师本轮文本明确要中考/复习/专题/模考 → 复习册并入锚定池。
+    #   否则锚定池只圈教材册（防锚到「新题抢先」等复习册同名节点照样出题的实锚事故）。
+    include_review_books = _wants_review_books(
+        _latest_human_text(state.get("messages", []))
+    )
+
     # --- 两步锚定第一步：定年级 code ---
     grade_code = await _resolve_grade_code(analysis)
 
@@ -916,7 +935,9 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     leaf_pool: list[tuple[str, str]] = []
     client = RuoyiClient(token=token)
     try:
-        leaf_pool = await leaf_pool_for_grade(grade_code, client)
+        leaf_pool = await leaf_pool_for_grade(
+            grade_code, client, include_review_books=include_review_books
+        )
     except Exception as e:  # noqa: BLE001 — 池拉取故障 → 空池（不 silent-fail，转 clarify）
         analysis["_anchor_error"] = str(e)
 
@@ -943,6 +964,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         tag_pool=[],
         invoke=_ainvoke_text,  # 🔴 Q1：经 _ainvoke_text → 锚定/DNA 抽取这一步落 trace（label=dna_extract）
         model=settings.variant_model("dna"),  # 按环节分档（默认 nano；缺省回退 dna_extract 自身的 LLM_MODEL_LIGHT）
+        include_review_books=include_review_books,  # 批1 step5：复习册闸（二道保险，正常池已剔）
     )
 
     main_kp = dna.get("main_kp")

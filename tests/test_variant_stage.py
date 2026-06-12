@@ -209,9 +209,9 @@ def test_classify_emits_done_with_kp_and_grade(monkeypatch):
     # B1 两步锚定：年级 → 叶子池（HTTP）→ dna_extract 池内选 id。
     # 全部 IO/LLM 打桩：lazy_tree 返回该年级一棵带叶子的树；extract_dna 返回锚到主 kp 的 DNA。
     calls = _record_stages(monkeypatch)
-    monkeypatch.setattr(variant_mod, "anchor_subject", lambda coarse: [])
+    monkeypatch.setattr(variant_mod, "anchor_subject", lambda coarse, *a, **k: [])
 
-    async def fake_leaf_pool(grade_code, client):
+    async def fake_leaf_pool(grade_code, client, **kw):
         return [("3071001001001", "一元一次方程")]
 
     async def fake_extract(**kw):

@@ -40,11 +40,13 @@ def test_variant_model_fallback_chain_when_unset(monkeypatch):
 
 
 def test_variant_model_env_config_routes_prefrontal_to_nano():
-    """.env 实配（维护者拍板 2026-06-13）：前置 analyze/dna/solve 全走 gpt-5.4-nano；
-    generate 留空 → 回退 COMPATIBLE_MODEL（深度档，红线不降）。"""
+    """.env 实配（维护者拍板 2026-06-13）：analyze/dna 走 gpt-5.4-nano（读图 3/3 准、锚定分类活）；
+    🔴 solve 回退 gpt-5.4（VARIANT_MODEL_SOLVE 留空→None）——独立重解是阅卷角色，nano 误判 FAIL
+       触发假回炉（2026-06-13 冒烟 3/3 全回炉），裁定不降档；generate 留空→None（红线不降档）。"""
     assert settings.variant_model("analyze") == "gpt-5.4-nano"
     assert settings.variant_model("dna") == "gpt-5.4-nano"
-    assert settings.variant_model("solve") == "gpt-5.4-nano"
+    # solve 显式留空（.env VARIANT_MODEL_SOLVE=）→ None → relay 配置 model（COMPATIBLE_MODEL=gpt-5.4）
+    assert settings.variant_model("solve") is None
     # generate 显式留空（.env VARIANT_MODEL_GENERATE=）→ None → relay 配置 model（COMPATIBLE_MODEL）
     assert settings.variant_model("generate") is None
 

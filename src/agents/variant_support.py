@@ -18,6 +18,28 @@ from agents import dna_extract
 from core import settings
 
 
+# ---------------------------------------------------------------------------
+# 🔴 复习册前缀（PRD-C-009 整改·2026-06-13）：知识点树 level1 共 9 册——教材册 6
+#   （3071/3072/3081/3082/3091/3092=七~九年级上下册）+ 复习册 3（下列三册）。数据层无
+#   类型字段，按 level1 前缀（叶子 id 前 4 位）识别。
+# 复习册同名考点与教材册**双挂**（如「二次根式有意义的条件」既挂八上教材册也挂复习册）——
+# 锚定按考点名反查会命中复习册同名节点，generate 据此能锚到「3120004 未解析」「未知年级」
+# 照样出题（实锚事故）。故锚定池**默认只圈教材册叶子，剔复习册**；老师明确要中考/复习/专题
+# 时才并入（include_review_books=True）。三册名注释如下，号定不改。
+# ---------------------------------------------------------------------------
+REVIEW_BOOK_PREFIXES: set[str] = {
+    "3010",  # 中考一轮复习
+    "3100",  # 数学解题技巧与专题
+    "3120",  # 新题抢先
+}
+
+
+def _is_review_book(node_id: Any) -> bool:
+    """叶子/节点 id 是否属复习册（按 level1 前 4 位前缀判）。"""
+    s = str(node_id or "").strip()
+    return any(s.startswith(p) for p in REVIEW_BOOK_PREFIXES)
+
+
 def _head_keyword(coarse_kp: str) -> str | None:
     """从 LLM 粗考点描述抽「头部考点词」，给全词 LIKE 落空时的降级匹配用。
 
@@ -47,7 +69,9 @@ def _db_kwargs() -> dict:
     )
 
 
-def anchor_subject(coarse_kp: str, limit: int = 8) -> list[dict[str, Any]]:
+def anchor_subject(
+    coarse_kp: str, limit: int = 8, *, exclude_review_books: bool = False
+) -> list[dict[str, Any]]:
     """粗考点名 → biz_subject 真实节点候选（标准考点名 + 编码 + 年级=编码前4位）。
 
     SQL 精确匹配优先，命中不足时退 LIKE 模糊（MVP 用名匹配，向量召回 future）。
@@ -57,6 +81,11 @@ def anchor_subject(coarse_kp: str, limit: int = 8) -> list[dict[str, Any]]:
     🔴 编码 = 主键 id 本身（DDL：id="层级数字编码，每3位一层；根=学段+学科"），
        biz_subject 无独立 code 列（实际列 = id/parent_id/name/level/...）。
        原 SQL 选不存在的 code 列 → execute 抛 unknown column → classify 吞错 → 锚定恒空。
+
+    🔴 exclude_review_books（2026-06-13 整改）：按考点名反查时，同名考点双挂复习册（如
+       「二次根式有意义的条件」既挂教材册又挂复习册）会让 _resolve_grade_code 反推出复习册
+       的 grade_code（3010/3100/3120）→ 年级=未知/池跑偏。反查年级时传 True，从候选里
+       剔掉复习册前缀节点（出题路径恒教材册年级），保锚定不串到复习册。
     """
     coarse_kp = (coarse_kp or "").strip()
     if not coarse_kp:
@@ -71,6 +100,9 @@ def anchor_subject(coarse_kp: str, limit: int = 8) -> list[dict[str, Any]]:
             cur.execute(sql, params)
             for r in cur.fetchall():
                 if r["id"] in seen:
+                    continue
+                # 反查年级时剔复习册同名节点（防 grade_code 反推到复习册前缀）
+                if exclude_review_books and _is_review_book(r.get("id")):
                     continue
                 seen.add(r["id"])
                 # id 即层级数字编码（无独立 code 列）→ code = str(id)
@@ -257,13 +289,20 @@ def _collect_leaves(tree: Any) -> list[tuple[str, str]]:
     return leaves
 
 
+def _non_review_leaves(leaves: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """从全量叶子剔掉复习册（3010/3100/3120）—— 兜底圈池的安全集 = 全教材册叶子。"""
+    return [(i, n) for i, n in leaves if not _is_review_book(i)]
+
+
 async def leaf_pool_for_grade(
-    grade_code: str | None, client: RuoyiClient
+    grade_code: str | None, client: RuoyiClient, *, include_review_books: bool = False
 ) -> list[tuple[str, str]]:
     """该年级叶子知识点池 [(id, name)...]（两步锚定第二步：年级 → 叶子池）。
 
     lazyTree 拉全树 → 抽叶子 → 按 grade_code（叶子 id 前缀）过滤本年级；grade_code 缺/
-    过滤后空 → 退回全量叶子（让 LLM 在全池里选，仍受池内校验约束，不放空锚定）。
+    过滤后空 → 兜底退回**全教材册叶子（剔复习册）**——而非裸 return 全量（1473 叶把复习册
+    264 叶全放进池 → LLM 能锚到「3120004 未解析」照样出题，实锚事故的根因之一）。
+    🔴 include_review_books=True（老师明确要中考/复习/专题时）→ 不剔复习册，全量参与圈池。
     拉取故障 → 返回 []（上层 → 锚定失败 → clarify）。
     """
     try:
@@ -271,11 +310,15 @@ async def leaf_pool_for_grade(
     except Exception:  # noqa: BLE001 — 树拉不到 → 空池（上层降级走 clarify）
         return []
     leaves = _collect_leaves(tree)
+    # 复习册除非显式开放，否则全程不入池（年级过滤段 + 兜底段都剔）
+    if not include_review_books:
+        leaves = _non_review_leaves(leaves)
     gc = str(grade_code or "").strip()
     if gc:
         scoped = [(i, n) for i, n in leaves if i.startswith(gc)]
         if scoped:
             return scoped
+    # 兜底：grade_code 缺/过滤空 → 全教材册叶子（已剔复习册，绝不裸 return 全量含复习册）
     return leaves
 
 
