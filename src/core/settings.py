@@ -159,6 +159,13 @@ class Settings(BaseSettings):
     RUOYI_TOKEN: str | None = None
     # 思考型模型读图建议 max_tokens（≥4096）
     VARIANT_MAX_TOKENS: int = 4096
+    # 闸B 回炉（REGEN）瘦身 max_tokens 上限（整改4·2026-06-12）：回炉只带单题题面+错因+确定
+    # 上下文块，比首稿出题（一次出 N 道）小得多 → 单独压一个上限防输出失控（ct 9k-11k）。
+    # 出题主调用（generate/add）仍走 VARIANT_MAX_TOKENS，不动。≤0 视为回退 VARIANT_MAX_TOKENS。
+    VARIANT_REGEN_MAX_TOKENS: int = 2048
+    # 教材版本（整改1·2026-06-12）：生题确定上下文块的「教材版本」行。RuoYi 知识点树/库当前无
+    # 教材版本字段 → 不编造，默认空；填了（如「人教版」「浙教版」）才注入该行。
+    TEXTBOOK_VERSION: str = ""
     # === PRD-C-013 P13 预算闸：state 级 LLM 调用计数上限（per-round 重置）===
     # 超限后**增强类**调用（闸A rework / 闸B heal / replenish 补题 / extract 兜底）跳过
     # 走既有 G5 降级路径（标 ⚠ / 保留原题，不卡死）；核心链（parse/generate/grade）不跳。

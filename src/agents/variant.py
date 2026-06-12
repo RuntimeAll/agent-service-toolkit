@@ -53,6 +53,13 @@ from core import get_model, relay_pool, settings
 CONF_GATE = 0.75
 # 自愈上限（设计 §5：1 次防死循环）
 MAX_HEAL = 1
+
+
+def _regen_max_tokens() -> int:
+    """🔴 整改4：闸B 回炉（REGEN）瘦身 max_tokens。回炉只带单题题面+错因+确定上下文块，
+    不灌整组上下文 → 单独压一个上限防输出失控。≤0 回退 VARIANT_MAX_TOKENS（关闸）。"""
+    v = int(getattr(settings, "VARIANT_REGEN_MAX_TOKENS", 0) or 0)
+    return v if v > 0 else settings.VARIANT_MAX_TOKENS
 # 默认配方：3 道 = 2 普通 + 1 难（设计 §5）
 DEFAULT_SHAPE = {"normal": 2, "hard": 1}
 # P2 逐题过闸并发上限（PRD-C-012：generate 流内 eager + gene_gate/solve_explain 节点共用口径）
@@ -236,11 +243,17 @@ _TRACE_MARKERS: list[tuple[str, str]] = [
     ("看这张题目图", "analyze"),
     ("出题配方", "knobs"),
     ("数学验算载荷抽取器", "extract"),
+    # 🔴 Q1 可观测性修复（2026-06-12）：锚定/DNA 抽取这一步从此经 _ainvoke_text → 落 trace。
+    #   两个 marker（DNA 抽取主调 + 标签复用窄调）须排在 generate 的「命题专家」泛 marker 之前。
+    ("打标式 DNA 抽取", "dna_extract"),
+    ("检索标签师", "dna_tags"),
     # 🔴 B2·T2：闸A LLM judge 已退役（gene_judge 全链删），不再有「平行题基因比对器」调用。
     ("独立解出的答案与题面标答不一致", "regen"),
     ("你是严谨的数学阅卷老师", "solve"),
     ("举一反三 agent 的指令解析器", "parse"),
     ("老师对下面这组变式题的某道有疑问", "answer"),
+    # 整改3（2026-06-12）：解法修正逐题解析重写器（题面留只改解析）。
+    ("解题方法提了新约束", "solution_rewrite"),
     ("**新增**", "add"),
     ("举一反三变式", "generate"),
 ]
@@ -331,6 +344,7 @@ async def _ainvoke_text(
     public_stream: bool = False,
     on_delta: Any = None,
     model: str | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
@@ -341,6 +355,7 @@ async def _ainvoke_text(
     generate 用它数「已写到第几题」。
     model：per-call 模型覆盖（S1.1）。给了就用它换该次请求的 model（站点不变），轻活
     调用点（nano 降本）传 settings.LLM_MODEL_LIGHT；None = 沿用 relay 配置 model（旧行为不变）。
+    max_tokens：per-call max_tokens 覆盖（整改4·回炉瘦身）。None/≤0 → 默认 VARIANT_MAX_TOKENS。
     """
     label = _trace_label(messages)
     tags = None if public_stream else ["skip_stream"]
@@ -348,7 +363,8 @@ async def _ainvoke_text(
     conf = (ensure_config() or {}).get("configurable", {}) or {}
     thread_id = conf.get("thread_id")
     teacher_id = conv_trace.teacher_id_from_token(conf.get("ruoyi_token"))
-    max_tokens = settings.VARIANT_MAX_TOKENS
+    # 🔴 per-call max_tokens 覆盖（整改4·回炉瘦身用）：None → 默认 VARIANT_MAX_TOKENS（旧行为）。
+    max_tokens = max_tokens if max_tokens and max_tokens > 0 else settings.VARIANT_MAX_TOKENS
     t0 = time.monotonic()
     relay = settings.RELAY_NAME
     model_used = settings.COMPATIBLE_MODEL
@@ -863,6 +879,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         grade=(analysis.get("grade") or {}).get("value") or "",
         leaf_pool=leaf_pool,
         tag_pool=[],
+        invoke=_ainvoke_text,  # 🔴 Q1：经 _ainvoke_text → 锚定/DNA 抽取这一步落 trace（label=dna_extract）
     )
 
     main_kp = dna.get("main_kp")
@@ -877,7 +894,8 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             analysis.setdefault("_tag_pool_error", str(e))
         if kp_tag_pool:
             dna = await dna_extract.refine_tags_with_pool(
-                dna, stem=mother_dna.get("stem") or "", tag_pool=kp_tag_pool
+                dna, stem=mother_dna.get("stem") or "", tag_pool=kp_tag_pool,
+                invoke=_ainvoke_text,  # 🔴 Q1：标签复用窄调同样落 trace（label=dna_tags）
             )
 
     await client.aclose()
@@ -999,6 +1017,17 @@ _QTYPE_CONTRACT = """题型结构契约（每道题必须按其 qtype 字段长�
 - 判断：单一陈述句，answer 为「对」或「错」（正确/错误亦可）。
 - 解答：**允许** (1)(2)(3) 多小问，answer/solution 分小问作答；这是唯一可含多小问的题型。"""
 
+# 🔴 难度四档 rubric（整改2·2026-06-12·单一事实源）：难度判定并入生题——出题调用同步产出
+#   每道题的 difficulty（不再独立走一轮 _grade_difficulty 复评）。rubric 标准本身不变（仍是
+#   22-SSOT §2 四档断言），由 GENERATE/REGEN/ADD/revise 出题 prompt 嵌入，让出题时就按 rubric
+#   断言难度。难度是「评级」（LLM rubric 断言）≠「判对错」（归闸B sympy，铁律不破）。
+#   🔴 本常量将被拼进会 .format() 的 prompt 模板，文本内花括号须双写转义（{{ }}）。
+_DIFFICULTY_RUBRIC = """难度四档 rubric（每道题的 difficulty 按下面标准判级，1~4 绝对难度，不是相对母题；难度是评级不是判对错）：
+- 4（压轴）：≥2 个真实难点 / 多突破口综合。
+- 3（多步综合）：1 个难点，或 考察类型∈{{证明推理·应用建模·探究归纳}}，或 解法骨架含【最难步】构造。
+- 2（常规）：无难点 + 考察类型∈{{直接计算·公式套用·性质判定}} + 多步骨架。
+- 1（送分）：无难点 +（概念辨析 或 单步骨架）。"""
+
 # 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
 # 含 {占位符} 的变动段（配方/铁律的考点名、母题 DNA）移到末尾；语义一字不改。
 GENERATE_PROMPT = (
@@ -1006,8 +1035,12 @@ GENERATE_PROMPT = (
 
 只输出 JSON 数组(不要解释)，每个元素：
 {{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
-  "qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null",
+  "qtype":"选择/填空/解答","difficulty":1~4,"level":"normal/hard","injected_kp":"相邻kp名或null",
   "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
+
+"""
+    + _DIFFICULTY_RUBRIC
+    + """
 
 格式硬规定（stem/answer/solution 三个字段都遵守）：
 - 数学式一律用 $...$ 包裹（行间长式用 $$...$$），如 $\\sqrt{{2}}$、$x^2-3x+2=0$；
@@ -1177,6 +1210,81 @@ def _conservation_clause(dna: dict | None) -> str:
         "⑤ 难度档：level=\"normal\" 的题与母题同档；level=\"hard\" 的题 = 母题档 +1（封顶 4），"
         "靠在同一骨架上**多加一个真实突破口**（一步构造/转化/分类讨论）升档，不是把数字变丑。"
     )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 🔴 确定上下文硬约束块（整改1·2026-06-12，影响最大）：generate / regen / revise 所有
+# 产「题面 + 解析」的 prompt 统一注入此块。内容**全部来自 state 已锚定的确定事实**（考点 /
+# 年级学期进度 / 教材版本），不许 LLM 猜。实测痛点：老师明说「7 年级没学二元方程只能用一元
+# 一次」，模型生成的解析仍越界用二元 → 本块以「必须遵守」级硬约束压住解题方法不越界。
+#
+# 排位铁律（与既有经验对齐）：本块措辞为硬约束、放在 prompt 靠前位置，但**绝不挤掉守恒白名单
+# 段**（_conservation_clause 仍独立注入、两段共存）；二者正交——守恒段管「考点/考察类型/骨架
+# 基因不超纲」，本块管「解题方法不越学生当前进度」。
+# 🔴 文本含 {…} 字面量须双写转义（本段会被拼进会 .format() 的 prompt 模板）。
+# ---------------------------------------------------------------------------
+# 年级 4 位 code 第 4 位 = 学期（1=上 / 2=下）；学段册前缀 → 学段（307=七、308=八、309=九）。
+_GRADE_CODE_SEG = {"307": "七年级", "308": "八年级", "309": "九年级"}
+_TERM_CODE_SEG = {"1": "上学期", "2": "下学期"}
+
+
+def _progress_phrase(facts: dict) -> str:
+    """从 facts 拼「年级 + 学期」进度短语（如「七年级上学期」）。
+    优先用 grade 文案（已含学期），缺学期信息时用 grade code 第 4 位补「上/下学期」。纯函数。"""
+    grade = str(facts.get("grade") or "").strip()
+    code = str(facts.get("subject_id") or "").strip()
+    has_term = any(w in grade for w in ("上", "下", "上学期", "下学期", "上册", "下册"))
+    if grade and has_term:
+        return grade
+    # grade 缺学期 → 用 code 第 4 位补
+    if len(code) >= 4:
+        seg, term = code[:3], code[3]
+        base = _GRADE_CODE_SEG.get(seg) or (grade or "")
+        term_cn = _TERM_CODE_SEG.get(term)
+        if base and term_cn:
+            return f"{base}{term_cn}"
+    return grade or "未知进度"
+
+
+def _context_block(facts: dict) -> str:
+    """🔴 确定上下文硬约束块（整改1·单一事实源，generate/regen/revise 共用）。返回可拼进
+    prompt 的文本。所有事实取自已锚定的 facts（考点/年级学期/教材版本），LLM 不得猜测。
+
+    - 主考点：锚定叶子名 +（有就带）副 kp 名（知识点路径替代——库无独立 path 字段）。
+    - 年级 + 学期 = 教学进度边界：明确「严禁使用该进度之后才学的内容」+ 通用越界例子（不写死
+      具体某年级的越界方法，按进度通用表述，避免给低年级讲高年级才有的概念）。
+    - 教材版本：settings.TEXTBOOK_VERSION 有值才注入（默认空 → 不注入，绝不编造）。
+
+    纯函数、可单测。空字段优雅降级（某项缺则该条不注入半截占位）。
+    """
+    dna = facts.get("dna") or {}
+    kp_name = str(facts.get("kp_name") or "").strip() or "未知考点"
+    progress = _progress_phrase(facts)
+    lines: list[str] = [
+        "🔴 确定上下文（以下是已锚定的客观事实，**必须遵守**，不得自行更改或猜测）："
+    ]
+    # ① 主考点（+ 副 kp 当知识点路径补充）
+    sec = [
+        str(s.get("name")).strip()
+        for s in (dna.get("secondary_kps") or [])
+        if isinstance(s, dict) and str(s.get("name") or "").strip()
+    ]
+    if sec:
+        lines.append(f"- 主考点：「{kp_name}」；连带知识点：{'、'.join(sec)}。")
+    else:
+        lines.append(f"- 主考点：「{kp_name}」。")
+    # ② 年级 + 学期 = 教学进度边界（硬约束解题方法不越界）
+    lines.append(
+        f"- 学生当前进度：{progress}。🔴 解题方法**严禁使用该进度之后才学的内容**——"
+        "题面、答案、解析里出现的一切方法/概念/工具都必须是学生到这个进度已经学过的。"
+        "例如：低年级尚未学到方程组/不等式组/函数图象等更高阶工具时，绝不能用它们来解题或讲解，"
+        "必须改用当前进度内的方法（如只用一元一次方程、算术、已学过的几何性质等）。"
+    )
+    # ③ 教材版本（有真实来源才注入，绝不编造）
+    tv = str(getattr(settings, "TEXTBOOK_VERSION", "") or "").strip()
+    if tv:
+        lines.append(f"- 教材版本：{tv}（命名/记法/方法口径以该版本教材为准）。")
     return "\n".join(lines)
 
 
@@ -1660,7 +1768,9 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             n=recipe["n"], n_normal=recipe["n_normal"], n_hard=recipe["n_hard"], **facts
         )
         + "\n\n"
-        + _conservation_clause(facts.get("dna"))  # 🔴 W2 守恒硬约束注入（T1）
+        + _context_block(facts)  # 🔴 整改1：确定上下文硬约束（考点/进度/教材版本，压解题不越界）
+        + "\n\n"
+        + _conservation_clause(facts.get("dna"))  # 🔴 W2 守恒硬约束注入（T1，与上块正交并存）
         + recipe["spec"]
     )
 
@@ -1894,12 +2004,17 @@ REGEN_PROMPT = (
 主考点(硬守恒): {kp_name}
 年级(硬守恒): {grade}
 原题干: {stem}
-要求：仍考「{kp_name}」、仍在「{grade}」、{level} 难度；换数字/场景使题面与答案自洽；
+要求：仍考「{kp_name}」、仍在「{grade}」、{level} 难度（目标难度档约 {difficulty}）；换数字/场景使题面与答案自洽；
 answer 优先给可计算的数值/表达式（可程序验算），数字设计成解恰好整洁。
 
 只输出 JSON：
-{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":{difficulty},"level":"{level}","injected_kp":{injected_kp},
+{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":1~4,"level":"{level}","injected_kp":{injected_kp},
   "verify_payload":{{...新题的程序验算载荷，契约见下...}}}}
+🔴 difficulty 字段（整改2·难度并入生题）：拿下面这张 rubric 对**你重出的这道新题**断一个 1~4 的难度档（不是照抄目标档，是按 rubric 实判）：
+
+"""
+    + _DIFFICULTY_RUBRIC
+    + """
 
 格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
 
@@ -2256,11 +2371,16 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
                         difficulty=item.get("difficulty") or 3,
                         injected_kp=json.dumps(item.get("injected_kp"), ensure_ascii=False),
                     )
+                    # 🔴 整改1：确定上下文硬约束（回炉重出同样压解题不越界）。
+                    + "\n\n"
+                    + _context_block(facts)
                     # 🔴 W2 守恒硬约束注入（T1）：回炉重出仍守白名单/考察类型/最难步基因。
                     + "\n\n"
                     + _conservation_clause(facts.get("dna"))
                 )
-            ]
+            ],
+            # 🔴 整改4：回炉瘦身 max_tokens 上限压输出失控（出题主调用 generate/add 不动）。
+            max_tokens=_regen_max_tokens(),
         )
     except Exception:  # noqa: BLE001 — 回炉 LLM 异常 → 视同重生失败（G5）
         return None
@@ -2434,57 +2554,24 @@ async def _check_one_item(
         if healed:
             _apply_visibility(healed)
             return healed, None
-        # 🔴 4d 方案A（PRD-C-012 用户拍板）：sympy 证实标答错、重生仍不过 → 剔除不外发。
-        # 老师永远看不到错题（题卡层无负面文案需求）；剔除过程思路条透明叙事。
-        # 🔴 G4/AC3 补题（对抗审修复）：剔除≠回炉——回炉修同一道，补题是剔除后再产一道
-        # 新题恢复数量。再 _regen_once + 验算 + 守恒一次，全过才顶位；任一环节不过 →
-        # 记 dropped 叙事（摘要说明本组少一道）。全程降级不抛（G5），eager 与节点路径
-        # 自动共享（本协程是单一事实源）。
+        # 🔴 整改4（2026-06-12·闸B 回炉松绑·维护者拍板「不能写得这么死」）：
+        #   回炉 1 次仍 FAIL → **不再二次回炉、不再补题、不再剔除**——直接标 ⚠（verify=
+        #   fail_after_regen，走 4d both_low/silent 外显矩阵）放行，交老师人审。
+        #   （铁律「闸门必有降级路径、绝不卡死」本就在；旧 4d 剔除+补题路径单次回炉 95-134s
+        #   且输出失控，松绑为「标 ⚠ 放行」减少一整条回炉链。判决仍只读 sympy，不采信 LLM 自评。）
         _emit_stage(
-            "verify",
-            "程序验算",
-            "warn",
-            f"第 {idx + 1} 道程序验出标答错误（重生一次仍未过），已剔除，补一道中",
+            "verify", "程序验算", "warn",
+            f"第 {idx + 1} 道程序验算未过（回炉一次仍未过），已标注存疑交人审",
         )
-        repl_feedback = (
-            f"原题已被程序验算剔除（程序算得 computed={res.get('computed')}；"
-            f"详情：{res.get('detail')}）。请重新出一道全新的等价变式补足数量："
-            "题面与标答自洽、经得起程序验算。"
-        )
-        # 🔴 P13：补题是增强类调用，预算耗尽 → 跳过补题，直接落 dropped 叙事（本组少一道）。
-        repl = None if _budget_exhausted() else await _regen_once(item, facts, feedback=repl_feedback)
-        if repl:
-            r_solved = await _solve_one(repl.get("stem", ""))
-            if r_solved.get("solution"):
-                repl["solution"] = r_solved.get("solution")
-            # 🔴 补题仍须过守恒校验 + 程序验算双闸（与回炉同一把尺）
-            r_cons = _conservation_ok(
-                r_solved.get("kp_name", ""), r_solved.get("grade", ""), facts
-            )
-            r_res = await _machine_verify(repl, r_solved.get("solved_answer"))
-            if r_cons and r_res.get("verdict") == math_verify.PASS:
-                repl["check"] = {
-                    "badge": "ok",
-                    "solved_answer": r_solved.get("solved_answer"),
-                    "verify": VERIFY_SYMPY_PASS,
-                    "verify_detail": r_res.get("detail"),
-                    "computed": r_res.get("computed"),
-                }
-                # 闸A 标记沿用既有 heal 语义：原版 gene 跟槽位走；没有 → skipped 留痕
-                repl["gene"] = item.get("gene") or {
-                    "gate": GENE_GATE_SKIPPED,
-                    "reason": "replenished-in-solve",
-                }
-                _apply_visibility(repl)
-                _emit_stage(
-                    "verify", "程序验算", "running", f"第 {idx + 1} 道已剔除，补一道成功"
-                )
-                return repl, None
-        return None, (
-            f"1 道{item.get('qtype') or ''}题程序验出标答错误（程序算得"
-            f"「{res.get('computed')}」与标答不符，重生一次仍未过），已剔除；"
-            "补一道未成，本组少一道"
-        )
+        item["check"] = {
+            "badge": "warn",
+            "solved_answer": solved_answer,
+            "verify": VERIFY_FAIL_AFTER_REGEN,
+            "verify_detail": res.get("detail"),
+            "computed": res.get("computed"),
+        }
+        _apply_visibility(item)
+        return item, None
 
     # ── degrade：sympy 吃不下（载荷抽不成/超范围）→ 保留既有 LLM 自检 fallback ──
     match = _norm(solved_answer) == _norm(item.get("answer"))
@@ -2783,6 +2870,10 @@ def _grade_difficulty_payload(items: list[dict[str, Any]]) -> str:
 async def _grade_difficulty(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """P8 难度总评（S1.2）：一次 nano call 按绝对 rubric 复评全组，覆盖 item['difficulty']。
 
+    ⚠️ 整改2（2026-06-12）已**退出主流程**：难度判定并入生题（GENERATE/REGEN/ADD 出题调用
+       同步按嵌入的四档 rubric 产出 difficulty），assemble/revise whole 不再独立调用本函数。
+       函数本体保留供单测 + 潜在按需复评用，rubric 与 _DIFFICULTY_RUBRIC 同口径（22-SSOT §2）。
+
     🔴 G5 降级：items 空 / LLM 异常 / 解析失败 / 个数对不上 → 保留各 item 原 difficulty 值，
     绝不抛、绝不卡死。逐项越界钳到 1-4（与 _clamp_difficult 入库口径一致）。
     返回新 list（不原地改入参）；用 LLM_MODEL_LIGHT 经 _ainvoke_text 的 per-call model 覆盖。
@@ -2855,10 +2946,16 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     """题组摘要（P1 聊天瘦身·PRD-C-012）：左栏只发摘要头——配方/守恒DNA/状态计数/旋钮提示；
     题干/答案/解析全文**只走右栏 artifact 题卡**，聊天流不再复读（用户拍板 2026-06-11）。
 
-    🔴 P8 难度总评（S1.2）：摘要前一次 nano call 按绝对 rubric 复评全组难度，覆盖 item
-    ['difficulty']（入库 difficult/dim4 跟随），失败降级保留原值。P9 排序在 S4 做。"""
-    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（难度总评 nano call 也记票）
-    items = await _grade_difficulty(state.get("items") or [])
+    🔴 整改2（2026-06-12，推翻此前 P8「独立 rubric 复评」设计）：难度判定并入生题——
+    GENERATE/REGEN/ADD 出题 prompt 已嵌入四档 rubric，每道题的 difficulty 由出题调用同步产出，
+    assemble **不再独立走一轮 _grade_difficulty 复评**（省掉首轮 + 整组重做各一次 nano 调用）。
+    缺/非法 difficulty 沿用入库口径兜底（_clamp 到 1~4，缺→2）。P9 排序在下面做。"""
+    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（assemble 已无独立难度调用）
+    # 🔴 整改2：删除独立难度复评调用；难度随生题产出。仅做缺/非法兜底钳到 1~4（不再额外 LLM 调用）。
+    items = [dict(it) for it in (state.get("items") or [])]
+    for it in items:
+        d = _to_int(it.get("difficulty"))
+        it["difficulty"] = max(1, min(DIFFICULTY_CAP, d)) if d is not None else 2  # 缺→2 兜底链
     # 🔴 P9 默认序（PRD-C-013）：assemble 前按总评难度**升序稳定排序**（同难度保持生成序）。
     #   seq 由 _artifact_payload/入库按当前 list 序现编（index=i+1），persisted 簿记跟 item 走
     #   （persisted 是 item 字段，排序不丢、不错位）。指令排序走 exec_reorder（纯代码重排）。
@@ -2907,12 +3004,19 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
 #   修正 / 编辑(remove·regenerate·add) / 确认 / 答疑 / clarify
 # ===========================================================================
 # --- 受约束分类器（PRD-C-010 G4/FP4）：intent 闭集枚举 + 物理护栏 validate_instruction ---
-INTENT_REVISE = "修正"  # 任务口径里的 revise
+INTENT_REVISE = "修正"  # 任务口径里的 revise（纠正母题年级/考点本身 → 重锚重造）
 INTENT_EDIT = "编辑"  # remove/regenerate/add 细分在 ops.action（任务口径 remove|regenerate|add）
 INTENT_CONFIRM = "确认"  # 任务口径里的 confirm
 INTENT_QA = "答疑"  # 任务口径里的 qa
 INTENT_CLARIFY = "clarify"
-VALID_INTENTS = {INTENT_REVISE, INTENT_EDIT, INTENT_CONFIRM, INTENT_QA, INTENT_CLARIFY}
+# 🔴 整改3（2026-06-12）：解法修正 scope —— 老师约束解题方法/纠正年级进度，但**不要求换题**。
+#   实测痛点：「这里是7年级的题目，没学二元方程，只能用一元一次去解题」被误判成「修正(年级)」
+#   走 patch 清 items 整组重做（302s）。改为新 scope：题面保留，仅按新约束重写每道题的解析+
+#   重跑闸B；某题在新约束下根本无法求解才单题重出题面，其余题不动。不触发整组重出。
+INTENT_SOLUTION_ONLY = "解法修正"
+VALID_INTENTS = {
+    INTENT_REVISE, INTENT_EDIT, INTENT_CONFIRM, INTENT_QA, INTENT_CLARIFY, INTENT_SOLUTION_ONLY,
+}
 # 🔴 P9（PRD-C-013）：+reorder —— 纯代码 list 重排（零 LLM 改题），与 remove/regenerate/add
 # 同走指令通道；越界/缺序/混类 → clarify（永不默认重排）。
 EDIT_ACTIONS = {"remove", "regenerate", "add", "reorder"}
@@ -2921,21 +3025,22 @@ ADD_COUNT_MAX = 5  # 与 exec_add 单轮上限同口径（min(n,5)），护栏�
 # 🔴 排版（PRD-C-012 任务3）：分类标准/输出契约/硬约束固定段前移，变动段
 # （母题 DNA、老师最新一句话）移末尾（runtime 追加的 17 号无题组语境段照旧排最后）；
 # 语义一字不改。
-PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类器：intent 只能从 5 个枚举值里选 1 个，禁止发明新值）。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
+PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类器：intent 只能从 6 个枚举值里选 1 个，禁止发明新值）。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
 
-【分类标准】逐条对照，命中哪条选哪条；都不命中选 "clarify"（其中"编辑"细分 3 种 action）：
+【分类标准】逐条对照，命中哪条选哪条；都不命中选 "clarify"（其中"编辑"细分 4 种 action）：
 1. "答疑" —— 判别：只是在问某题怎么解/为什么，不要求改动任何题。例：「为什么第3题选B？」
 2. "编辑"+remove —— 判别：点名删掉某道题，且能给出 1~{n} 内的题号。例：「第2题删掉」→ ops=[{{"action":"remove","index":2}}]
-3. "编辑"+regenerate —— 判别：点名重出/换掉/改造某道题，且能给出 1~{n} 内的题号。例：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
+3. "编辑"+regenerate —— 判别：点名重出/换掉/改造某道题（**换一道新题**），且能给出 1~{n} 内的题号。例：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
 4. "编辑"+add —— 判别：要求再加 N 道题（N 为正整数，单轮最多 5）。例：「再来2道难的」→ ops=[{{"action":"add","count":2,"note":"难的"}}]
 4b. "编辑"+reorder —— 判别：只调整题目**顺序**（不改题/不增删），且能给出一个**覆盖全部 {n} 道**的新次序。例（共3道）：「把顺序换成 3 1 2」→ ops=[{{"action":"reorder","order":[3,1,2]}}]。order 必须是 1~{n} 的**全排列**（每个题号恰出现一次）；只说「按难度排」「倒过来」这种没给出明确全排列的，**不要自己编 order**，留空 ops、intent 取 "clarify" 让老师给次序。
-5. "修正" —— 判别：老师纠正的是母题的年级或考点本身（不是改某道变式）。例：「这其实是八年级的题」→ mother_correction={{"grade":"八年级","kp":null}}
-6. "确认" —— 判别：老师对这组题满意，要入库/保存/结束。例：「这组可以了，入库吧」
-7. "clarify" —— 判别：撞硬守恒（要换主考点/改年级）、题号给不出或超出 1~{n}、或意图真说不清。例：「改成考函数的题」（撞守恒）
+5. "解法修正" —— 判别：老师**约束解题方法**、或**纠正年级/进度从而限定能用的解法**，但**不要求换题**（题面保留，只改解析/解法）。例：「这里是7年级的题目，没学二元方程，只能用一元一次去解题」→ intent=解法修正，method_constraint=「只能用一元一次方程，不用二元方程」，grade_correction=「七年级」。又例：「解析别用因式分解，改用配方法」→ 解法修正，method_constraint=「改用配方法，不用因式分解」。🔴 关键区分：老师明确改的是**怎么解**（解析/方法），不是**换一道题**——别误判成"修正(整组重锚重做)"或"编辑+regenerate(换题)"。
+6. "修正" —— 判别：老师纯纠正母题的年级或考点**本身**、要重新锚定**重出整组**（不是只改解法）。例：「这其实是八年级的二次函数题，重新出」→ mother_correction={{"grade":"八年级","kp":"二次函数"}}。⚠ 若老师只是限定解法（见第5条），优先判"解法修正"，别走整组重做。
+7. "确认" —— 判别：老师对这组题满意，要入库/保存/结束。例：「这组可以了，入库吧」
+8. "clarify" —— 判别：撞硬守恒（要换主考点）、题号给不出或超出 1~{n}、或意图真说不清。例：「改成考函数的题」（撞守恒换考点）
 
 只输出一个 JSON（不要解释、不要 markdown fence）：
 {{
-  "intent": "修正|编辑|确认|答疑|clarify",   // 5 选 1
+  "intent": "解法修正|修正|编辑|确认|答疑|clarify",   // 6 选 1
   "ops": [                                  // intent=编辑 时的操作列表（其余为空数组）
     {{"action":"remove|regenerate|add|reorder", "index": 1, "count": 1, "order": [3,1,2], "note":"自由约束/旋钮说明"}}
   ],
@@ -2943,14 +3048,17 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
   "comp": "可被旋钮吸收的软约束(超旋钮但 best-effort 能顺的)，没有填 null",
   "extra_constraints": ["其余自由约束句"],
   "mother_correction": {{"grade":null, "kp":null}},  // intent=修正 时老师纠正的年级/考点，否则全 null
+  "method_constraint": null,   // intent=解法修正 时老师对解题方法的约束（原话归纳，如"只能用一元一次方程"），否则 null
+  "grade_correction": null,    // intent=解法修正 时若老师顺带纠正了年级（如"七年级"），填规范化年级，否则 null
   "confidence": 0.0~1.0
 }}
 
 硬约束（违反任何一条，程序护栏会把你的输出整体降级为 clarify）：
-- intent 只能是上述 5 个枚举值之一；ops.action 只能是 remove/regenerate/add/reorder。
+- intent 只能是上述 6 个枚举值之一；ops.action 只能是 remove/regenerate/add/reorder。
 - remove/regenerate 的 index 从 1 起、必须 ≤ {n}；拿不准题号时 ops 留空、intent 取 "clarify"。
 - reorder 的 order 必须是 1~{n} 的全排列（长度={n}、每号恰一次）；给不全/有重复/越界 → ops 留空、intent 取 "clarify"。
-- add 的 count 必须是正整数；intent=答疑/确认/修正/clarify 时 ops 必须为空数组。
+- add 的 count 必须是正整数；intent=答疑/确认/修正/解法修正/clarify 时 ops 必须为空数组。
+- intent=解法修正 时 method_constraint 必须非空（说清不能用什么/必须用什么）；说不清就 clarify。
 - 同一句里不要混多类操作（如又删又排）；混了 → intent 取 "clarify" 请老师分句说。
 - 解析不出来 = "clarify"，绝不猜成删题。
 
@@ -3003,9 +3111,13 @@ def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]
          同类多 op（删第2、3题 / 重出第1、2题）合法保留，exec_* 一次吃完。
     - R8 reorder（P9·PRD-C-013）：order 必须是 1..current_item_count 的**全排列**（长度=N、
          每号恰一次）；缺序/重复/越界/混类 → clarify（永不默认重排）。
+    - R9 解法修正（整改3·2026-06-12）：method_constraint 必须非空（说清不能用什么/必须用什么）；
+         缺失 → clarify。ops 物理清空（与 R6 同哲学，解法修正带不动编辑 op）。
     """
 
     def _normalized(p: dict) -> dict[str, Any]:
+        mc = p.get("method_constraint")
+        gc = p.get("grade_correction")
         return {
             "intent": p.get("intent"),
             "ops": [],
@@ -3019,6 +3131,9 @@ def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]
             "mother_correction": (
                 p.get("mother_correction") if isinstance(p.get("mother_correction"), dict) else {}
             ),
+            # 🔴 整改3：解法修正 scope 字段（method_constraint 必填，grade_correction 可选）。
+            "method_constraint": (str(mc).strip() if mc and str(mc).strip() else None),
+            "grade_correction": (str(gc).strip() if gc and str(gc).strip() else None),
             "confidence": p.get("confidence"),
         }
 
@@ -3035,6 +3150,13 @@ def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]
     intent = base["intent"]
     if intent not in VALID_INTENTS:  # R1
         return _clarify(base)
+
+    # 🔴 整改3·R9：解法修正必须给出 method_constraint（说清不能用什么/必须用什么）；
+    #   缺失 → 降级 clarify（不空转一次解法重写）。ops 物理清空（R6 同哲学）。
+    if intent == INTENT_SOLUTION_ONLY:
+        if not base.get("method_constraint"):
+            return _clarify(base)
+        return base
 
     if intent != INTENT_EDIT:  # R6：非编辑意图物理上带不动 ops
         return base
@@ -3132,16 +3254,19 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
 
 def route_after_parse(
     state: VariantState,
-) -> Literal["patch", "dispatch", "answer", "save", "ask_clarify"]:
-    """parse 后分诊（设计 §3 mermaid）：修正→patch / 编辑→dispatch / 确认→save / 答疑→answer / clarify。"""
+) -> Literal["patch", "dispatch", "answer", "save", "solution_only", "ask_clarify"]:
+    """parse 后分诊（设计 §3 mermaid）：修正→patch / 编辑→dispatch / 确认→save / 答疑→answer /
+    解法修正→solution_only（整改3：题面不动只改解析）/ clarify。"""
     intent = (state.get("pending") or {}).get("intent")
-    if intent == "修正":
+    if intent == INTENT_SOLUTION_ONLY:
+        return "solution_only"
+    if intent == INTENT_REVISE:
         return "patch"
-    if intent == "编辑":
+    if intent == INTENT_EDIT:
         return "dispatch"
-    if intent == "确认":
+    if intent == INTENT_CONFIRM:
         return "save"
-    if intent == "答疑":
+    if intent == INTENT_QA:
         return "answer"
     return "ask_clarify"
 
@@ -3267,6 +3392,12 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                         difficulty=old.get("difficulty") or 3,
                         injected_kp=json.dumps(old.get("injected_kp"), ensure_ascii=False),
                     )
+                    # 🔴 整改1：确定上下文硬约束（重出某道也压解题不越界）。
+                    + "\n\n"
+                    + _context_block(facts)
+                    # 🔴 W2 守恒硬约束注入（T1）：重出仍守白名单/考察类型/最难步基因。
+                    + "\n\n"
+                    + _conservation_clause(facts.get("dna"))
                 )
             ]
         )
@@ -3316,8 +3447,12 @@ ADD_PROMPT = (
     """你是浙教版初中数学命题专家。基于母题 DNA，**新增** {n} 道举一反三变式。
 
 只输出 JSON 数组(不要解释)，每元素：
-{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~5,"level":"normal/hard","injected_kp":"相邻kp名或null",
+{{"stem":"题干","answer":"标准答案","solution":"完整解析","qtype":"选择/填空/解答","difficulty":1~4,"level":"normal/hard","injected_kp":"相邻kp名或null",
   "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
+
+"""
+    + _DIFFICULTY_RUBRIC
+    + """
 
 格式硬规定：数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
 
@@ -3382,6 +3517,9 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
                     skeleton=facts["skeleton"],
                     extra=extra,
                 )
+                # 🔴 整改1：确定上下文硬约束（补题同样压解题不越界）。
+                + "\n\n"
+                + _context_block(facts)
                 # 🔴 W2 守恒硬约束注入（T1）：补题同样守白名单/考察类型/最难步基因。
                 + "\n\n"
                 + _conservation_clause(facts.get("dna"))
@@ -3471,6 +3609,160 @@ async def exec_reorder(state: VariantState, config: RunnableConfig) -> VariantSt
         "llm_call_budget": budget,
         "messages": [AIMessage(content=f"已按你给的次序重排这组题（共 {len(reordered)} 道），入库会按当前顺序。")],
     }
+
+
+# ===========================================================================
+# 🔴 整改3（2026-06-12）：解法修正 scope —— 题面保留，只按新约束重写每道题的解析。
+#   实测痛点：「这里是7年级的题目，没学二元方程，只能用一元一次去解题」原被误判 修正→整组
+#   重做（302s）。现走本节点：题面不动、逐题重写解析（带确定上下文块 + 新方法约束）+ 重跑闸B；
+#   某题在新约束下根本无法求解（如必须二元才能解）才单题重出题面（_regen_once），其余题不动。
+#   年级修正同步更新锚定事实（analysis.grade + 头部 chip），但**不触发整组重出**。
+# ===========================================================================
+# 单题解析重写器：题面/答案保留不动，只按新方法约束重写解析。判断本题在新约束下是否可解：
+#   solvable=true → 给出新解析；solvable=false → 说明为何（如必须二元才能解）→ 调用方单题重出。
+SOLUTION_ONLY_PROMPT = """你是浙教版初中数学解题老师。下面这道题的**题面和标准答案保持不变**，老师对解题方法提了新约束，请**只重写解析（解题过程）**，使其严格遵守新约束。
+
+主考点(硬守恒): {kp_name}
+年级(硬守恒): {grade}
+题型: {qtype}
+题干（不要改）: {stem}
+标准答案（不要改）: {answer}
+当前解析: {solution}
+
+🔴 老师对解题方法的新约束（必须遵守）: {method_constraint}
+
+请判断：在老师的新方法约束下，**这道题的题面**是否还能解出（得到与标准答案一致的结果）？
+- 若能解：solvable=true，重写一份只用约束内方法的完整解析（过程 + 答案），不改题面、不改标准答案。
+- 若根本无法用约束内方法求解（如题面本身必须用被禁止的方法才能解）：solvable=false，filled reason 说明原因（这种题会被换成另一道符合约束的题，由后续流程处理）。
+
+只输出一个 JSON（不要解释、不要 markdown fence）：
+{{"solvable": true, "solution": "重写后的完整解析（只用约束内方法）"}}
+或
+{{"solvable": false, "reason": "为什么这道题面无法用约束内方法求解"}}
+
+格式硬规定：solution 里数学式一律 $...$ 包裹（行间 $$...$$），禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。"""
+
+
+async def _rewrite_solution_one(
+    item: dict[str, Any], facts: dict, method_constraint: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """单题解析重写（整改3）。返回 (solution_text, None)=可解已重写；(None, reason)=新约束下不可解。
+    LLM 异常/解析失败 → (None, 降级 reason)，调用方按「保留原解析打 ⚠」或单题重出处理（G5 不抛）。"""
+    prompt = (
+        SOLUTION_ONLY_PROMPT.format(
+            kp_name=facts["kp_name"],
+            grade=facts["grade"],
+            qtype=str(item.get("qtype") or facts["qtype"]),
+            stem=str(item.get("stem") or ""),
+            answer=str(item.get("answer") or ""),
+            solution=str(item.get("solution") or ""),
+            method_constraint=method_constraint,
+        )
+        # 🔴 整改1：确定上下文硬约束（进度/考点/教材版本），压解析不越界。
+        + "\n\n"
+        + _context_block(facts)
+    )
+    try:
+        text = await _ainvoke_text([HumanMessage(content=prompt)], max_tokens=_regen_max_tokens())
+    except Exception:  # noqa: BLE001 — 重写是增强，LLM 异常 → 降级（G5）
+        return None, "解析重写调用失败"
+    parsed = _parse_json(text)
+    if not isinstance(parsed, dict):
+        return None, "解析重写结果无法解析"
+    if parsed.get("solvable") is False:
+        return None, str(parsed.get("reason") or "新方法约束下无法求解")
+    sol = parsed.get("solution")
+    if not sol or not str(sol).strip():
+        return None, "解析重写未给出有效解析"
+    return {"solution": _sanitize_rich_text(str(sol))}, None
+
+
+async def exec_solution_only(state: VariantState, config: RunnableConfig) -> VariantState:
+    """🔴 整改3·解法修正节点：题面保留，逐题按新方法约束重写解析 + 重跑闸B；某题新约束下不可解 →
+    单题重出题面（_regen_once 注 edit_note）。年级修正同步 analysis.grade（chip 更新）+ 重锚 facts，
+    **不触发整组重出**。降级铁律：任何环节失败 → 保留原题打 ⚠，绝不卡死、绝不空轮。"""
+    budget = _budget_bind(state)  # 携带编辑轮预算（每题解析重写 / 单题重出各记票）
+    pending = state.get("pending") or {}
+    method_constraint = str(pending.get("method_constraint") or "").strip()
+    grade_correction = str(pending.get("grade_correction") or "").strip()
+    items = [dict(it) for it in (state.get("items") or [])]
+    if not items or not method_constraint:
+        # 无题 / 无约束（护栏应已拦）→ 退化回问，不空转
+        return {
+            "pending": None,
+            "messages": [
+                AIMessage(content="我没拿准你要怎么改解法（能再说一次只能用什么方法吗？），这次先没改。")
+            ],
+        }
+
+    update: VariantState = {"pending": None, "llm_call_budget": budget}
+    analysis = dict(state.get("analysis") or {})
+    # ① 年级修正：更新锚定事实（chip 跟头部 facts 走）。⚠ 只改年级文案/置信，不清 anchored（不重锚
+    #    整组）——解法修正不换考点，年级是为了让确定上下文块的「进度边界」对，不触发 classify。
+    if grade_correction:
+        g = dict(analysis.get("grade") or {})
+        g["value"] = grade_correction
+        g["confidence"] = 0.9  # 老师明示 → 高置信
+        g.pop("code", None)  # 清旧 code，_grade_to_code 现算新进度边界
+        analysis["grade"] = g
+        update["analysis"] = analysis
+
+    facts = _mother_facts({**state, "analysis": analysis})
+
+    _emit_stage("solution", "按新方法重写解析", "running", f"共 {len(items)} 道")
+
+    async def _one(i: int, it: dict[str, Any]) -> dict[str, Any]:
+        sol, reason = await _rewrite_solution_one(it, facts, method_constraint)
+        if sol is not None:
+            # 可解 → 题面不动，仅换解析；清 check 重跑闸B（解析变了，验算结论须刷新）
+            new_it = dict(it)
+            new_it["solution"] = sol["solution"]
+            new_it["from_edit"] = True  # 闸B 见 from_edit：FAIL 不回炉换题、保留打 ⚠ 交人审
+            new_it["edit_note"] = f"解题方法约束：{method_constraint}"
+            new_it.pop("check", None)
+            rechecked, _dropped = await _check_one_item(new_it, facts, i, len(items))
+            return rechecked if rechecked is not None else new_it
+        # 不可解 → 仅此单题重出题面（_regen_once 注 edit_note 守新约束）→ 重跑闸B
+        if _budget_exhausted():
+            # 预算耗尽 → 不单题重出，保留原题打 ⚠ 注记（降级，不卡死）
+            warn_it = dict(it)
+            warn_it["structure_lint"] = {"badge": "warn", "defects": [f"新方法约束下原题难解：{reason}"]}
+            return warn_it
+        _emit_stage(
+            "solution", "按新方法重写解析", "warn",
+            f"第 {i + 1} 题原题面在新方法下难解，单题重出中",
+        )
+        seed = dict(it)
+        seed["edit_note"] = f"必须可用以下方法求解：{method_constraint}"
+        seed["from_edit"] = True
+        draft = await _regen_once(seed, facts, feedback=f"原题在新方法约束下难解：{reason}")
+        if not draft:
+            warn_it = dict(it)
+            warn_it["structure_lint"] = {"badge": "warn", "defects": [f"新方法约束下原题难解且重出失败：{reason}"]}
+            return warn_it
+        draft["from_edit"] = True
+        draft["edit_note"] = seed["edit_note"]
+        for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id", "level"):
+            if it.get(k) is not None:
+                draft[k] = it[k]
+        draft.pop("check", None)
+        rechecked, _dropped = await _check_one_item(draft, facts, i, len(items))
+        return rechecked if rechecked is not None else draft
+
+    sem = asyncio.Semaphore(GATE_CONCURRENCY)
+
+    async def _guarded(i: int, it: dict[str, Any]) -> dict[str, Any]:
+        async with sem:
+            return await _one(i, it)
+
+    new_items = await asyncio.gather(*[_guarded(i, it) for i, it in enumerate(items)])
+    for it in new_items:
+        _format_item_stem(it)
+    _emit_stage("solution", "按新方法重写解析", "done", f"{len(new_items)} 道")
+    # 🔴 解法修正改了题集内容（解析/个别题面）→ 清陈旧缺陷外显，回 assemble 收口快照
+    update["items"] = list(new_items)
+    update["shape_defects"] = []
+    return update
 
 
 # --- 修正：patch 母题字段 → 只重算受影响下游（设计 §6 中途修正） ----------------
@@ -4025,12 +4317,13 @@ async def revise_item(
         final = rechecked if rechecked is not None else draft
         final["manual_edited"] = True
         _format_item_stem(final)
-        # 🔴 G12b：whole 重做后难度须重判（守铁律：难度=LLM rubric 评级，不做关键词 hack——
-        #   「难一点」不直接 +1，由 rubric 对新题断言）。复用既有 _grade_difficulty（nano 绝对档），
-        #   失败保留原难度（_grade_difficulty 内部已对 LLM 异常/解析失败/个数对不上整体降级返回原值）。
-        old_difficulty = _to_int(final.get("difficulty"))
-        graded = await _grade_difficulty([final])
-        final = graded[0] if graded else final
+        # 🔴 整改2（2026-06-12，推翻 G12b「独立 _grade_difficulty 重判」）：whole 重做的难度由
+        #   REGEN 出题调用按嵌入的四档 rubric 同步断言（不再额外打一轮 nano）。守铁律不破：
+        #   难度=LLM rubric 评级，不做关键词 hack（「难一点」不直接 +1，由 rubric 对新题断言）。
+        #   缺/非法 difficulty 钳到 1~4（缺→2 兜底）。
+        old_difficulty = _to_int(it.get("difficulty"))  # 重做前原档（用于 level 升档判定）
+        nd = _to_int(final.get("difficulty"))
+        final["difficulty"] = max(1, min(DIFFICULTY_CAP, nd)) if nd is not None else 2
         # level 同步：新难度 ≥4（压轴）或较原值升档 → 标 hard（star/星级跟 difficulty 走，level 一致）。
         new_difficulty = _to_int(final.get("difficulty"))
         if new_difficulty is not None and (
@@ -4038,7 +4331,7 @@ async def revise_item(
             or (old_difficulty is not None and new_difficulty > old_difficulty)
         ):
             final["level"] = "hard"
-        final["manual_edited"] = True  # _grade_difficulty 复制了 dict，重申 manual 印记
+        final["manual_edited"] = True  # 重申 manual 印记（rechecked 可能复制过 dict）
         new_items[index - 1] = final
         return {"items": new_items}, {"ok": True}, None
 
@@ -4058,6 +4351,8 @@ async def revise_item(
         current=current,
         instruction=str(instruction or "").strip(),
     )
+    # 🔴 整改1：改写解法骨架/场景同样压「解题方法不越学生进度」。
+    prompt = prompt + "\n\n" + _context_block(facts)
     try:
         text = await _ainvoke_text([HumanMessage(content=prompt)])
     except Exception as e:  # noqa: BLE001 — 改写是增强，LLM 异常 → 降级不崩（G5）
@@ -4142,6 +4437,7 @@ graph.add_node("exec_remove", exec_remove)
 graph.add_node("exec_regenerate", exec_regenerate)
 graph.add_node("exec_add", exec_add)
 graph.add_node("exec_reorder", exec_reorder)  # P9·指令排序（纯代码重排，不过 assemble）
+graph.add_node("exec_solution_only", exec_solution_only)  # 整改3·解法修正（题面留只改解析+重跑闸B）
 graph.add_node("patch", patch)
 graph.add_node("ask_clarify", ask_clarify)
 graph.add_node("persist_to_bank", persist_to_bank)
@@ -4201,6 +4497,7 @@ graph.add_conditional_edges(
         "dispatch": "dispatch",  # 编辑意图 → 三层漏斗节点收口（remove/regenerate/add）
         "answer": "answer_question",
         "save": "persist_to_bank",
+        "solution_only": "exec_solution_only",  # 整改3·解法修正（题面留只改解析）
         "ask_clarify": "ask_clarify",
     },
 )
@@ -4243,6 +4540,9 @@ graph.add_edge("exec_add", "gene_gate")
 # 🔴 reorder 只挪槽位、不产新题、不重判 → 直连 END（已自发 artifact 整帧；**不过 assemble**，
 # 否则 assemble 的默认难度升序排序会覆盖老师手排）。
 graph.add_edge("exec_reorder", END)
+# 整改3·解法修正：节点内已逐题重写解析 + 重跑闸B（每题 check 已定）→ 过 assemble 收口快照
+# （刷新头部 chip/状态计数 + 题型规范 + artifact 整帧）。
+graph.add_edge("exec_solution_only", "assemble")
 
 # 答疑/clarify → END（不改 items，回等待下一句）
 graph.add_edge("answer_question", END)

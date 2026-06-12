@@ -284,6 +284,31 @@ def empty_dna(flags: list[str] | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 对外入口
 # ---------------------------------------------------------------------------
+async def _call_llm(prompt: str, *, model: str | None, invoke: Any) -> str | None:
+    """统一 LLM 调用出口（Q1 可观测性修复·2026-06-12）：
+    - invoke 非 None（生产路径，variant.classify 注入 variant._ainvoke_text）→ 走它：
+      自带 _trace_llm(JSONL llm_trace) + conv_trace(MySQL) 埋点，锚定/DNA 抽取这一步从此能在
+      trace 里看到（根因：本模块原直调 relay_pool.ainvoke_failover，绕过了所有埋点）。
+    - invoke 为 None（单测/独立调用）→ 退回直调 relay_pool（不埋点，行为不变）。
+    调用异常 → 返回 None（调用方按空 DNA 兜底）。"""
+    chosen_model = model if model is not None else settings.LLM_MODEL_LIGHT
+    try:
+        if invoke is not None:
+            # invoke 契约 = variant._ainvoke_text(messages, *, model, max_tokens, ...) → str
+            return await invoke(
+                [HumanMessage(content=prompt)], model=chosen_model
+            )
+        resp, _relay, _model_used, _fb = await relay_pool.ainvoke_failover(
+            [HumanMessage(content=prompt)],
+            max_tokens=settings.VARIANT_MAX_TOKENS,
+            tags=["skip_stream"],
+            model=chosen_model,
+        )
+        return _content_text(resp)
+    except Exception:  # noqa: BLE001 — 抽取是增强，调用失败 → None（调用方空 DNA 兜底）
+        return None
+
+
 async def extract_dna(
     *,
     stem: str,
@@ -293,6 +318,7 @@ async def extract_dna(
     leaf_pool: list[tuple[str, str]],
     tag_pool: list[str] | None = None,
     model: str | None = None,
+    invoke: Any = None,
 ) -> dict[str, Any]:
     """单题 DNA 抽取（DNA 契约 v1）。
 
@@ -302,6 +328,8 @@ async def extract_dna(
       leaf_pool：该年级叶子知识点池 [(id, name), ...]——LLM 只能从池内选 id（两步锚定第二步）。
       tag_pool：标签复用池（该 kp 高频词，可空；空则降级继续 +FLAG_TAG_POOL_EMPTY）。
       model：per-call 模型覆盖（默认走 settings.LLM_MODEL_LIGHT = nano 降本；锚定/抽取轻活）。
+      invoke：可观测性注入（Q1 修复）。生产路径由 variant.classify 注入 variant._ainvoke_text
+        → 锚定/DNA 抽取这一步落 trace（label=dna_extract）；None → 直调 relay_pool（单测不埋点）。
 
     返回 DNA 契约 v1 dict（键见 empty_dna）：
       main_kp(池内真 id 或 None) / secondary_kps(≤3 池内 id) / qtype / exam_type /
@@ -318,20 +346,11 @@ async def extract_dna(
         stem=stem, answer=answer, analyze=analyze, grade=grade,
         leaf_pool=leaf_pool, tag_pool=tag_pool,
     )
-    chosen_model = model if model is not None else settings.LLM_MODEL_LIGHT
 
-    try:
-        # 走 relay_pool（熔断转移）；JSON 中间产物 → skip_stream（不外放 token 流）。
-        resp, _relay, _model_used, _fb = await relay_pool.ainvoke_failover(
-            [HumanMessage(content=prompt)],
-            max_tokens=settings.VARIANT_MAX_TOKENS,
-            tags=["skip_stream"],
-            model=chosen_model,
-        )
-    except Exception:  # noqa: BLE001 — 抽取是增强，调用失败 → 空 DNA 兜底（触发上层 clarify）
+    text = await _call_llm(prompt, model=model, invoke=invoke)
+    if text is None:
         return empty_dna([FLAG_LLM_ERROR, FLAG_MAIN_KP_OOB])
 
-    text = _content_text(resp)
     raw = _parse_json(text)
     if not isinstance(raw, dict):
         return empty_dna([FLAG_LLM_PARSE_FAIL, FLAG_MAIN_KP_OOB])
@@ -370,6 +389,7 @@ async def refine_tags_with_pool(
     stem: str,
     tag_pool: list[str],
     model: str | None = None,
+    invoke: Any = None,
 ) -> dict[str, Any]:
     """🔴 T2：拿 kp 专属标签池重选 tags 维，merge 回已抽的 DNA（不动其余维度）。
 
@@ -391,18 +411,12 @@ async def refine_tags_with_pool(
         cur_tags="、".join(cur_tags) if cur_tags else "（无）",
         tag_pool="、".join(pool),
     )
-    chosen_model = model if model is not None else settings.LLM_MODEL_LIGHT
-    try:
-        resp, _relay, _model_used, _fb = await relay_pool.ainvoke_failover(
-            [HumanMessage(content=prompt)],
-            max_tokens=settings.VARIANT_MAX_TOKENS,
-            tags=["skip_stream"],
-            model=chosen_model,
-        )
-    except Exception:  # noqa: BLE001 — 窄调用失败 → 保留原 tags 降级（不卡死）
-        return dna
+    # Q1 可观测性修复：标签复用窄调用同样走可观测出口（invoke 注入则落 trace，None 直调）。
+    text = await _call_llm(prompt, model=model, invoke=invoke)
+    if text is None:
+        return dna  # 窄调用失败 → 保留原 tags 降级（不卡死）
 
-    raw = _parse_json(_content_text(resp))
+    raw = _parse_json(text)
     if not isinstance(raw, dict):
         return dna
     new_tags = [str(t).strip() for t in (raw.get("tags") or []) if str(t).strip()][:TAGS_MAX]
