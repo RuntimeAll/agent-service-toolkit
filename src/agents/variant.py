@@ -813,7 +813,7 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
     emitted = {"done": False}
     timer = asyncio.create_task(_stage1_timer_done(emitted))
     try:
-        text = await _ainvoke_text([msg])
+        text = await _ainvoke_text([msg], model=settings.variant_model("analyze"))
     finally:
         timer.cancel()  # 大调用结束 → 取消定时（无论成功/异常都不留游离 task）
         try:
@@ -942,6 +942,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         leaf_pool=leaf_pool,
         tag_pool=[],
         invoke=_ainvoke_text,  # 🔴 Q1：经 _ainvoke_text → 锚定/DNA 抽取这一步落 trace（label=dna_extract）
+        model=settings.variant_model("dna"),  # 按环节分档（默认 nano；缺省回退 dna_extract 自身的 LLM_MODEL_LIGHT）
     )
 
     main_kp = dna.get("main_kp")
@@ -958,6 +959,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             dna = await dna_extract.refine_tags_with_pool(
                 dna, stem=mother_dna.get("stem") or "", tag_pool=kp_tag_pool,
                 invoke=_ainvoke_text,  # 🔴 Q1：标签复用窄调同样落 trace（label=dna_tags）
+                model=settings.variant_model("dna"),  # 按环节分档（默认 nano）
             )
 
     await client.aclose()
@@ -1785,7 +1787,8 @@ async def _extract_knobs(state: VariantState) -> dict[str, Any]:
         return {}
     try:
         text = await _ainvoke_text(
-            [HumanMessage(content=KNOBS_PROMPT.format(utterance=user_text))]
+            [HumanMessage(content=KNOBS_PROMPT.format(utterance=user_text))],
+            model=settings.variant_model("analyze"),
         )
     except Exception:  # noqa: BLE001 — 旋钮抽取是增强不是关卡
         return {}
@@ -1963,7 +1966,11 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             pass
 
     try:
-        text = await _ainvoke_text([HumanMessage(content=prompt)], on_delta=_gen_progress)
+        text = await _ainvoke_text(
+            [HumanMessage(content=prompt)],
+            on_delta=_gen_progress,
+            model=settings.variant_model("generate"),
+        )
     except BaseException:
         # 🔴 孤儿收口（对抗审修复）：全中转站熔断耗尽等按设计外抛时，已 spawn 的 eager
         # task 必须 cancel + 等待退场——否则每条链最多还有 4-5 次 LLM 调用在后台静默烧完，
@@ -1991,7 +1998,10 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             + "。请整组重出，严格满足配方（数量/题型配比/难度计划逐项核对后再输出）。"
         )
         try:
-            retry_text = await _ainvoke_text([HumanMessage(content=prompt + feedback)])
+            retry_text = await _ainvoke_text(
+                [HumanMessage(content=prompt + feedback)],
+                model=settings.variant_model("generate"),
+            )
             retry_items = _parse_generated_items(retry_text, facts)
         except Exception:  # noqa: BLE001 — 重试失败保留首稿（绝不卡死）
             retry_items = []
@@ -2228,7 +2238,9 @@ async def _extract_payload(
     feedback = ""
     for _ in range(2):
         try:
-            text = await _ainvoke_text([HumanMessage(content=base + feedback)])
+            text = await _ainvoke_text(
+                [HumanMessage(content=base + feedback)], model=settings.variant_model("solve")
+            )
         except Exception:  # noqa: BLE001 — 抽取层异常不许逃逸炸 solve_explain → degrade
             return None
         data = _parse_json(text)
@@ -2406,7 +2418,10 @@ async def _solve_one(stem: str) -> dict:
     """真解一道题。🔴 LLM 调用异常吞掉返 {}（与 _extract_payload/_gene_judge_one 契约对齐）：
     瞬时网关抖动绝不外抛炸掉 solve_explain/gene_gate 节点（G5），调用方按"没解出来"降级。"""
     try:
-        text = await _ainvoke_text([HumanMessage(content=SOLVE_PROMPT.format(stem=stem or ""))])
+        text = await _ainvoke_text(
+            [HumanMessage(content=SOLVE_PROMPT.format(stem=stem or ""))],
+            model=settings.variant_model("solve"),
+        )
     except Exception:  # noqa: BLE001
         return {}
     solved = _parse_json(text) or {}
@@ -2455,6 +2470,8 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
             ],
             # 🔴 整改4：回炉瘦身 max_tokens 上限压输出失控（出题主调用 generate/add 不动）。
             max_tokens=_regen_max_tokens(),
+            # 🔴 回炉 = 出题环节（红线不降档）：走 generate 档（默认 COMPATIBLE_MODEL）。
+            model=settings.variant_model("generate"),
         )
     except Exception:  # noqa: BLE001 — 回炉 LLM 异常 → 视同重生失败（G5）
         return None
@@ -3473,7 +3490,8 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                     + "\n\n"
                     + _conservation_clause(facts.get("dna"))
                 )
-            ]
+            ],
+            model=settings.variant_model("generate"),
         )
         regen = _parse_json(regen_text)
         if isinstance(regen, dict) and regen.get("stem"):
@@ -3598,7 +3616,8 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
                 + "\n\n"
                 + _conservation_clause(facts.get("dna"))
             )
-        ]
+        ],
+        model=settings.variant_model("generate"),
     )
     data = _parse_json(text)
     if not isinstance(data, list):
@@ -3737,7 +3756,11 @@ async def _rewrite_solution_one(
         + _context_block(facts)
     )
     try:
-        text = await _ainvoke_text([HumanMessage(content=prompt)], max_tokens=_regen_max_tokens())
+        text = await _ainvoke_text(
+            [HumanMessage(content=prompt)],
+            max_tokens=_regen_max_tokens(),
+            model=settings.variant_model("generate"),
+        )
     except Exception:  # noqa: BLE001 — 重写是增强，LLM 异常 → 降级（G5）
         return None, "解析重写调用失败"
     parsed = _parse_json(text)
@@ -4428,7 +4451,9 @@ async def revise_item(
     # 🔴 整改1：改写解法骨架/场景同样压「解题方法不越学生进度」。
     prompt = prompt + "\n\n" + _context_block(facts)
     try:
-        text = await _ainvoke_text([HumanMessage(content=prompt)])
+        text = await _ainvoke_text(
+            [HumanMessage(content=prompt)], model=settings.variant_model("generate")
+        )
     except Exception as e:  # noqa: BLE001 — 改写是增强，LLM 异常 → 降级不崩（G5）
         return {}, {"ok": False, "error": f"改写调用失败，已保留原值：{e}"}, None
     parsed = _parse_json(text)

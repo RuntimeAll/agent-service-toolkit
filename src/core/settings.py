@@ -181,6 +181,17 @@ class Settings(BaseSettings):
     # 轻活模型（S1.1）：难度总评等无识图、可降本的调用点经 per-call model 覆盖走它；
     # 留空 → 各调用点退回默认（relay 配置 model），行为不变。
     LLM_MODEL_LIGHT: str = "gpt-5-nano"
+
+    # === 按环节分档模型路由（PRD-C-009 变式·2026-06-12）===
+    # 举一反三管线按「环节」分档配模型：前置抽取环节降本（nano），深度思考档（gpt-5.4）只留
+    # 给真正出题。四项 .env 可覆盖；缺省（None）→ 走 variant_model() 的回退链 = 现行为。
+    #   ANALYZE = 读图+配方（多模态）；DNA = 锚定/标签池 refine；SOLVE = 闸B 独立重解+载荷抽取；
+    #   GENERATE = 出题/回炉/补题/solution_only 重写（红线：这次不降档，默认仍 COMPATIBLE_MODEL）。
+    # 换 deepseek 等：只改这四个 .env 项，代码不动。
+    VARIANT_MODEL_ANALYZE: str | None = None
+    VARIANT_MODEL_DNA: str | None = None
+    VARIANT_MODEL_SOLVE: str | None = None
+    VARIANT_MODEL_GENERATE: str | None = None
     RELAY_FAIL_THRESHOLD: int = 3  # 连续失败 N 次 → 熔断器 trip
     RELAY_COOLDOWN_S: float = 30.0  # 熔断冷却秒数（之后 half-open 探活）
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
@@ -288,6 +299,37 @@ class Settings(BaseSettings):
                         raise ValueError(f"Missing required Azure deployments: {missing_models}")
                 case _:
                     raise ValueError(f"Unknown provider: {provider}")
+
+    def variant_model(self, env: str) -> str | None:
+        """按环节解析变式管线该用哪个模型（per-call model 覆盖值）。
+
+        env ∈ {"analyze","dna","solve","generate"}。返回值传给 _ainvoke_text(model=...)：
+        - 返回 str → 该次请求换这个 model（站点不变）；
+        - 返回 None → 沿用 relay 配置 model（= COMPATIBLE_MODEL，深度思考档），旧行为。
+
+        缺省（对应 VARIANT_MODEL_* 为 None）即「回退现行为」：
+        - analyze   → None（多模态读图保深度档 gpt-5.4；nano 视觉实测 2/3 空返、1/3 站点 404，不可降）
+        - dna       → LLM_MODEL_LIGHT（锚定/标签是池内选 id 的分类活，本就走 nano）
+        - solve     → None（闸B 独立重解+载荷抽取，nano-vs-5.4 对照一致率 66.7%<90% 且 nano
+                      多 1 个 degrade（分式方程），不达标 → 保深度档；数据见 tools/solve_model_ab.out）
+        - generate  → None（出题/回炉/补题/重写，红线不降档，保 COMPATIBLE_MODEL）
+        """
+        override = {
+            "analyze": self.VARIANT_MODEL_ANALYZE,
+            "dna": self.VARIANT_MODEL_DNA,
+            "solve": self.VARIANT_MODEL_SOLVE,
+            "generate": self.VARIANT_MODEL_GENERATE,
+        }.get(env)
+        if override:
+            return override
+        # 缺省回退链（= 现行为；改默认值在此处一处定，调用点不重复）
+        defaults: dict[str, str | None] = {
+            "analyze": None,
+            "dna": self.LLM_MODEL_LIGHT,
+            "solve": None,
+            "generate": None,
+        }
+        return defaults.get(env)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -1,0 +1,40 @@
+=== nano 视觉先验 · model=gpt-5-nano ===
+{
+  "url": "https://question-1256278081.cos.ap-shanghai.myqcloud.com/2024-10-17/d247e21b-388d-41d0-a46a-de19e17a5f70/list/16/question.png",
+  "model_used": "gpt-5-nano",
+  "relay": "aigeek",
+  "dur_s": 64.8,
+  "parsed_ok": false,
+  "is_question_image": null,
+  "grade": null,
+  "subject": null,
+  "kp": null,
+  "qtype": null,
+  "stem": "",
+  "answer": "",
+  "raw_head": ""
+}
+------------------------------------------------------------
+{
+  "url": "https://question-1256278081.cos.ap-shanghai.myqcloud.com/2024-12-26/06a3e548-e3d6-43ce-900f-c0d0e9cdd601/list/13/question.png",
+  "model_used": "gpt-5-nano",
+  "relay": "aigeek",
+  "dur_s": 65.2,
+  "parsed_ok": false,
+  "is_question_image": null,
+  "grade": null,
+  "subject": null,
+  "kp": null,
+  "qtype": null,
+  "stem": "",
+  "answer": "",
+  "raw_head": ""
+}
+------------------------------------------------------------
+{
+  "url": "https://question-1256278081.cos.ap-shanghai.myqcloud.com/2026-03-12/47c125f4-73ca-4bdc-9aea-a90357910b48/list/27/question.png",
+  "model_used": "gpt-5-nano",
+  "error": "Error code: 404 - {'error': {'code': 'model_not_found', 'message': \"Model 'gpt-5-nano' not found or disabled.\", 'type': 'error'}}",
+  "dur_s": 51.6
+}
+------------------------------------------------------------
