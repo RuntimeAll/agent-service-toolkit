@@ -188,12 +188,12 @@ def test_revise_whole_regen_then_reverify_pass(monkeypatch):
     async def verify_pass(item, solved_answer):
         return {"verdict": math_verify.PASS, "detail": "ok", "computed": "x=3"}
 
+    # 🔴 整改2（2026-06-12）：难度并入生题——whole 重做的难度由 REGEN 出题调用按嵌入 rubric
+    #   同步产出（regen_stub 返回 difficulty:4），revise whole **不再独立调用 _grade_difficulty**。
     grade_seen = {}
 
     async def grade_stub(items):
-        grade_seen["called"] = True
-        grade_seen["items"] = items
-        # rubric 对新题断言为 4（压轴）→ 难度更新
+        grade_seen["called"] = True  # 整改2 后不应被调到
         return [{**items[0], "difficulty": 4}]
 
     monkeypatch.setattr(variant_mod, "_regen_once", regen_stub)
@@ -215,10 +215,10 @@ def test_revise_whole_regen_then_reverify_pass(monkeypatch):
     assert it["check"]["tier"] == variant_mod.TIER_VERIFIED
     assert it["manual_edited"] is True
     assert it["_seq"] == 1  # 簿记跟题走
-    # G12b：whole 重做后调用了难度重判（rubric 绝对调用），difficulty 更新、level 同步 hard
-    assert grade_seen["called"] is True
-    assert it["difficulty"] == 4
-    assert it["level"] == "hard"
+    # 整改2：难度随 REGEN 产出（draft.difficulty=4），不再独立打一轮难度评定
+    assert grade_seen.get("called") is not True  # 独立难度调用已退出 whole 路径
+    assert it["difficulty"] == 4  # 来自 regen 出题调用的 rubric 自评
+    assert it["level"] == "hard"  # 4≥CAP → level 同步 hard
 
 
 def test_revise_whole_fail_kept_warn_not_dropped(monkeypatch):
@@ -301,9 +301,12 @@ def test_revise_whole_grade_failure_keeps_old_difficulty(monkeypatch):
 
 
 def test_revise_whole_grade_levels_up_when_difficulty_rises(monkeypatch):
-    """G12b：rubric 把新题判得比原值高（2→3）→ level 升 hard（不靠关键词 hack，由 rubric 断言）。"""
+    """🔴 整改2（2026-06-12）：难度并入生题——REGEN 出题调用按嵌入 rubric 把新题判得比原值高
+    （2→3，regen_stub 直接返回 difficulty:3）→ level 升 hard（由 rubric 断言，不靠关键词 hack）。"""
+    grade_called = {"n": 0}
+
     async def regen_stub(item, facts, feedback=None):
-        return {"stem": "新题", "answer": "x=3", "qtype": "解答", "difficulty": 2}
+        return {"stem": "新题", "answer": "x=3", "qtype": "解答", "difficulty": 3}
 
     async def solve_stub(stem):
         return {"solved_answer": "x=3", "solution": "解析"}
@@ -311,13 +314,14 @@ def test_revise_whole_grade_levels_up_when_difficulty_rises(monkeypatch):
     async def verify_pass(item, solved_answer):
         return {"verdict": math_verify.PASS, "detail": "ok", "computed": "x=3"}
 
-    async def grade_up(items):
-        return [{**items[0], "difficulty": 3}]  # rubric 判 3，高于原 2
+    async def grade_spy(items):
+        grade_called["n"] += 1  # 整改2 后不应被调到
+        return items
 
     monkeypatch.setattr(variant_mod, "_regen_once", regen_stub)
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_pass)
-    monkeypatch.setattr(variant_mod, "_grade_difficulty", grade_up)
+    monkeypatch.setattr(variant_mod, "_grade_difficulty", grade_spy)
 
     items = [{"stem": "2x=4", "answer": "x=2", "qtype": "解答",
               "difficulty": 2, "level": "normal"}]
@@ -325,7 +329,8 @@ def test_revise_whole_grade_levels_up_when_difficulty_rises(monkeypatch):
     update, result, err = asyncio.run(revise_item(state, 1, "whole", "难一点"))
     assert err is None and result["ok"] is True
     it = update["items"][0]
-    assert it["difficulty"] == 3
+    assert grade_called["n"] == 0  # 独立难度复评已退出 whole 路径
+    assert it["difficulty"] == 3  # 来自 regen 出题调用的 rubric 自评
     assert it["level"] == "hard"  # 较原值升档 → 同步 hard
 
 

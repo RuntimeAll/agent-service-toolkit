@@ -320,15 +320,19 @@ def test_generate_without_user_text_keeps_legacy_prompt_and_no_knobs_call(monkey
     out = asyncio.run(generate(state, {}))
 
     assert len(prompts) == 1  # no KNOBS extraction round-trip
-    # B2·T1: GENERATE 现固定追加 W2 守恒硬约束段（_conservation_clause），spec 空（无 knobs）。
+    # B2·T1 + 整改1（2026-06-12）：GENERATE 现固定追加「确定上下文块」(_context_block) + W2 守恒
+    #   硬约束段（_conservation_clause），spec 空（无 knobs）。两段并存、正交。
     facts = _mother_facts(state)
     expected = (
         GENERATE_PROMPT.format(n=3, n_normal=2, n_hard=1, **facts)
         + "\n\n"
+        + variant_mod._context_block(facts)
+        + "\n\n"
         + variant_mod._conservation_clause(facts.get("dna"))
     )
-    assert prompts[0] == expected  # legacy + W2 守恒段，无老师配方 spec
-    assert "守恒硬约束" in prompts[0]  # W2 段确在
+    assert prompts[0] == expected  # legacy + 确定上下文块 + W2 守恒段，无老师配方 spec
+    assert "确定上下文" in prompts[0]  # 整改1 块确在
+    assert "守恒硬约束" in prompts[0]  # W2 段确在（未被新块挤掉）
     assert out["knobs"] == {}  # extracted-empty is persisted (never re-extract)
     assert out["shape_defects"] == []
     assert len(out["items"]) == 3 and "check" not in out["items"][0]
@@ -589,9 +593,13 @@ def test_grade_difficulty_unparseable_element_keeps_that_items_original(monkeypa
     assert [it["difficulty"] for it in out] == [3, 2, 1]
 
 
-def test_assemble_writes_back_graded_difficulty(monkeypatch):
-    """assemble 回写 P8 覆盖后的 difficulty 进 graph state（入库/快照跟随）。"""
+def test_assemble_keeps_generated_difficulty_no_independent_grade(monkeypatch):
+    """🔴 整改2（2026-06-12）：难度并入生题——assemble 不再独立调用 _grade_difficulty 复评，
+    保留出题产出的 difficulty（仅缺/非法时兜底钳到 1~4）。"""
+    grade_called = {"n": 0}
+
     async def fake_grade(items):
+        grade_called["n"] += 1  # 整改2 后不应被调到
         return [dict(it, difficulty=1) for it in items]
 
     monkeypatch.setattr(variant_mod, "_grade_difficulty", fake_grade)
@@ -602,7 +610,19 @@ def test_assemble_writes_back_graded_difficulty(monkeypatch):
                 "check": {"badge": "ok"}}],
     )
     out = asyncio.run(assemble(state, {}))
-    assert out["items"][0]["difficulty"] == 1  # 覆盖值随 node 输出落进 state
+    assert grade_called["n"] == 0  # 独立难度复评已退出 assemble
+    assert out["items"][0]["difficulty"] == 4  # 保留生题产出的难度（合法值不动）
+
+
+def test_assemble_clamps_missing_difficulty_to_fallback(monkeypatch):
+    """整改2 兜底链：item 缺 difficulty → assemble 钳到 2（缺→2），不抛、不调 LLM。"""
+    monkeypatch.setattr(variant_mod, "_emit_artifact", lambda *a, **k: None)
+    state = dict(
+        _FACTS_STATE,
+        items=[{"stem": "s", "answer": "a", "solution": "x", "check": {"badge": "ok"}}],
+    )
+    out = asyncio.run(assemble(state, {}))
+    assert out["items"][0]["difficulty"] == 2  # 缺 → 2 兜底
 
 
 # ---------------------------------------------------------------------------

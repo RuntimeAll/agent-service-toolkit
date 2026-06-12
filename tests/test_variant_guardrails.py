@@ -28,6 +28,7 @@ from agents.variant import (
     INTENT_EDIT,
     INTENT_QA,
     INTENT_REVISE,
+    INTENT_SOLUTION_ONLY,
     VALID_INTENTS,
     _is_multi_subquestion,
     route_after_parse,
@@ -303,6 +304,7 @@ def test_every_guardrail_intent_routes_to_existing_branch():
         INTENT_CONFIRM: "save",
         INTENT_QA: "answer",
         INTENT_CLARIFY: "ask_clarify",
+        INTENT_SOLUTION_ONLY: "solution_only",  # 整改3（2026-06-12）：解法修正分支
     }
     assert set(expected) == VALID_INTENTS  # enum and routing stay in lockstep
     for intent, branch in expected.items():

@@ -203,8 +203,9 @@ def test_gene_gate_pure_code_flags_warn_without_rework(monkeypatch):
     assert regen_called["n"] == 0
 
 
-def test_check_heal_skipped_when_budget_exhausted_item_dropped(monkeypatch):
-    # 闸B sympy FAIL + 预算耗尽 → 跳过 heal/replenish → 剔除（4d 方案A），不卡死、不抛
+def test_check_heal_skipped_when_budget_exhausted_item_kept_warn(monkeypatch):
+    # 🔴 整改4（2026-06-12）：闸B sympy FAIL + 预算耗尽 → 跳过 heal → 保留打 ⚠ 放行
+    #   （不再剔除、不再补题）。不卡死、不抛。
     heal_called = {"n": 0}
 
     async def solve_stub(stem):
@@ -229,9 +230,10 @@ def test_check_heal_skipped_when_budget_exhausted_item_dropped(monkeypatch):
         )
 
     kept, note = asyncio.run(go())
-    assert kept is None  # 剔除（heal/replenish 都跳过）
-    assert note and "剔除" in note
-    assert heal_called["n"] == 0  # 增强类回炉/补题全跳过
+    assert kept is not None  # 整改4：保留打 ⚠（不剔除）
+    assert note is None  # 不进 dropped_notes
+    assert kept["check"]["verify"] == variant_mod.VERIFY_FAIL_AFTER_REGEN
+    assert heal_called["n"] == 0  # 预算耗尽 → 回炉跳过
 
 
 # ===========================================================================
@@ -276,8 +278,11 @@ def test_check_from_edit_fail_kept_not_dropped(monkeypatch):
     assert kept["check"]["tier"] in (variant_mod.TIER_BOTH_LOW, variant_mod.TIER_SILENT)
 
 
-def test_check_non_edit_fail_still_drops(monkeypatch):
-    # 对照：非 from_edit 题 sympy FAIL + 回炉/补题失败 → 仍走既有剔除路径（没误伤普通题）
+def test_check_non_edit_fail_kept_warn_after_regen(monkeypatch):
+    # 🔴 整改4（2026-06-12）：非 from_edit 题 sympy FAIL + 回炉 1 次失败 → 保留打 ⚠ 放行
+    #   （不再剔除/补题）。对照 from_edit 短路（那个连回炉都不走），这个走过一次回炉。
+    regen_called = {"n": 0}
+
     async def solve_stub(stem):
         return {"solved_answer": "x=9", "solution": "解析"}
 
@@ -285,7 +290,8 @@ def test_check_non_edit_fail_still_drops(monkeypatch):
         return {"verdict": math_verify.FAIL, "detail": "mismatch", "computed": "x=9"}
 
     async def regen_none(item, facts, feedback=None):
-        return None  # 回炉/补题都失败
+        regen_called["n"] += 1
+        return None  # 回炉失败 → 整改4：标 ⚠ 放行
 
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_fail)
@@ -296,7 +302,9 @@ def test_check_non_edit_fail_still_drops(monkeypatch):
             {"stem": "plain", "answer": "x=2", "qtype": "解答"}, _FACTS, 0, 1
         )
     )
-    assert kept is None and note and "剔除" in note
+    assert kept is not None and note is None  # 保留、不剔除
+    assert kept["check"]["verify"] == variant_mod.VERIFY_FAIL_AFTER_REGEN
+    assert regen_called["n"] == 1  # 整改4：只一次回炉，不再补题
 
 
 def test_machine_verify_skips_extraction_when_budget_exhausted(monkeypatch):

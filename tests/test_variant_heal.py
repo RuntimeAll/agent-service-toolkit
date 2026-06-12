@@ -34,6 +34,7 @@ from agents.variant import (
     TIER_SELF_OK,
     TIER_SILENT,
     TIER_VERIFIED,
+    VERIFY_FAIL_AFTER_REGEN,
     VERIFY_SYMPY_PASS,
     VERIFY_UNVERIFIED,
     _apply_visibility,
@@ -266,24 +267,26 @@ def test_visibility_proof_struct_low_plus_gene_warn_is_both_low():
 
 
 # ---------------------------------------------------------------------------
-# 4d plan A: sympy-proven-wrong item is DROPPED after failed heal (never shown)
+# 🔴 整改4（2026-06-12·闸B 回炉松绑）：sympy FAIL → 回炉 1 次仍 FAIL → **标 ⚠ 放行**
+#   （verify=fail_after_regen），不再剔除、不再补题、不再二次回炉。
 # ---------------------------------------------------------------------------
 
-def test_fail_after_failed_heal_drops_item(monkeypatch):
+def test_fail_after_failed_heal_kept_with_warn(monkeypatch):
     async def verify_fn(item, solved_answer):
         return {"verdict": "fail", "detail": "wrong", "computed": "3"}
 
     async def regen_fn(item, facts, feedback=None):
-        return None  # heal attempt fails -> drop, not keep-with-warn
+        return None  # heal attempt fails -> 整改4：保留打 ⚠（不剔除、不补题）
 
     monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3"}))
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
     monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
     state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "解答"}])
     out = asyncio.run(solve_explain(state, {}))
-    assert out["items"] == []  # the wrong item never reaches the teacher
-    assert len(out["dropped_notes"]) == 1
-    assert "已剔除" in out["dropped_notes"][0]
+    # 整改4：题不再被剔除，保留 + 标 ⚠（verify=fail_after_regen）
+    assert len(out["items"]) == 1
+    assert out["items"][0]["check"]["verify"] == VERIFY_FAIL_AFTER_REGEN
+    assert out["dropped_notes"] == []  # 不再有剔除叙事
 
 
 def test_fail_heal_success_keeps_count_and_no_drop(monkeypatch):
@@ -307,11 +310,35 @@ def test_fail_heal_success_keeps_count_and_no_drop(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# G4/AC3 replenish (adversarial fix): drop is followed by ONE replenish attempt
-# (a NEW question, regen+verify+conservation) before the group goes one short
+# 🔴 整改4（2026-06-12·闸B 回炉松绑）：回炉只 1 次/题；仍 FAIL → 标 ⚠ 放行，
+#   **不再补题、不再二次回炉**。补题（replenish）路径整体退役。
 # ---------------------------------------------------------------------------
 
-def test_fail_drop_then_replenish_restores_count(monkeypatch):
+def test_fail_regen_once_then_kept_warn_no_replenish(monkeypatch):
+    """回炉(heal) 1 次失败 → 不再补题、不二次回炉；保留原题打 ⚠（verify=fail_after_regen）。"""
+    calls = {"n": 0}
+
+    async def verify_fn(item, solved_answer):
+        return {"verdict": "fail", "detail": "wrong", "computed": "3"}
+
+    async def regen_fn(item, facts, feedback=None):
+        calls["n"] += 1
+        return None  # heal fails -> 整改4：直接标 ⚠ 放行，不再有第二次回炉/补题
+
+    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3"}))
+    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
+    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
+    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "qt",
+                                      "gene": {"gate": "pass"}}])
+    out = asyncio.run(solve_explain(state, {}))
+    assert calls["n"] == 1  # 整改4：只一次回炉，不再补题/二次回炉
+    assert len(out["items"]) == 1  # 题保留（不剔除）
+    assert out["items"][0]["check"]["verify"] == VERIFY_FAIL_AFTER_REGEN
+    assert out["dropped_notes"] == []  # 不再有剔除/少一道叙事
+
+
+def test_fail_regen_succeeds_keeps_count(monkeypatch):
+    """回炉 1 次成功（守恒+sympy 双过）→ 顶位，数量不变（与整改4 无冲突，回炉成功路径不变）。"""
     calls = {"n": 0}
 
     async def verify_fn(item, solved_answer):
@@ -321,9 +348,6 @@ def test_fail_drop_then_replenish_restores_count(monkeypatch):
 
     async def regen_fn(item, facts, feedback=None):
         calls["n"] += 1
-        if calls["n"] == 1:
-            return None  # heal attempt fails -> drop
-        assert feedback and "剔除" in feedback  # replenish prompt says original was dropped
         return {"stem": "补", "answer": "5", "solution": "s", "qtype": "qt",
                 "difficulty": 3, "level": "normal", "injected_kp": None}
 
@@ -333,51 +357,12 @@ def test_fail_drop_then_replenish_restores_count(monkeypatch):
     state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "qt",
                                       "gene": {"gate": "pass"}}])
     out = asyncio.run(solve_explain(state, {}))
-    assert len(out["items"]) == 1  # G4: count restored by the replenished question
+    assert calls["n"] == 1  # 回炉成功只调一次
+    assert len(out["items"]) == 1
     assert out["items"][0]["stem"] == "补"
     assert out["items"][0]["check"]["verify"] == VERIFY_SYMPY_PASS
-    assert out["items"][0]["gene"] == {"gate": "pass"}  # slot's gene mark carried
-    assert out["dropped_notes"] == []  # replenish succeeded -> no shortfall note
-
-
-def test_fail_drop_replenish_fails_notes_shortfall(monkeypatch):
-    async def verify_fn(item, solved_answer):
-        return {"verdict": "fail", "detail": "wrong", "computed": "3"}
-
-    async def regen_fn(item, facts, feedback=None):
-        return None  # heal AND replenish both fail
-
-    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3"}))
-    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
-    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
-    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "解答"}])
-    out = asyncio.run(solve_explain(state, {}))
-    assert out["items"] == []
-    assert len(out["dropped_notes"]) == 1
-    note = out["dropped_notes"][0]
-    assert "已剔除" in note and "补一道未成" in note and "少一道" in note  # AC3 wording
-
-
-def test_fail_drop_replenish_must_pass_verify_and_conservation(monkeypatch):
-    # replenish draft that sympy still fails must NOT sneak into the group
-    calls = {"n": 0}
-
-    async def verify_fn(item, solved_answer):
-        return {"verdict": "fail", "detail": "wrong", "computed": "3"}  # fails everything
-
-    async def regen_fn(item, facts, feedback=None):
-        calls["n"] += 1
-        return {"stem": "补", "answer": "5", "solution": "s", "qtype": "qt",
-                "difficulty": 3, "level": "normal", "injected_kp": None}
-
-    monkeypatch.setattr(variant_mod, "_solve_one", _solve_by_stem({"old": "3", "补": "5"}))
-    monkeypatch.setattr(variant_mod, "_machine_verify", verify_fn)
-    monkeypatch.setattr(variant_mod, "_regen_once", regen_fn)
-    state = dict(_STATE_BASE, items=[{"stem": "old", "answer": "1", "qtype": "qt"}])
-    out = asyncio.run(solve_explain(state, {}))
-    assert calls["n"] == 2  # exactly one heal + one replenish attempt (no loop)
-    assert out["items"] == []  # unverifiable replenish never shown
-    assert len(out["dropped_notes"]) == 1
+    assert out["items"][0]["gene"] == {"gate": "pass"}  # 槽位 gene 标记随愈合保留
+    assert out["dropped_notes"] == []
 
 
 # ---------------------------------------------------------------------------

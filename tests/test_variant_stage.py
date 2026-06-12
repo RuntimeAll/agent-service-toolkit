@@ -312,8 +312,8 @@ def test_solve_explain_emits_per_item_progress_then_done(monkeypatch):
 
 
 def test_solve_explain_emits_warn_when_item_goes_back_to_furnace(monkeypatch):
-    # 4d 方案A（PRD-C-012）：sympy FAIL + 重生失败 → 剔除不外发；
-    # 思路条透明叙事：回炉中 → 已剔除 → done 带「剔除/保留」计数。
+    # 🔴 整改4（2026-06-12·闸B 回炉松绑）：sympy FAIL + 回炉 1 次失败 → 保留打 ⚠ 放行
+    #   （不再剔除/补题）。思路条：回炉中 → 标注存疑交人审 → done（无剔除计数）。
     calls = _record_stages(monkeypatch)
 
     async def solve_stub(stem):
@@ -323,18 +323,21 @@ def test_solve_explain_emits_warn_when_item_goes_back_to_furnace(monkeypatch):
         return {"verdict": math_verify.FAIL, "detail": "mismatch", "computed": "x=9"}
 
     async def regen_none(item, facts, feedback=None):
-        return None  # heal fails -> item dropped (plan A), never shown to teacher
+        return None  # heal fails -> 整改4：保留打 ⚠（不剔除）
 
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_fail)
     monkeypatch.setattr(variant_mod, "_regen_once", regen_none)
     state = dict(_FACTS_STATE, items=[{"stem": "a", "answer": "x=2", "qtype": "解答"}])
     out = asyncio.run(solve_explain(state, {}))
-    assert out["items"] == []
-    assert len(out["dropped_notes"]) == 1
+    assert len(out["items"]) == 1  # 保留（不剔除）
+    assert out["items"][0]["check"]["verify"] == variant_mod.VERIFY_FAIL_AFTER_REGEN
+    assert out["dropped_notes"] == []
     assert ("verify", "程序验算", "warn", "第 1 道回炉重生中") in calls
-    assert any(c[2] == "warn" and "已剔除" in (c[3] or "") for c in calls)
-    assert calls[-1] == ("verify", "程序验算", "done", "剔除 1 道，保留 0 道")
+    # 整改4：松绑后的存疑放行叙事（不再有「已剔除」）
+    assert any(c[2] == "warn" and "标注存疑交人审" in (c[3] or "") for c in calls)
+    assert not any("已剔除" in (c[3] or "") for c in calls)
+    assert calls[-1] == ("verify", "程序验算", "done", None)  # 无剔除 → 不带计数 detail
 
 
 def test_persist_emits_running_then_done_with_counts(monkeypatch):
@@ -491,7 +494,9 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "answer": "",
         "solution": "",
         "qtype": "",
-        "difficulty": 0,
+        # 🔴 整改2（2026-06-12）：assemble 删独立难度复评，改为缺/非法 difficulty 钳兜底（缺→2）。
+        #   裸题无 difficulty → assemble 填 2（入库口径），artifact 透出 2（不再是 0）。
+        "difficulty": 2,
         "level": "normal",
         "verify": None,
         "tier": None,
