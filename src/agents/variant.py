@@ -836,42 +836,52 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     # --- 两步锚定第一步：定年级 code ---
     grade_code = await _resolve_grade_code(analysis)
 
-    # --- 第二步：拉年级叶子池 + 标签复用池（HTTP，故障 → 空池降级走 clarify） ---
+    # --- 第二步：拉年级叶子池（HTTP，故障 → 空池降级走 clarify） ---
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
     leaf_pool: list[tuple[str, str]] = []
-    tag_pool: list[str] = []
     client = RuoyiClient(token=token)
     try:
         leaf_pool = await leaf_pool_for_grade(grade_code, client)
-        # 标签复用池：第一锚还没定主 kp，先按粗 kp 名拉不了——T4 端点按 kpId 拉，
-        # 此处主 kp 未知 → 暂传空池（端点上线后由批打标/二次锚定补；变式期空池可接受）。
-        # （留接口：若 analysis.kp.anchored 已有 id 可补拉，当前首锚无 id 故空。）
-        tag_pool = []
     except Exception as e:  # noqa: BLE001 — 池拉取故障 → 空池（不 silent-fail，转 clarify）
         analysis["_anchor_error"] = str(e)
-    finally:
-        await client.aclose()
 
     _emit_stage("classify", "锚定考点", "running")
 
     if not leaf_pool:
         # 库/网络故障或年级池为空 → 锚定不可用 → 不抬置信 → clarify（既有降级路径）
+        await client.aclose()
         analysis.setdefault("_anchor_error", "知识点叶子池不可用（库未起/年级未识别）")
         _emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
         return {"analysis": analysis, "mother_confirmed": False, "messages": []}
 
     # --- DNA 抽取（两步锚定第二步：LLM 池内选 id；禁造词由 dna_extract 校验闸把关） ---
+    #     首锚主 kp 未知 → tag_pool 空（标签先靠 LLM 自拟），下面 T2 锚定后再注池重选。
     dna = await dna_extract.extract_dna(
         stem=mother_dna.get("stem") or "",
         answer=mother_dna.get("answer") or "",
         analyze=mother_dna.get("solution_skeleton") or "",
         grade=(analysis.get("grade") or {}).get("value") or "",
         leaf_pool=leaf_pool,
-        tag_pool=tag_pool,
+        tag_pool=[],
     )
-    mother_dna["dna"] = dna
 
     main_kp = dna.get("main_kp")
+
+    # --- 🔴 T2 标签复用池接线：锚到主 kp 后，按 kp 拉高频标签池，做一次窄调用重选 tags 维 ---
+    #     （+1 LLM 调用，仅成功锚定 + 池非空时；拉池失败/池空 → 0 额外调用、保留原 tags 降级）。
+    if main_kp and main_kp.get("id"):
+        try:
+            kp_tag_pool = await tag_pool_for_kp(main_kp["id"], client)
+        except Exception as e:  # noqa: BLE001 — 拉池故障 → 空池降级（不卡死出题）
+            kp_tag_pool = []
+            analysis.setdefault("_tag_pool_error", str(e))
+        if kp_tag_pool:
+            dna = await dna_extract.refine_tags_with_pool(
+                dna, stem=mother_dna.get("stem") or "", tag_pool=kp_tag_pool
+            )
+
+    await client.aclose()
+    mother_dna["dna"] = dna
     if main_kp and main_kp.get("id"):
         # 池内锚到真知识点 → anchored.code = 知识点叶子 code（dim1KpId 主 kp）
         kp_node["anchored"] = {
@@ -2153,7 +2163,23 @@ def _conservation_ok(solved_kp: str, solved_grade: str, facts: dict) -> bool:
 # 纯函数零 LLM 零 IO，可单测；语义搬自 tools/e2_constrained_gen_probe._surface_check。
 # 降级铁律：只打 ⚠ flag（返回缺陷描述），不卡死、不剔题——上层据此标记继续（闸门必有降级路径）。
 # ---------------------------------------------------------------------------
-_SURFACE_SIM_THRESHOLD = 0.85  # 题干归一化相似度 > 此阈值 = 疑似抄题
+# 🔴 表皮相似度阈值按题型分（PRD-C-014 AC4「扩样集扫一遍再定死」落锤，依据 tools/c018_result_v2.json
+#   §G4_surface_by_qtype）：
+#   - 选择/填空：扩样 n=4 max=0.577，0.85 裕量大 → 保持 0.85。
+#   - 解答（证明经 _QTYPE_ALIAS 归一进解答）：长多小问共享题干脚手架系统性误警（n=27 max=0.889），
+#     放宽到 0.92（实测 max 0.889 过且有余量，仍能抓 >0.92 的真复读）。
+_SURFACE_SIM_THRESHOLD = 0.85  # 默认/选择/填空：题干归一化相似度 > 此阈值 = 疑似抄题
+_SURFACE_SIM_THRESHOLD_BY_QTYPE: dict[str, float] = {
+    "选择": 0.85,
+    "填空": 0.85,
+    "解答": 0.92,  # 解答/证明长题共享脚手架放宽
+}
+
+
+def _surface_threshold_for_qtype(qtype: Any) -> float:
+    """按题型取表皮相似度阈值（题型先过 _QTYPE_ALIAS 归一，证明→解答）。未知题型回默认 0.85。"""
+    qt = _QTYPE_ALIAS.get(str(qtype or "").strip(), str(qtype or "").strip())
+    return _SURFACE_SIM_THRESHOLD_BY_QTYPE.get(qt, _SURFACE_SIM_THRESHOLD)
 
 
 def _surface_norm_stem(s: Any) -> str:
@@ -2166,10 +2192,11 @@ def _surface_nums(s: Any) -> list[str]:
     return re.findall(r"\d+(?:\.\d+)?", str(s or ""))
 
 
-def _surface_check(variant_stem: Any, mother_stem: Any) -> str | None:
-    """🔴 表皮距离纯函数（T4）：题干过近 = 抄母题；数字与母题完全相同也算（表皮没换）。
+def _surface_check(variant_stem: Any, mother_stem: Any, qtype: Any = None) -> str | None:
+    """🔴 表皮距离纯函数（T4 + AC4 按题型定阈值）：题干过近 = 抄母题；数字与母题完全相同也算。
 
     返回缺陷描述（疑似抄题，上层打 ⚠ flag）或 None（正常变式，表皮已换）。
+    阈值按 qtype 取（选择/填空=0.85；解答/证明=0.92），未传或未知 qtype 回默认 0.85。
     母题题干为空 → 无从比对 → None（不误报）。纯函数，可单测。
     """
     m = _surface_norm_stem(mother_stem)
@@ -2177,8 +2204,9 @@ def _surface_check(variant_stem: Any, mother_stem: Any) -> str | None:
         return None
     v = _surface_norm_stem(variant_stem)
     ratio = difflib.SequenceMatcher(None, v, m).ratio()
-    if ratio > _SURFACE_SIM_THRESHOLD:
-        return f"题干与母题相似度{ratio:.2f}>{_SURFACE_SIM_THRESHOLD}（疑似抄题，表皮未换）"
+    thr = _surface_threshold_for_qtype(qtype)
+    if ratio > thr:
+        return f"题干与母题相似度{ratio:.2f}>{thr}（疑似抄题，表皮未换）"
     v_nums, m_nums = _surface_nums(variant_stem), _surface_nums(mother_stem)
     if v_nums and v_nums == m_nums:
         return "数字与母题完全相同（表皮没换）"
@@ -2562,7 +2590,8 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
 #    _gene_judge_prompt / _gene_feedback / gene_judge_knobs_spec / _gene_target_qtype* /
 #    _gene_facts_for / gene_gate_decision 等），内涵换为**纯代码三检**：
 #      ① structure_lint：题型/结构闭集 lint（_QTYPE_CONTRACT 代码镜像，复用 structure_lint）。
-#      ② 表皮距离 _surface_check：题干归一化相似度 >0.85 或 数字与母题全同 → 判抄题打 ⚠ flag。
+#      ② 表皮距离 _surface_check：题干归一化相似度 > 题型阈值（选择/填空 0.85，解答/证明 0.92）
+#         或 数字与母题全同 → 判抄题打 ⚠ flag。
 #      ③ 守恒透传：W2 注入的考察类型/题型守恒在 item 上的声明性校验，结果作为 flag 透传。
 # 🔴 判决铁律不破：闸A 三检全是**结构/表皮形态校验**，不碰答案对错（对错归闸B sympy）。
 #    任一检命中 = 打 flag（⚠ warn）**不卡死、不剔题、不回炉**——闸门必有降级路径（铁律④）。
@@ -2612,7 +2641,7 @@ def gene_gate_check(item: dict, facts_i: dict) -> dict[str, Any]:
       - gate=warn：任一检命中缺陷；flags=命中项标识列表；reason=人话拼接。
     三检（全是形态/表皮校验，不碰答案对错）：
       ① structure_lint：题型结构 lint（选择题别长成多小问嵌合体/选项不足/标答非字母；填空缺空位）。
-      ② _surface_check：题干与母题相似度 >0.85 或 数字全同 = 抄题。
+      ② _surface_check：题干与母题相似度 > 题型阈值（选择/填空 0.85，解答/证明 0.92）或 数字全同 = 抄题。
       ③ 守恒透传：题型守恒（转题型 from_edit 豁免，由调用方判）+ 考察类型守恒（若声明）。
     🔴 降级：任何异常一律视作三检通过（gate=pass），绝不卡死出题（铁律④ + G5）。
     """
@@ -2627,7 +2656,7 @@ def gene_gate_check(item: dict, facts_i: dict) -> dict[str, Any]:
             reasons.extend(struct_defects)
 
         # ② 表皮距离（防抄母题）
-        surface_defect = _surface_check(item.get("stem"), facts_i.get("stem"))
+        surface_defect = _surface_check(item.get("stem"), facts_i.get("stem"), item.get("qtype"))
         if surface_defect:
             flags.append("surface")
             reasons.append(surface_defect)

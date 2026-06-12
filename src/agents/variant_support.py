@@ -511,7 +511,8 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
         difficult = 2  # 常规档兜底
     bo["difficult"] = difficult
 
-    # 知识点编码：classify 锚定到的真实节点 code（落 subjectId）。
+    # subjectId = 科目锚 level1（学段学科册，= grade code，如 3071=七上）；知识点叶子 code
+    #   不落这里——那是 dim1KpId（主 kp）的活（V905 后语义，见 _mother_facts §B1）。
     # 🔴 NOT NULL 列：锚定失败(None)必兜底 "0"（未分类），绝不漏列致 INSERT NULL → 500。
     subject_id = facts.get("subject_id")
     bo["subjectId"] = str(subject_id) if subject_id else UNCLASSIFIED_SUBJECT_ID

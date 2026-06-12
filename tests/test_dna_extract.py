@@ -301,3 +301,90 @@ def test_extract_uses_light_model_by_default(monkeypatch):
     # per-call 覆盖走 nano 档（settings.LLM_MODEL_LIGHT）；JSON 中间产物 → skip_stream
     assert seen["model"] == dna_mod.settings.LLM_MODEL_LIGHT
     assert seen["tags"] == ["skip_stream"]
+
+
+# ---------------------------------------------------------------------------
+# 🔴 T2：refine_tags_with_pool —— 锚定后按 kp 拉标签池重选 tags（G5b 复用率 76.7%→≥80%）
+# ---------------------------------------------------------------------------
+from agents.dna_extract import refine_tags_with_pool  # noqa: E402
+
+# 模拟 extract_dna 首锚产物：tag_pool 空时标签全靠 LLM 自拟、复用 0、带空池 flag
+_DNA_BEFORE = {
+    "main_kp": {"id": "3071001001001", "name": "一元一次方程"},
+    "secondary_kps": [{"id": "3071001001002", "name": "合并同类项"}],
+    "qtype": "解答", "exam_type": "直接计算",
+    "skeleton": ["移项", "求解"], "hard_points": [], "hard_point_count": 0,
+    "tags": ["自拟甲", "自拟乙", "自拟丙"], "tag_reused_count": 0,
+    "scene": "纯代数", "difficulty": 2,
+    "flags": [FLAG_TAG_POOL_EMPTY],
+}
+_KP_TAG_POOL = ["移项变号", "等式两边同除", "去分母", "一元一次方程标准型"]
+
+
+def _refine(monkeypatch, llm_payload, *, tag_pool=None, dna=None):
+    _patch_llm(monkeypatch, llm_payload)
+    return asyncio.run(
+        refine_tags_with_pool(
+            dict(dna or _DNA_BEFORE),
+            stem="解方程 2x+3=7",
+            tag_pool=_KP_TAG_POOL if tag_pool is None else tag_pool,
+        )
+    )
+
+
+def test_refine_prompt_contains_pool_words_and_prefers_reuse(monkeypatch):
+    # 池非空 → prompt 含池词；LLM 从池里复用 → 复用数重算、去空池 flag
+    seen = {}
+
+    async def fake_failover(messages, *, max_tokens, tags=None, on_delta=None, model=None):
+        seen["prompt"] = messages[0].content
+        return AIMessage(
+            content=json.dumps({"tags": ["移项变号", "去分母", "自拟新词"]}, ensure_ascii=False)
+        ), "r", model, 0
+
+    monkeypatch.setattr(dna_mod.relay_pool, "ainvoke_failover", fake_failover)
+    out = asyncio.run(
+        refine_tags_with_pool(dict(_DNA_BEFORE), stem="解方程 2x+3=7", tag_pool=_KP_TAG_POOL)
+    )
+    # ① prompt 注入了池词
+    assert "移项变号" in seen["prompt"] and "去分母" in seen["prompt"]
+    # ② 复用优先：重选后 tags 来自池 2 个 + 新词 1 个 → 复用数 = 2
+    assert out["tags"] == ["移项变号", "去分母", "自拟新词"]
+    assert out["tag_reused_count"] == 2
+    # ③ 池非空且已重选 → 去掉空池 flag（76.7% 复用率根因 flag 消除）
+    assert FLAG_TAG_POOL_EMPTY not in out["flags"]
+
+
+def test_refine_empty_pool_returns_dna_unchanged(monkeypatch):
+    # 池空（拉池失败/未上线）→ 原样返回，保留首锚 tags + 空池 flag（降级不卡死）
+    out = _refine(monkeypatch, {"tags": ["不该被采用"]}, tag_pool=[])
+    assert out["tags"] == _DNA_BEFORE["tags"]
+    assert FLAG_TAG_POOL_EMPTY in out["flags"]
+
+
+def test_refine_llm_failure_keeps_original_tags(monkeypatch):
+    # 窄调用抛 → 保留原 tags（不退化成空，不卡死）
+    async def boom(*a, **k):
+        raise RuntimeError("relay down")
+
+    monkeypatch.setattr(dna_mod.relay_pool, "ainvoke_failover", boom)
+    out = asyncio.run(
+        refine_tags_with_pool(dict(_DNA_BEFORE), stem="解方程", tag_pool=_KP_TAG_POOL)
+    )
+    assert out["tags"] == _DNA_BEFORE["tags"]
+
+
+def test_refine_non_json_keeps_original_tags(monkeypatch):
+    out = _refine(monkeypatch, "模型抽风非 JSON")
+    assert out["tags"] == _DNA_BEFORE["tags"]
+
+
+def test_refine_empty_tags_from_llm_keeps_original(monkeypatch):
+    # LLM 返回空 tags → 不退化成空，保留首锚 tags
+    out = _refine(monkeypatch, {"tags": []})
+    assert out["tags"] == _DNA_BEFORE["tags"]
+
+
+def test_refine_caps_tags_at_max(monkeypatch):
+    out = _refine(monkeypatch, {"tags": [f"t{i}" for i in range(10)]})
+    assert len(out["tags"]) == dna_mod.TAGS_MAX

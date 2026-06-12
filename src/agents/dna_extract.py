@@ -339,6 +339,85 @@ async def extract_dna(
     return _validate(raw, pool_ids, tag_pool)
 
 
+# ---------------------------------------------------------------------------
+# 🔴 G5b 标签复用池接线（PRD-C-014 T2）：首锚抽 DNA 时主 kp 未知 → tag_pool 只能空，
+# 标签全靠 LLM 自拟+exact 撞，实测复用率仅 76.7%（设计本意 ≥80%，PRD §3.5/H6）。
+# 修法（方案 a，单一额外 LLM 调用、改动最小）：extract_dna 先锚到 main_kp，**之后**按 kp 拉
+# 「该 kp 高频标签池」，做一次**只重选 tags 维**的窄 LLM 调用，从池里复用，merge 回 DNA。
+#   - 触发条件：main_kp 锚定成功 + 该 kp 标签池非空（否则照旧空池降级 + flag，不卡死）。
+#   - 调用预算：仅成功锚定路径 +1 次窄调用（拉池失败/池空 → 0 次额外调用）。
+# ---------------------------------------------------------------------------
+_TAGS_REFINE_PROMPT = (
+    """你是浙教版初中数学检索标签师。下面给一道题 + 它锚定的核心考点 + 该考点【线上高频标签复用池】。
+请为这道题挑 3~6 个**最贴切**的检索标签（求什么/用什么定理/什么方法/什么场景）。
+
+🔴 硬约束：
+- **优先从【标签复用池】里复用**贴切的词；池里实在没有合适的，才允许补少量新词（新词要像池内词一样短）。
+- 只输出一个 JSON：{{"tags": ["...", "..."]}}，不要解释、不要 markdown fence。
+
+【这道题】题干：{stem}
+当前核心考点：{main_kp_name}
+当前已抽标签（供参考，可替换）：{cur_tags}
+
+【标签复用池】（线上高频，优先复用）：
+{tag_pool}"""
+)
+
+
+async def refine_tags_with_pool(
+    dna: dict[str, Any],
+    *,
+    stem: str,
+    tag_pool: list[str],
+    model: str | None = None,
+) -> dict[str, Any]:
+    """🔴 T2：拿 kp 专属标签池重选 tags 维，merge 回已抽的 DNA（不动其余维度）。
+
+    入参 dna = extract_dna 产物（已含 main_kp/tags/flags）。tag_pool = 该 main_kp 的高频标签池。
+    返回新 dict（浅拷贝改 tags / tag_reused_count / flags）：
+      - tag_pool 为空 → 原样返回（调用方应在池空时直接跳过，不该走到这里；双保险）。
+      - 窄 LLM 调用失败/解析失败 → 原样返回（**保留原 tags**，降级不卡死，铁律④）。
+      - 成功 → tags 重选自池、复用统计重算、去掉 FLAG_TAG_POOL_EMPTY。
+    """
+    pool = [t for t in (tag_pool or []) if str(t).strip()]
+    if not pool:
+        return dna
+
+    cur_tags = list(dna.get("tags") or [])
+    main_kp_name = ((dna.get("main_kp") or {}).get("name")) or "（未知）"
+    prompt = _TAGS_REFINE_PROMPT.format(
+        stem=stem or "",
+        main_kp_name=main_kp_name,
+        cur_tags="、".join(cur_tags) if cur_tags else "（无）",
+        tag_pool="、".join(pool),
+    )
+    chosen_model = model if model is not None else settings.LLM_MODEL_LIGHT
+    try:
+        resp, _relay, _model_used, _fb = await relay_pool.ainvoke_failover(
+            [HumanMessage(content=prompt)],
+            max_tokens=settings.VARIANT_MAX_TOKENS,
+            tags=["skip_stream"],
+            model=chosen_model,
+        )
+    except Exception:  # noqa: BLE001 — 窄调用失败 → 保留原 tags 降级（不卡死）
+        return dna
+
+    raw = _parse_json(_content_text(resp))
+    if not isinstance(raw, dict):
+        return dna
+    new_tags = [str(t).strip() for t in (raw.get("tags") or []) if str(t).strip()][:TAGS_MAX]
+    if not new_tags:
+        return dna  # LLM 没给标签 → 保留原 tags（不退化成空）
+
+    pool_set = set(pool)
+    out = dict(dna)
+    out["tags"] = new_tags
+    out["tag_reused_count"] = sum(1 for t in new_tags if t in pool_set)
+    # 池非空且已重选 → 去掉空池 flag（避免误报 76.7% 复用率的根因 flag）
+    out["flags"] = [f for f in (dna.get("flags") or []) if f != FLAG_TAG_POOL_EMPTY]
+    return out
+
+
 def _content_text(resp: Any) -> str:
     """取 LLM resp 文本（思考型 content 可能是 parts list；只取 text，不外放 reasoning）。"""
     c = getattr(resp, "content", resp)
