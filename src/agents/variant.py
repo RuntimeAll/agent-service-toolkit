@@ -204,6 +204,67 @@ class VariantState(MessagesState, total=False):
     # （gene_gate/solve_explain/assemble/exec_*）从 state 携带、累计 used，并把它放回返回值
     # state（跨 superstep 保活）。超限后增强类调用跳过走 G5 降级（_budget_exhausted）。
     llm_call_budget: dict[str, int] | None
+    # 🔴 批3（2026-06-13）·事实源冻结：每批次一份「老师锚准的事实源」（年级学期/主考点/DNA
+    #   基础元素 = analysis.grade/kp + mother_dna.dna）。定死/确认时 facts_locked 置位 → 此后
+    #   **只许老师指令改、LLM 输出不许反向覆盖**。每次老师修正记一条 audit（字段/旧值/新值/
+    #   指令原文）。不搞重型版本系统，setter 统一收口写入。
+    facts_locked: bool
+    facts_audit: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# 🔴 批3·事实源单向写 setter（年级/主考点 = analysis.grade/kp）
+# 写来源两类：
+#   - source="teacher"：老师指令路径（patch 的修正 / parse 路由的 mother_correction /
+#     exec_solution_only 的 grade_correction）—— 永远放行，且记 audit 留痕。
+#   - source="llm"：LLM 输出回写（classify 锚定抬置信等）—— facts_locked 后**忽略 + warn**，
+#     定死前正常写（锚定就是靠它达成定死的）。
+# ---------------------------------------------------------------------------
+import logging as _logging  # noqa: E402
+
+_facts_log = _logging.getLogger("variant.facts")
+
+
+def _fact_edit(
+    analysis: dict[str, Any],
+    field: Literal["grade", "kp"],
+    new_value: Any,
+    *,
+    source: Literal["teacher", "llm"],
+    locked: bool,
+    audit: list[dict[str, Any]],
+    instruction: str | None = None,
+    confidence: float | None = None,
+    clear_keys: tuple[str, ...] = (),
+) -> bool:
+    """统一改 analysis.grade/kp 的 value（+可选 confidence）。返回是否实际写入。
+
+    🔴 locked 后非老师指令来源（source!="teacher"）的写 → 直接忽略 + log warning（事实源冻结）。
+    老师指令来源 → 始终放行，且记一条 audit（字段/旧值/新值/指令原文）。
+    """
+    if locked and source != "teacher":
+        _facts_log.warning(
+            "facts_locked: 忽略 LLM 来源对 %s 的回写（new=%r）——事实源已冻结，只许老师指令改",
+            field, new_value,
+        )
+        return False
+    node = dict(analysis.get(field) or {})
+    old_value = node.get("value")
+    node["value"] = new_value
+    if confidence is not None:
+        node["confidence"] = confidence
+    for ck in clear_keys:
+        node.pop(ck, None)
+    analysis[field] = node
+    if source == "teacher":
+        audit.append({
+            "field": field,
+            "old": old_value,
+            "new": new_value,
+            "instruction": instruction or "",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1036,12 +1097,17 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     _emit_stage(
         "knobs", "解析配方", "done" if confirmed else "warn", recipe
     )
-    return {
+    # 🔴 批3·事实源冻结：classify 是锚定（LLM 来源）写入点，跑完即定死 → 此处置 facts_locked。
+    #   confirmed（定死）→ 冻结（此后 LLM 回写被 setter 忽略）；未 confirmed → 不冻结（等老师
+    #   补/纠正后重锚，重锚仍是合法锚定路径，不该被冻结挡住）。
+    out: VariantState = {
         "analysis": analysis,
         "mother_dna": mother_dna,
         "mother_confirmed": bool(confirmed),
+        "facts_locked": bool(confirmed),
         "messages": [],
     }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3917,13 +3983,17 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
     analysis = dict(state.get("analysis") or {})
     # ① 年级修正：更新锚定事实（chip 跟头部 facts 走）。⚠ 只改年级文案/置信，不清 anchored（不重锚
     #    整组）——解法修正不换考点，年级是为了让确定上下文块的「进度边界」对，不触发 classify。
+    # 🔴 批3·老师指令来源：经 setter 写（locked 也放行 + 记 audit）；这里不重锚故不解冻。
     if grade_correction:
-        g = dict(analysis.get("grade") or {})
-        g["value"] = grade_correction
-        g["confidence"] = 0.9  # 老师明示 → 高置信
-        g.pop("code", None)  # 清旧 code，_grade_to_code 现算新进度边界
-        analysis["grade"] = g
+        audit = list(state.get("facts_audit") or [])
+        _fact_edit(
+            analysis, "grade", grade_correction, source="teacher",
+            locked=bool(state.get("facts_locked")), audit=audit,
+            instruction=pending.get("utterance") or "", confidence=0.9,
+            clear_keys=("code",),
+        )
         update["analysis"] = analysis
+        update["facts_audit"] = audit
 
     facts = _mother_facts({**state, "analysis": analysis})
 
@@ -3991,23 +4061,26 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
     其余（如只是补充场景偏好）= 当软约束，留待下次编辑指令，不在此重造。
     """
     analysis = dict(state.get("analysis") or {})
-    corr = (state.get("pending") or {}).get("mother_correction") or {}
+    pending = state.get("pending") or {}
+    corr = pending.get("mother_correction") or {}
+    instruction = pending.get("utterance") or ""
+    # 🔴 批3·老师指令来源：经 setter 写（source="teacher" → locked 也放行 + 记 audit）。
+    audit = list(state.get("facts_audit") or [])
+    locked = bool(state.get("facts_locked"))
     changed = False
 
     if corr.get("grade"):
-        g = dict(analysis.get("grade") or {})
-        g["value"] = corr["grade"]
-        g["confidence"] = 0.9  # 老师明示 → 高置信
-        g.pop("code", None)  # 清旧编码，重锚时再填
-        analysis["grade"] = g
-        changed = True
+        # 清旧编码，重锚时再填
+        changed |= _fact_edit(
+            analysis, "grade", corr["grade"], source="teacher", locked=locked,
+            audit=audit, instruction=instruction, confidence=0.9, clear_keys=("code",),
+        )
     if corr.get("kp"):
-        k = dict(analysis.get("kp") or {})
-        k["value"] = corr["kp"]
-        k["confidence"] = 0.9
-        k.pop("anchored", None)  # 清旧锚定，classify 会重锚
-        analysis["kp"] = k
-        changed = True
+        # 清旧锚定，classify 会重锚
+        changed |= _fact_edit(
+            analysis, "kp", corr["kp"], source="teacher", locked=locked,
+            audit=audit, instruction=instruction, confidence=0.9, clear_keys=("anchored",),
+        )
 
     if not changed:
         # 没拿到可 patch 的字段 → 退化为 clarify 回问（不空转）
@@ -4023,10 +4096,14 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
     # generate 裸奔兜底（无 items）会绕开 assemble 不再发帧 → 先发空快照让 FE 右栏回
     # 空态，避免老师对着 agent 端已不存在的旧题组卡片点「第N题重出」（UI/状态错位）。
     _emit_artifact({**state, "items": [], "analysis": analysis})
+    # 🔴 批3：改硬锚 → 解冻（facts_locked=False），让 classify 重锚（重锚是合法锚定路径）；
+    #   老师本次修正的 audit 留痕随 state 带走。
     return {
         "analysis": analysis,
         "items": [],
         "mother_confirmed": False,
+        "facts_locked": False,
+        "facts_audit": audit,
         "pending": None,
         "messages": [AIMessage(content="收到修正，我按新的年级/考点重锚并重出这组变式。")],
     }
