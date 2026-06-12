@@ -544,6 +544,56 @@ def _emit_stage(key: str, title: str, status: str, detail: str | None = None) ->
 # 🔴 独立函数、不复用 _emit_stage（test_variant_stage 对 _emit_stage 调用序列精确断言）；
 #    同 _emit_stage 双层静默吞：无 runtime context / writer 抛 → 绝不影响主流程。
 # ---------------------------------------------------------------------------
+def _norm_secondary_kps(raw: Any) -> list[dict[str, str]]:
+    """副 kp 归一成 FE 弹层回填需要的 [{id,name}]（兼容历史形态：裸 code 串 / {code,name} /
+    {id,name}）。id/name 缺则给空串、绝不抛。纯函数、零 IO。"""
+    out: list[dict[str, str]] = []
+    for s in raw or []:
+        if isinstance(s, dict):
+            sid = str(s.get("id") or s.get("code") or "").strip()
+            name = str(s.get("name") or "").strip()
+        else:
+            sid = str(s or "").strip()
+            name = ""
+        out.append({"id": sid, "name": name})
+    return out
+
+
+def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    """🔴 PRD-C-014 B4·FE DNA 面板数据源：每个 artifact item 的嵌套 `dna` 对象（键名钉死，
+    FE pickDna 按此解析）。组级维度（main_kp/secondary_kps/exam_type/tags/scene/skeleton）来自
+    母题 DNA（facts.dna，整组共享）；item 级（hard_points/manual_edited）优先取 item。
+
+    DNA 未抽取（库内母题直进 generate 路径，facts.dna 为空）→ 各键给空值/空数组，绝不崩。
+    """
+    dna = facts.get("dna") or {}
+    main_kp = dna.get("main_kp") or {}
+    if not isinstance(main_kp, dict):
+        main_kp = {}
+    # skeleton 在 DNA 里是 list[str]（dna_extract 抽的步骤序列）→ FE 要 str，按换行拼。
+    skeleton_raw = dna.get("skeleton")
+    if isinstance(skeleton_raw, list):
+        skeleton = "\n".join(str(s) for s in skeleton_raw if str(s).strip())
+    else:
+        skeleton = str(skeleton_raw or "")
+    # hard_points：item 级有则用 item 的，否则母题 DNA 的。
+    hp_raw = it.get("hard_points")
+    if hp_raw is None:
+        hp_raw = dna.get("hard_points")
+    hard_points = [str(h) for h in (hp_raw or []) if str(h).strip()]
+    return {
+        "main_kp": str(main_kp.get("name") or "") or None,
+        "main_kp_id": str(main_kp.get("id") or "") or None,
+        "secondary_kps": _norm_secondary_kps(dna.get("secondary_kps")),
+        "exam_type": str(dna.get("exam_type") or "") or None,
+        "tags": [str(t) for t in (dna.get("tags") or []) if str(t).strip()],
+        "scene": str(dna.get("scene") or "") or None,
+        "skeleton": skeleton or None,
+        "hard_points": hard_points,
+        "manual_edited": bool(it.get("manual_edited")),
+    }
+
+
 def _artifact_payload(
     state: VariantState, persisted_flags: list[bool] | None = None
 ) -> dict[str, Any]:
@@ -579,6 +629,9 @@ def _artifact_payload(
                 if persisted_flags is not None and i < len(persisted_flags)
                 else bool(it.get("persisted"))
             ),
+            # 🔴 PRD-C-014 B4·FE DNA 面板数据源（键名钉死，FE pickDna 解析）：组级维度共享 +
+            #   item 级（hard_points/manual_edited）覆盖。DNA 未抽取 → 空值/空数组兜底，不崩。
+            "dna": _item_dna(it, facts),
         }
         # 🔴 P2b 退场哨兵（PRD-C-013）：剔除题显式带 `_dropped: true`（字段白名单透传），
         #   驱动 FE upsertIncremental 走退场过渡（is-dropping/scheduleDropRemoval）后从
@@ -3675,6 +3728,315 @@ async def reverify_item_state(
     _format_item_stem(final)
     new_items[index - 1] = final
     return {"items": new_items}, new_items[index - 1], None
+
+
+# ===========================================================================
+# DNA 双模态编辑（PRD-C-014 B4·T1/T2，事实源 PRD §10.5 / §3.5）
+# —— 老师在题组编辑器里直接改某道题的 DNA（维度），两条路：
+#   ① edit_dna_state（零 LLM）：结构化回写一个维度（点击/下拉选）→ 校验合法值 → 改 state
+#      对应键（main_kp/grade 同步 header+BO，其余 DNA 维改 mother_dna.dna，qtype/difficulty
+#      改 item）→ 标 manual_edited（item 级）→ 回 artifact。全程零 LLM（G11 断言点）。
+#   ② revise_item（有界 LLM）：锚定重做某维（骨架/场景文本改写）或整题重出（whole 走 REGEN
+#      闸B sympy 重验）。diff 锁 target：纯骨架/场景文本维改写不动其余维（G12 断言点）。
+# 🔴 铁律：判决只读 sympy（whole 走既有 _check_one_item / from_edit 路径）；老师改动最高优先
+#   （回写、标 manual、不质疑）。LLM 失败/解析不出 → 降级回 {ok:false,error}，绝不崩。
+# 🔴 DNA 维度分两层落点：main_kp/secondary_kps/exam_type/tags/scene/skeleton 是**母题级**
+#   （住 state.mother_dna.dna，由 _mother_facts 穿进每道题的 BO，整组共享守恒维）；
+#   qtype/difficulty 是**题级**（住 item，build_create_bo 优先取 item 覆盖）。grade 走 analysis。
+# ===========================================================================
+
+# edit-dna 合法 field 白名单（与 FE 契约严格一致）。main_kp/secondary_kps 走母题级 +
+# 同步 analysis.kp（header kp + BO dim1）；grade 走 analysis.grade（header grade + BO subject_id）。
+_EDIT_DNA_FIELDS = {
+    "main_kp", "secondary_kps", "qtype", "exam_type", "difficulty", "tags", "scene", "grade",
+}
+
+
+def _coerce_kp(value: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """把 edit-dna 传入的知识点 value（code 字符串 或 {code,name} / {id,name}）归一成
+    DNA 契约用的 {id, name} dict。返回 (kp_dict, error)。空/非法 → (None, 错误串)。"""
+    if isinstance(value, dict):
+        kid = str(value.get("code") or value.get("id") or "").strip()
+        name = value.get("name")
+        if not kid:
+            return None, "知识点缺少 code/id"
+        return {"id": kid, "name": (str(name).strip() if name else None)}, None
+    kid = str(value or "").strip()
+    if not kid:
+        return None, "知识点 code 为空"
+    return {"id": kid, "name": None}, None
+
+
+def edit_dna_state(
+    state: VariantState, index: int, field: str, value: Any
+) -> tuple[VariantState, dict[str, Any] | None, str | None]:
+    """🔴 T1·结构化 DNA 回写（零 LLM·G11 断言点）：老师点击/下拉改第 index 道（1-based）的某个
+    维度 field → 校验合法值（非法 → 400 拒收，返 error 串）→ 回写 state 对应键 → 标该题
+    manual_edited=True → 返回 (update, edited_item, error)。
+
+    field → 改了 state 哪些键（回写映射表）：
+      main_kp        → mother_dna.dna.main_kp{id,name}（守恒白名单·BO dim1/secondaryKp 源）
+                       + analysis.kp{value,anchored{id,code,name},confidence=1.0}（header kp + BO dim1）
+      secondary_kps  → mother_dna.dna.secondary_kps（≤3，BO secondaryKpIds 源）
+      qtype          → item.qtype（题级；BO questionType/dim2 源）+ mother_dna.dna.qtype（守恒）
+      exam_type      → mother_dna.dna.exam_type（守恒·BO examType 源）
+      difficulty     → item.difficulty(1..4) + item.level(>=4→hard 否则 normal)（题级；BO dim4/difficult 源）
+      tags           → mother_dna.dna.tags（BO tags 源）
+      scene          → mother_dna.dna.scene（BO scene 源）
+      grade          → analysis.grade{value,confidence=1.0,code=_grade_to_code(value)}（header grade + BO subjectId 源）
+
+    🔴 manual_edited 只标本题（item 级）；母题级维度的改动对整组生效（守恒维共享），但只有
+       老师点的那道被标 manual（check 置 manual 中性，洗掉旧 verify 徽章避免误导）。
+    🔴 main_kp 改动 = 老师手动锚定：confidence 置 1.0（老师意志最高优先，不再质疑），
+       analysis.kp.anchored.code = 知识点 id（叶子 id 即层级编码，与 classify 同口径 → BO dim1）。
+    🔴 难度改动同步 level（星级/difficult 的题级表达）。
+    返回 (update, edited_item, error)：index 越界 / field 非法 / value 非法 → (空, None, 错误串)。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
+    if field not in _EDIT_DNA_FIELDS:
+        return {}, None, f"非法 field「{field}」（合法：{'/'.join(sorted(_EDIT_DNA_FIELDS))}）"
+
+    new_items = [dict(it) for it in items]
+    it = new_items[index - 1]
+    update: VariantState = {}
+    # 母题级 DNA / analysis 的副本（只有改到才放进 update，避免无谓覆盖）
+    mother_dna = dict(state.get("mother_dna") or {})
+    dna = dict(mother_dna.get("dna") or {})
+    analysis = dict(state.get("analysis") or {})
+
+    if field == "main_kp":
+        kp, err = _coerce_kp(value)
+        if err:
+            return {}, None, f"main_kp 非法：{err}"
+        dna["main_kp"] = kp
+        mother_dna["dna"] = dna
+        kp_node = dict(analysis.get("kp") or {})
+        kp_node["anchored"] = {"id": kp["id"], "code": str(kp["id"]), "name": kp.get("name")}
+        if kp.get("name"):
+            kp_node["value"] = kp["name"]
+        kp_node["confidence"] = 1.0  # 老师手动锚定 = 最高优先
+        analysis["kp"] = kp_node
+        update["mother_dna"] = mother_dna
+        update["analysis"] = analysis
+
+    elif field == "secondary_kps":
+        raw = value if isinstance(value, list) else [value]
+        sec: list[dict[str, Any]] = []
+        for v in raw:
+            kp, err = _coerce_kp(v)
+            if err:
+                return {}, None, f"secondary_kps 含非法项：{err}"
+            if any(s["id"] == kp["id"] for s in sec):
+                continue  # 去重
+            sec.append(kp)
+        if len(sec) > dna_extract.SECONDARY_KP_MAX:
+            return {}, None, f"副知识点最多 {dna_extract.SECONDARY_KP_MAX} 个（收到 {len(sec)}）"
+        dna["secondary_kps"] = sec
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "qtype":
+        qt = dna_extract._norm_qtype(value)
+        if qt is None:
+            return {}, None, f"非法题型「{value}」（合法：{'/'.join(dna_extract.QTYPES)}）"
+        it["qtype"] = qt  # 题级
+        dna["qtype"] = qt  # 守恒维同步
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "exam_type":
+        et = str(value or "").strip()
+        if et not in dna_extract.EXAM_TYPES:
+            return {}, None, f"非法考察类型「{value}」（合法：{'/'.join(dna_extract.EXAM_TYPES)}）"
+        dna["exam_type"] = et
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "difficulty":
+        # 🔴 必须是整数（含可无损转整的 "3" 字符串）；3.5 这种小数不静默截断 → 拒收（任务契约「1..4 整数」）。
+        d = None
+        if isinstance(value, bool):
+            d = None
+        elif isinstance(value, int):
+            d = value
+        elif isinstance(value, float) and value.is_integer():
+            d = int(value)
+        elif isinstance(value, str):
+            try:
+                d = int(value.strip())
+            except (TypeError, ValueError):
+                d = None
+        if d is None or d < dna_extract.DIFFICULTY_MIN or d > dna_extract.DIFFICULTY_MAX:
+            return {}, None, (
+                f"难度须是 {dna_extract.DIFFICULTY_MIN}..{dna_extract.DIFFICULTY_MAX} 整数（收到 {value!r}）"
+            )
+        it["difficulty"] = d  # 题级
+        it["level"] = "hard" if d >= dna_extract.DIFFICULTY_MAX else "normal"  # 星级/difficult 题级表达
+
+    elif field == "tags":
+        if not isinstance(value, list):
+            return {}, None, "tags 必须是字符串数组"
+        tags = [str(t).strip() for t in value if str(t).strip()]
+        dna["tags"] = tags
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "scene":
+        dna["scene"] = str(value or "").strip()
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "grade":
+        gv = str(value or "").strip()
+        if not gv:
+            return {}, None, "年级 value 为空"
+        g = dict(analysis.get("grade") or {})
+        g["value"] = gv
+        g["confidence"] = 1.0  # 老师手动 = 最高优先
+        code = _grade_to_code(gv)
+        if code:
+            g["code"] = code  # 同步 BO subjectId 源（科目锚 level1）
+        else:
+            g.pop("code", None)  # 归一不出 → 清旧 code，build 走 _grade_to_code(value) 兜底
+        analysis["grade"] = g
+        update["analysis"] = analysis
+
+    # 标本题手动编辑 + check 置中性 manual（洗掉旧 verify 徽章，与 edit_item_state 同语义）
+    it["manual_edited"] = True
+    it["from_edit"] = True
+    it["check"] = {"tier": TIER_MANUAL}
+    update["items"] = new_items
+    return update, it, None
+
+
+# ---------------------------------------------------------------------------
+# T2·有界 LLM 锚定重做（revise_item）：骨架/场景文本维改写（diff 锁 target，不漂移其余维）
+# 或 whole 整题重出（走 REGEN + 闸B sympy 重验）。
+# ---------------------------------------------------------------------------
+REVISE_FIELD_PROMPT = (
+    """你是浙教版初中数学命题专家。老师要求**只重写这道变式题的「{target_cn}」这一维**，其余维度
+（题型/答案/知识点/难度等）一律**保持不动**。
+
+母题考点(硬守恒): {kp_name}
+年级(硬守恒): {grade}
+本题现状：
+- 题干: {stem}
+- 题型: {qtype}
+- 当前{target_cn}: {current}
+
+老师的修改要求：{instruction}
+
+只输出一个 JSON（不要解释），仅含被改维：
+{{"{target_key}": "重写后的{target_cn}文本"}}
+🔴 只改「{target_cn}」，不要顺手改题型/答案/知识点；{target_cn}是纯文本维，改它**不影响**本题的标准答案与判分。"""
+)
+
+# revise 文本维 → (人话名, JSON 键, item 字段)。skeleton 落 item.solution（解法骨架=解析载体）；
+# scene 落 mother_dna.dna.scene（场景是母题级表皮维）。
+_REVISE_TEXT_TARGETS = {
+    "skeleton": ("解法骨架", "skeleton", "solution"),
+    "scene": ("场景", "scene", None),
+}
+
+
+async def revise_item(
+    state: VariantState,
+    index: int,
+    target: str,
+    instruction: str,
+    config: RunnableConfig | None = None,
+) -> tuple[VariantState, dict[str, Any], str | None]:
+    """🔴 T2·有界 LLM 锚定重做（供端点 + router 后续打字指令复用的单一事实源）。
+
+    target ∈ {skeleton, scene, whole}：
+      - skeleton/scene（纯文本维）：有界 LLM 带母题上下文 + 本题现状 + 老师 instruction，**只重写
+        该维**（diff 锁 target·G12：不动 qtype/answer/difficulty 等其余维）→ 标 manual。
+        skeleton 落 item.solution（解法骨架=解析载体）；scene 落 mother_dna.dna.scene（母题级表皮）。
+      - whole：复用 REGEN 路径（instruction 注入，如"难一点"→难度档语义）重出该题 → 闸B sympy
+        重验（既有 _check_one_item / from_edit 模式，判决只读 verdict）→ tier 更新 → 标 manual。
+    🔴 LLM 走 core.relay_pool（_ainvoke_text 内）；调用失败/解析不出 → (空 update, {ok:False}, None)
+       降级不崩（G5）。index 越界 / target 非法 → (空, {}, 错误串) 让端点回 400。
+    返回 (update, result{ok, [error]}, error)。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, {}, f"index 越界（须 1..{len(items)}），收到 {index}"
+    if target not in ("skeleton", "scene", "whole"):
+        return {}, {}, f"非法 target「{target}」（合法：skeleton/scene/whole）"
+
+    facts = _mother_facts(state)
+    new_items = [dict(it) for it in items]
+    it = new_items[index - 1]
+
+    # --- whole：REGEN 整题重出 + 闸B sympy 重验 ---
+    if target == "whole":
+        # instruction 作老师软约束注回（edit_note）→ _regen_once 永远把它注进 prompt（老师意志优先）
+        it["edit_note"] = str(instruction or "").strip()
+        it["from_edit"] = True
+        draft = await _regen_once(it, facts, feedback=None)
+        if not draft:
+            return {}, {"ok": False, "error": "重出失败（模型未返回有效题目），已保留原题"}, None
+        draft["from_edit"] = True  # 闸B 见 from_edit：FAIL 不回炉换题、保留打 ⚠ 交人审
+        if it.get("edit_note"):
+            draft["edit_note"] = it["edit_note"]
+        # 配方印记跟题走（重出仍占原计划槽位）
+        for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id"):
+            if it.get(k) is not None:
+                draft[k] = it[k]
+        draft.pop("check", None)  # 清旧 check → _check_one_item 重判（闸B sympy）
+        rechecked, _dropped = await _check_one_item(draft, facts, index - 1, len(items))
+        final = rechecked if rechecked is not None else draft
+        final["manual_edited"] = True
+        _format_item_stem(final)
+        new_items[index - 1] = final
+        return {"items": new_items}, {"ok": True}, None
+
+    # --- skeleton/scene：纯文本维改写（diff 锁 target，不动其余维·G12） ---
+    target_cn, target_key, item_field = _REVISE_TEXT_TARGETS[target]
+    if target == "skeleton":
+        current = str(it.get("solution") or "")
+    else:  # scene
+        current = str((facts.get("dna") or {}).get("scene") or "")
+    prompt = REVISE_FIELD_PROMPT.format(
+        target_cn=target_cn,
+        target_key=target_key,
+        kp_name=facts["kp_name"],
+        grade=facts["grade"],
+        stem=str(it.get("stem") or ""),
+        qtype=str(it.get("qtype") or facts["qtype"]),
+        current=current,
+        instruction=str(instruction or "").strip(),
+    )
+    try:
+        text = await _ainvoke_text([HumanMessage(content=prompt)])
+    except Exception as e:  # noqa: BLE001 — 改写是增强，LLM 异常 → 降级不崩（G5）
+        return {}, {"ok": False, "error": f"改写调用失败，已保留原值：{e}"}, None
+    parsed = _parse_json(text)
+    revised = None
+    if isinstance(parsed, dict):
+        revised = parsed.get(target_key)
+    if not revised or not str(revised).strip():
+        return {}, {"ok": False, "error": "未能解析出改写结果，已保留原值"}, None
+    revised_text = _sanitize_rich_text(str(revised))
+
+    update: VariantState = {}
+    if target == "skeleton":
+        # 解法骨架落 item.solution（题级解析载体）；diff 锁：不动 qtype/answer/difficulty/kp
+        it["solution"] = revised_text
+    else:  # scene：母题级表皮维 → mother_dna.dna.scene
+        mother_dna = dict(state.get("mother_dna") or {})
+        dna = dict(mother_dna.get("dna") or {})
+        dna["scene"] = revised_text
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+    # 纯文本维改写不影响判分 → 标 manual 中性（与 edit_dna_state 同语义），不重跑 sympy
+    it["manual_edited"] = True
+    it["from_edit"] = True
+    it["check"] = {"tier": TIER_MANUAL}
+    update["items"] = new_items
+    return update, {"ok": True}, None
 
 
 # --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------

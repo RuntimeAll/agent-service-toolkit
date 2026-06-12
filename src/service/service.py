@@ -636,6 +636,90 @@ async def variant_reverify(input: VariantReverifyInput) -> dict[str, Any]:
     return await _variant_apply(input.thread_id, _fn)
 
 
+# ---------------------------------------------------------------------------
+# DNA 双模态编辑两端点（PRD-C-014 B4·T1/T2，契约 PRD §10.5 / §3.5）。
+# 同上直连范式（aget_state → variant.py 纯逻辑 → aupdate_state(as_node) → _artifact_payload）。
+# edit-dna = 零 LLM 结构化回写（G11）；revise = 有界 LLM 锚定重做（G12 diff 锁 / whole 走闸B sympy）。
+# ---------------------------------------------------------------------------
+class VariantEditDnaInput(BaseModel):
+    """单题 DNA 维度结构化回写请求（零 LLM）：index=1-based；field=维度键；value=新值。
+
+    field ∈ {main_kp, secondary_kps, qtype, exam_type, difficulty, tags, scene, grade}。
+    value 形态随 field：main_kp/secondary_kps = code 串 或 {code,name}（secondary 为数组）；
+    difficulty = 1..4 整数；tags = 字符串数组；其余 = 字符串。
+    """
+
+    thread_id: str
+    index: int
+    field: str
+    value: Any = None
+
+
+class VariantReviseInput(BaseModel):
+    """单题有界 LLM 锚定重做请求：index=1-based；target ∈ skeleton/scene/whole；instruction=老师指令。
+
+    whole 走 REGEN + 闸B sympy 重验 → 入库 owner 用 ruoyi_token（与 persist 同身份硬闸，可选）。
+    """
+
+    thread_id: str
+    index: int
+    target: str
+    instruction: str = ""
+    ruoyi_token: str | None = None
+
+
+@router.post("/variant/edit-dna")
+async def variant_edit_dna(input: VariantEditDnaInput) -> dict[str, Any]:
+    """单题 DNA 维度结构化回写（🔴 零 LLM·G11）：校验合法值（题型/考察类型闭集、难度 1-4、
+    副 kp≤3）→ 非法 400 拒收 → 回写 state 对应键（main_kp/grade 同步 header+BO，其余 DNA 维改
+    mother_dna.dna，qtype/difficulty 改 item）→ 标该题 manual_edited → 返回最新 artifact。
+    """
+    from agents.variant import edit_dna_state
+
+    def _fn(values):
+        update, _item, error = edit_dna_state(
+            values, input.index, input.field, input.value
+        )
+        return update, error
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
+@router.post("/variant/revise")
+async def variant_revise(input: VariantReviseInput) -> dict[str, Any]:
+    """单题有界 LLM 锚定重做：target=skeleton/scene → 只重写该文本维（diff 锁 target·G12，
+    不动其余维）；target=whole → REGEN 整题重出 + 闸B sympy 重验（判决只读 verdict）。
+    标 manual；LLM 失败/解析不出 → 降级回 {ok:false,error}（200），不崩。index/target 非法 → 400。
+    """
+    from agents.variant import _artifact_payload, revise_item
+
+    agent: AgentGraph = get_agent("variant")
+    cfg = RunnableConfig(
+        configurable={"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
+    )
+    try:
+        snapshot = await agent.aget_state(config=cfg)
+        values: dict[str, Any] = snapshot.values or {}
+        update, result, error = await revise_item(
+            values, input.index, input.target, input.instruction, cfg
+        )
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        if update:
+            await agent.aupdate_state(cfg, update, as_node="exec_regenerate")
+        merged = {**values, **update}
+        return {
+            "ok": bool(result.get("ok")),
+            "error": result.get("error"),
+            "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"variant_revise error: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error")
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

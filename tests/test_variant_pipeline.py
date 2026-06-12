@@ -279,10 +279,11 @@ def test_artifact_payload_never_leaks_internal_item_keys():
     # 非剔除题不带 _dropped（仅剔除题显式带 _dropped:true 哨兵）
     assert "verify_payload" not in it and "_dropped" not in it
     assert "from_recipe" not in it and "expected_difficulty" not in it and "_seq" not in it
-    # explicit whitelist: exactly the FE contract keys（含 P2b 稳定 merge 键 seq），nothing internal
+    # explicit whitelist: exactly the FE contract keys（含 P2b 稳定 merge 键 seq +
+    # PRD-C-014 B4 的 dna 面板嵌套对象），nothing internal
     assert set(it) == {
         "index", "seq", "stem", "answer", "solution", "qtype", "difficulty",
-        "level", "verify", "tier", "gene", "persisted",
+        "level", "verify", "tier", "gene", "persisted", "dna",
     }
 
 

@@ -447,6 +447,19 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
         "tier": None,  # 旧结构 check 无 tier（4d 前存量）→ FE 按「只说好」兜底
         "gene": "pass",
         "persisted": False,
+        # PRD-C-014 B4：dna 面板嵌套对象。本 fixture 的 mother_dna 无 .dna（库内母题/旧线程
+        # 路径）→ 各键空值/空数组兜底，FE 面板显「未标」而非崩。
+        "dna": {
+            "main_kp": None,
+            "main_kp_id": None,
+            "secondary_kps": [],
+            "exam_type": None,
+            "tags": [],
+            "scene": None,
+            "skeleton": None,
+            "hard_points": [],
+            "manual_edited": False,
+        },
     }
     assert art["items"][1]["index"] == 2
     assert art["items"][1]["level"] == "hard"
@@ -484,6 +497,18 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "tier": None,
         "gene": None,
         "persisted": False,
+        # PRD-C-014 B4：裸题（无 mother_dna.dna）→ dna 各键空值/空数组兜底，绝不崩
+        "dna": {
+            "main_kp": None,
+            "main_kp_id": None,
+            "secondary_kps": [],
+            "exam_type": None,
+            "tags": [],
+            "scene": None,
+            "skeleton": None,
+            "hard_points": [],
+            "manual_edited": False,
+        },
     }
     # 缺省哨兵值（未知考点/未知年级）→ None 化；空 knobs → recipe None
     assert art["header"] == {"recipe": None, "kp": None, "grade": None}
