@@ -174,14 +174,50 @@ def test_analyze_emits_warn_on_non_question_image(monkeypatch):
 
 
 def test_classify_emits_done_with_kp_and_grade(monkeypatch):
+    # B1 两步锚定：年级 → 叶子池（HTTP）→ dna_extract 池内选 id。
+    # 全部 IO/LLM 打桩：lazy_tree 返回该年级一棵带叶子的树；extract_dna 返回锚到主 kp 的 DNA。
     calls = _record_stages(monkeypatch)
     monkeypatch.setattr(variant_mod, "anchor_subject", lambda coarse: [])
+
+    async def fake_leaf_pool(grade_code, client):
+        return [("3071001001001", "一元一次方程")]
+
+    async def fake_extract(**kw):
+        return {
+            "main_kp": {"id": "3071001001001", "name": "一元一次方程"},
+            "secondary_kps": [], "qtype": "解答", "exam_type": "直接计算",
+            "skeleton": ["移项", "合并"], "hard_points": [], "hard_point_count": 0,
+            "tags": ["解方程"], "tag_reused_count": 0, "scene": "纯代数",
+            "difficulty": 3, "flags": [],
+        }
+
+    monkeypatch.setattr(variant_mod, "leaf_pool_for_grade", fake_leaf_pool)
+    monkeypatch.setattr(variant_mod, "tag_pool_for_kp", lambda *a, **k: _async_empty())
+    monkeypatch.setattr(variant_mod.dna_extract, "extract_dna", fake_extract)
+    monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
+
     state = dict(_FACTS_STATE)
     out = asyncio.run(classify(state, {}))
     assert out["mother_confirmed"] is True
+    # B1: 先 running 后 done（两步锚定有 HTTP 阶段，先点亮 running）
     assert calls == [
-        ("classify", "锚定考点", "done", "考点「一元一次方程」·年级「七年级上学期」")
+        ("classify", "锚定考点", "running", None),
+        ("classify", "锚定考点", "done", "考点「一元一次方程」·年级「七年级上学期」"),
     ]
+
+
+async def _async_empty():
+    return []
+
+
+class _FakeClient:
+    """RuoyiClient 桩：classify 只 new + aclose（leaf_pool/tag_pool 已被打桩绕过）。"""
+
+    def __init__(self, token=None):
+        pass
+
+    async def aclose(self):
+        pass
 
 
 _ITEM_JSON = {

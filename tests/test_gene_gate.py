@@ -295,19 +295,20 @@ def test_edit_round_item_passing_judge_still_passes(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# auxTags transmission (truth always flows to audit, regardless of 4d display)
+# auxTags removed from create BO (PRD-C-014 B1: schema 收敛 DROP 了 biz_question.aux_tags
+# 列；gene/verify 审计标记走 BE ai 表 conflict_flags，不再塞进 create BO)。
+# 标记仍活在 item.gene.gate（FE 4d 展示/快照），但 BO 不再带 auxTags / gene_gate。
 # ---------------------------------------------------------------------------
 
-def test_aux_tags_carry_gene_gate_mark():
-    facts = {"qtype": "qt", "subject_id": "100200300"}
+def test_create_bo_no_longer_carries_aux_tags():
+    facts = {"qtype": "qt", "subject_id": "3071", "dim1_kp_id": "3071001"}
     for gate in (GENE_GATE_PASS, GENE_GATE_WARN, GENE_GATE_SKIPPED):
         bo = build_create_bo(
             {"stem": "s", "answer": "a", "gene": {"gate": gate}}, facts
         )
-        assert bo["auxTags"]["gene_gate"] == gate
-    # no gene mark -> key absent (legacy items keep working)
-    bo = build_create_bo({"stem": "s", "answer": "a"}, facts)
-    assert "gene_gate" not in bo["auxTags"]
+        # B1: auxTags 列已 DROP，BO 不再带该键（gene 标记仍活在 item.gene 供 FE 展示）
+        assert "auxTags" not in bo
+        assert "dim3Skill" not in bo and "freeTag" not in bo  # 三件套全删
 
 
 # ---------------------------------------------------------------------------

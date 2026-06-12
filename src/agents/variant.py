@@ -37,9 +37,15 @@ from langchain_core.runnables.config import ensure_config
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents import conv_trace, math_verify
+from agents import conv_trace, dna_extract, math_verify
 from agents.qtype_format import format_by_qtype
-from agents.variant_support import anchor_subject, persist_items
+from agents.variant_support import (
+    RuoyiClient,
+    anchor_subject,
+    leaf_pool_for_grade,
+    persist_items,
+    tag_pool_for_kp,
+)
 from core import get_model, relay_pool, settings
 
 # DNA 三锚高置信门槛
@@ -106,7 +112,8 @@ def _budget_bind(state: VariantState, *, reset_limit: int | None = None) -> dict
 
 # ---------------------------------------------------------------------------
 # 闸B（PRD-C-010）：sympy 程序验算 + 题型分流的标记值
-# —— 落 item.check.verify / item.check.review，入库时 _apply_labels 透传进 auxTags。
+# —— 落 item.check.verify / item.check.review（FE 4d 徽章/快照展示）。B1 后 auxTags 列已
+#    DROP，验算审计走 BE ai 表 conflict_flags，不再随 create BO 透传。
 # 🔴 判决只读 math_verify.verify() 的 verdict（pass/fail/degrade），永不采信 LLM 自评。
 # ---------------------------------------------------------------------------
 VERIFY_SYMPY_PASS = "sympy_pass"  # 程序验算通过（入库可查的抓手）
@@ -481,6 +488,30 @@ def _conf_ok(analysis: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 两步锚定·年级 → 年级 4 位 code 前缀（PRD-C-014 B1，对齐 biz_subject 叶子 id 前缀）。
+# 浙教版叶子 id 前 4 位 = 学段学科册（如 3071=七上、3081=八上）。LLM 给的年级文案
+# （"七年级上学期" / "七年级上册" / "7年级上"）归一到此 code，给 leaf_pool_for_grade 圈池。
+# 拿不准 → None（圈全量叶子，仍受池内校验，不放空锚定）。
+# ---------------------------------------------------------------------------
+_GRADE_CN = {"七": "307", "八": "308", "九": "309"}
+_TERM_CN = {"上": "1", "下": "2"}
+
+
+def _grade_to_code(grade_value: Any) -> str | None:
+    """年级文案 → 4 位 code 前缀（如 七年级上 → 3071）；拿不准返回 None。"""
+    s = str(grade_value or "").strip()
+    if not s:
+        return None
+    # 阿拉伯数字归一到中文（7→七）
+    s = s.replace("7", "七").replace("8", "八").replace("9", "九")
+    g = next((v for k, v in _GRADE_CN.items() if k in s), None)
+    if not g:
+        return None
+    t = next((v for k, v in _TERM_CN.items() if k in s), None)
+    return f"{g}{t}" if t else None
+
+
+# ---------------------------------------------------------------------------
 # 思维外放（stage 思路条事件）：langgraph custom 通道 → service stream_mode=custom
 # → SSE 帧 {"type":"message","content":{"type":"custom","custom_data":{"stage":{...}}}}
 # → FE（book-ui variant 页）按 key 更新/追加紫色思路条。
@@ -712,46 +743,106 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
     }
 
 
-async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
-    """② 分类：粗考点 → 锚 biz_subject 真实节点 + 年级(编码前4位)。DNA 置信闸。"""
-    analysis = dict(state.get("analysis") or {})
-    kp_node = dict(analysis.get("kp") or {})
-    coarse = kp_node.get("value")
-
-    # 只读 SQL 锚定（同步，丢线程池）
-    candidates: list[dict] = []
+async def _resolve_grade_code(analysis: dict[str, Any]) -> str | None:
+    """两步锚定第一步·定年级 4 位 code：① LLM 年级文案归一（_grade_to_code）优先；
+    ② 落空时退回 anchor_subject 按粗考点名反推 grade_code（编码前4位，比 LLM 裸猜准）。
+    都拿不准 → None（leaf_pool_for_grade 圈全量叶子，仍受池内校验，不放空锚定）。"""
+    gc = _grade_to_code((analysis.get("grade") or {}).get("value"))
+    if gc:
+        return gc
+    coarse = (analysis.get("kp") or {}).get("value")
     if coarse:
         try:
-            candidates = await asyncio.to_thread(anchor_subject, coarse)
-        except Exception as e:  # 库未起/连接失败 → 降级，置信不抬，转 clarify
-            candidates = []
-            analysis["_anchor_error"] = str(e)
+            cands = await asyncio.to_thread(anchor_subject, coarse)
+            if cands and cands[0].get("grade_code"):
+                return str(cands[0]["grade_code"])
+        except Exception:  # noqa: BLE001 — 名匹配降级失败 → None（全量池兜底）
+            pass
+    return None
 
-    if candidates:
-        best = candidates[0]
+
+async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
+    """② 分类·两步锚定 + DNA 抽取（PRD-C-014 B1）：
+      年级 → 年级叶子池 → dna_extract 让 LLM **池内选 id**（禁造词）。
+    🔴 池内锚到主 kp → anchored.code = 真知识点 code（dim1KpId 主 kp）+ 抬置信；
+      池内无匹配（main_kp=None）→ anchored 缺失 → 低置信 → gate_after_classify 走 clarify
+      （根治 C-013 凭 LLM 置信裸放行落 0）；库/网络故障锚定不可用 → 同样 clarify，不 silent-fail。
+    🔴 抽出的全维 DNA 存进 mother_dna.dna，由 _mother_facts 穿进 BO（T3）。
+    """
+    analysis = dict(state.get("analysis") or {})
+    kp_node = dict(analysis.get("kp") or {})
+    dna_obj = state.get("mother_dna") or {}
+    mother_dna = dict(dna_obj)
+
+    # --- 两步锚定第一步：定年级 code ---
+    grade_code = await _resolve_grade_code(analysis)
+
+    # --- 第二步：拉年级叶子池 + 标签复用池（HTTP，故障 → 空池降级走 clarify） ---
+    token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
+    leaf_pool: list[tuple[str, str]] = []
+    tag_pool: list[str] = []
+    client = RuoyiClient(token=token)
+    try:
+        leaf_pool = await leaf_pool_for_grade(grade_code, client)
+        # 标签复用池：第一锚还没定主 kp，先按粗 kp 名拉不了——T4 端点按 kpId 拉，
+        # 此处主 kp 未知 → 暂传空池（端点上线后由批打标/二次锚定补；变式期空池可接受）。
+        # （留接口：若 analysis.kp.anchored 已有 id 可补拉，当前首锚无 id 故空。）
+        tag_pool = []
+    except Exception as e:  # noqa: BLE001 — 池拉取故障 → 空池（不 silent-fail，转 clarify）
+        analysis["_anchor_error"] = str(e)
+    finally:
+        await client.aclose()
+
+    _emit_stage("classify", "锚定考点", "running")
+
+    if not leaf_pool:
+        # 库/网络故障或年级池为空 → 锚定不可用 → 不抬置信 → clarify（既有降级路径）
+        analysis.setdefault("_anchor_error", "知识点叶子池不可用（库未起/年级未识别）")
+        _emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
+        return {"analysis": analysis, "mother_confirmed": False, "messages": []}
+
+    # --- DNA 抽取（两步锚定第二步：LLM 池内选 id；禁造词由 dna_extract 校验闸把关） ---
+    dna = await dna_extract.extract_dna(
+        stem=mother_dna.get("stem") or "",
+        answer=mother_dna.get("answer") or "",
+        analyze=mother_dna.get("solution_skeleton") or "",
+        grade=(analysis.get("grade") or {}).get("value") or "",
+        leaf_pool=leaf_pool,
+        tag_pool=tag_pool,
+    )
+    mother_dna["dna"] = dna
+
+    main_kp = dna.get("main_kp")
+    if main_kp and main_kp.get("id"):
+        # 池内锚到真知识点 → anchored.code = 知识点叶子 code（dim1KpId 主 kp）
         kp_node["anchored"] = {
-            "id": best["id"],
-            "code": best["code"],
-            "name": best["name"],
+            "id": main_kp["id"],
+            "code": str(main_kp["id"]),  # 叶子 id 即层级编码（biz_subject 无独立 code 列）
+            "name": main_kp.get("name"),
         }
-        kp_node["value"] = best["name"]  # 用标准考点名
-        # 命中真实节点 → 抬考点置信
+        if main_kp.get("name"):
+            kp_node["value"] = main_kp["name"]
         kp_node["confidence"] = max(float(kp_node.get("confidence", 0) or 0), CONF_GATE)
         analysis["kp"] = kp_node
-        # 年级 = 编码前4位反推（比 LLM 裸猜准）→ 抬年级置信
-        if best.get("grade_code"):
-            grade_node = dict(analysis.get("grade") or {})
-            grade_node["code"] = best["grade_code"]
-            grade_node["confidence"] = max(
-                float(grade_node.get("confidence", 0) or 0), CONF_GATE
-            )
-            analysis["grade"] = grade_node
+        # 年级锚定：抬置信（已圈到该年级池且选中其内 id）
+        grade_node = dict(analysis.get("grade") or {})
+        if grade_code:
+            grade_node["code"] = grade_code
+        grade_node["confidence"] = max(
+            float(grade_node.get("confidence", 0) or 0), CONF_GATE
+        )
+        analysis["grade"] = grade_node
+        # 题型：DNA 抽到的池外校验后题型，回填抬置信
+        if dna.get("qtype"):
+            qn = dict(analysis.get("qtype") or {})
+            qn["value"] = dna["qtype"]
+            qn["confidence"] = max(float(qn.get("confidence", 0) or 0), CONF_GATE)
+            analysis["qtype"] = qn
+    # else: 池内无匹配（main_kp=None）→ anchored 缺失 → 不抬置信 → clarify（不放行出题）
 
-    confirmed = _conf_ok(analysis)
+    confirmed = _conf_ok(analysis) and bool(kp_node.get("anchored"))
     kp_name = (analysis.get("kp") or {}).get("value") or "?"
-    grade_name = (analysis.get("grade") or {}).get("value") or (
-        analysis.get("grade") or {}
-    ).get("code") or "?"
+    grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
     _emit_stage(
         "classify",
         "锚定考点",
@@ -760,6 +851,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     )
     return {
         "analysis": analysis,
+        "mother_dna": mother_dna,
         "mother_confirmed": bool(confirmed),
         "messages": [],
     }
@@ -884,26 +976,34 @@ verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题�
 
 def _mother_facts(state: VariantState) -> dict:
     analysis = state.get("analysis") or {}
-    dna = state.get("mother_dna") or {}
+    mdna = state.get("mother_dna") or {}
+    dna = mdna.get("dna") or {}  # 🔴 B1：classify 抽的 DNA 契约 v1（嵌在 mother_dna.dna）
+    grade_node = analysis.get("grade") or {}
     kp = analysis.get("kp") or {}
     anchored = kp.get("anchored") or {}
+    # 🔴 B1 subject_id 改语义 = 科目锚 level1（学段学科册层，跟年级册定，单科目期可固定）：
+    #   取年级 4 位 code（如 3071=七上）；缺则回退 _grade_to_code(年级文案)。
+    #   知识点叶子 code 不再塞 subject_id —— 那是 dim1KpId（主 kp）的活。
+    subject_l1 = grade_node.get("code") or _grade_to_code(grade_node.get("value"))
     return {
         "kp_name": kp.get("value") or "未知考点",
-        "grade": (analysis.get("grade") or {}).get("value") or "未知年级",
-        "qtype": (analysis.get("qtype") or {}).get("value") or "解答",
-        "stem": dna.get("stem") or "",
-        "skeleton": dna.get("solution_skeleton") or dna.get("answer") or "",
-        # 入库用：锚定到的真实节点编码 + 母题 id（图母题 MVP 无 id）
-        "subject_id": anchored.get("code"),
-        "mother_question_id": dna.get("mother_question_id"),
+        "grade": grade_node.get("value") or "未知年级",
+        "qtype": dna.get("qtype") or (analysis.get("qtype") or {}).get("value") or "解答",
+        "stem": mdna.get("stem") or "",
+        "skeleton": mdna.get("solution_skeleton") or mdna.get("answer") or "",
+        # 🔴 入库用：科目锚 level1（subject_id） + 主 kp 叶子 code（dim1KpId）分级
+        "subject_id": subject_l1,  # 科目锚 level1（学段学科册）
+        "dim1_kp_id": anchored.get("code"),  # 主 kp 叶子 code（DNA 锚到的真知识点）
+        "mother_question_id": mdna.get("mother_question_id"),
         # 🔴 图母题不在库 → 入库时先把母题(原题)也落库挂血缘，下面这几项给 build_mother_bo 用
-        "mother_answer": dna.get("answer"),
-        "mother_solution": dna.get("solution_skeleton") or dna.get("answer"),
-        "mother_difficulty": dna.get("difficulty"),
-        # 🔴 PRD-C-009 入库存 DNA/打标：结构指纹(dim5) + 锚定置信(labelConfidence)
-        "mother_structure": dna.get("structure"),
+        "mother_answer": mdna.get("answer"),
+        "mother_solution": mdna.get("solution_skeleton") or mdna.get("answer"),
+        "mother_difficulty": dna.get("difficulty") or mdna.get("difficulty"),
+        "mother_structure": mdna.get("structure"),
         "kp_confidence": (kp.get("confidence") if isinstance(kp, dict) else None),
         "image_url": state.get("image_url"),
+        # 🔴 B1 全维 DNA 穿进 BO（T3）：副 kp/标签/骨架/场景/考察类型/难点 + 锚定审计
+        "dna": dna,
     }
 
 

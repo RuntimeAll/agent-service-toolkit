@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pymysql
 
+from agents import dna_extract
 from core import settings
 
 
@@ -198,12 +199,93 @@ class RuoyiClient:
     async def lazy_tree(self, body: dict | None = None) -> Any:
         return await self.teacher_post("/teacher/question/lazyTree", body or {})
 
+    async def tags_by_kp(self, kp_id: Any, limit: int = 300) -> list[dict[str, Any]]:
+        """拉某知识点的高频标签复用池（T4·标签复用池客户端）。
+
+        🔴 BE 派生端点 GET /teacher/question/tagsByKp?kpId={id}&limit={n}，misikt envelope
+           {code:1, response:[{id,name,count}]}。**端点正在并行开发，现在调不通是预期**——
+           本方法实现成「拉不到→返回空列表」由上层降级（绝不卡死）。
+        """
+        if kp_id in (None, "", "0"):
+            return []
+        await self._ensure_token()
+        try:
+            resp = await self._client.get(
+                "/teacher/question/tagsByKp",
+                params={"kpId": str(kp_id), "limit": int(limit)},
+                headers=self._headers(),
+            )
+            data = resp.json()
+        except Exception:  # noqa: BLE001 — 端点未上线/网络故障 → 降级空池，不抛
+            return []
+        if data.get("code") != 1:
+            return []
+        rows = data.get("response") or []
+        return [r for r in rows if isinstance(r, dict)]
+
     async def create_question(self, body: dict) -> Any:
         """入库 = 新写 teacher 侧接口（落老师个人题库，身份由后端 LoginHelper 取，不信前端 createBy）。
 
         🔴 设计 §7：接口 /teacher/question/create（ruoyi-book），与 admin 解耦。
         """
         return await self.teacher_post("/teacher/question/create", body)
+
+
+# ---------------------------------------------------------------------------
+# 两步锚定·叶子池 + 标签复用池（PRD-C-014 B1·dna_extract 的生产数据源）
+# 🔴 池子走既有 RuoYi lazyTree/tagsByKp HTTP 封装，不直读 tsv、不直连库（kp_leaves.tsv
+#    只作单测夹具）。任一拉取故障 → 返回空池由上层降级（绝不卡死）。
+# ---------------------------------------------------------------------------
+def _collect_leaves(tree: Any) -> list[tuple[str, str]]:
+    """递归抽叶子（无 children 节点）→ [(id, name)...]（移植自 ai-orchestrator wf3）。"""
+    leaves: list[tuple[str, str]] = []
+
+    def walk(nodes: Any) -> None:
+        for n in nodes or []:
+            if not isinstance(n, dict):
+                continue
+            children = n.get("children") or []
+            if not children:
+                nid = str(n.get("id", "")).strip()
+                nm = str(n.get("name", "")).strip()
+                if nid:
+                    leaves.append((nid, nm))
+            else:
+                walk(children)
+
+    walk(tree if isinstance(tree, list) else [])
+    return leaves
+
+
+async def leaf_pool_for_grade(
+    grade_code: str | None, client: RuoyiClient
+) -> list[tuple[str, str]]:
+    """该年级叶子知识点池 [(id, name)...]（两步锚定第二步：年级 → 叶子池）。
+
+    lazyTree 拉全树 → 抽叶子 → 按 grade_code（叶子 id 前缀）过滤本年级；grade_code 缺/
+    过滤后空 → 退回全量叶子（让 LLM 在全池里选，仍受池内校验约束，不放空锚定）。
+    拉取故障 → 返回 []（上层 → 锚定失败 → clarify）。
+    """
+    try:
+        tree = await client.lazy_tree({})
+    except Exception:  # noqa: BLE001 — 树拉不到 → 空池（上层降级走 clarify）
+        return []
+    leaves = _collect_leaves(tree)
+    gc = str(grade_code or "").strip()
+    if gc:
+        scoped = [(i, n) for i, n in leaves if i.startswith(gc)]
+        if scoped:
+            return scoped
+    return leaves
+
+
+async def tag_pool_for_kp(kp_id: Any, client: RuoyiClient, limit: int = 300) -> list[str]:
+    """该知识点高频标签复用池（标签名列表，按 count 降序由 BE 给定）。
+
+    🔴 BE 端点并行开发中，调不通 → 返回 [] 由 dna_extract 降级空池（标 flag 继续）。
+    """
+    rows = await client.tags_by_kp(kp_id, limit=limit)
+    return [str(r.get("name")).strip() for r in rows if str(r.get("name") or "").strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -279,35 +361,84 @@ def _clamp_conf(conf: Any) -> float | None:
     return max(0.0, min(1.0, c))
 
 
+# DNA flags that signal the anchoring is unsafe → mark need_anchor_review
+# （主 kp 越界 / LLM 解析失败 / LLM 调用异常 = 锚定不可信，转人审）
+dna_extract_oob_flags: set[str] = {
+    dna_extract.FLAG_MAIN_KP_OOB,
+    dna_extract.FLAG_LLM_PARSE_FAIL,
+    dna_extract.FLAG_LLM_ERROR,
+}
+
+
+def _to_int_or_none(v: Any) -> int | None:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _apply_labels(
     bo: dict[str, Any], facts: dict[str, Any], item: dict[str, Any] | None, role: str
 ) -> None:
-    """把 5 维度 DNA + 轻量打标 + auxTags 塞进 CreateQuestionBo（PRD-C-009 入库存 DNA/打标）。
+    """把全维 DNA + 轻量打标塞进 CreateQuestionBo（PRD-C-014 B1·新 8 表契约）。
 
-    🔴 维度来源：
-    - dim1KpId = subjectId（锚定到的真实节点 code，知识点必绑，与 subjectId 同源）；
+    🔴 维度来源（schema 收敛后，banner 覆盖正文）：
+    - dim1KpId = facts.dim1_kp_id（主 kp 叶子 code；不再 = subjectId，subjectId 改科目锚 level1）；
     - dim2Qtype = 题型整数（与 questionType 同 _map_qtype 口径）；
     - dim4Difficulty = 难度 1~4（变式取 item，母题取 facts.mother_difficulty）；
-    - dim5Structure = 母题结构指纹（mother_dna.structure；变式与母题共享结构 DNA）；
-    - dim3Skill = 思维方法数组（analyze 暂未抽 → 缺则不带）。
+    - dim5Structure = 母题结构简述（兼容存量；DNA 骨架另走 skeleton）。
+    🔴 B1 新增键（与 BE 并行契约，键名钉死）：secondaryKpIds(int[]) / tags(str[]) /
+       skeleton / scene / examType / hardPoints(str[]) / anchorId / needAnchorReview(bool) /
+       reasoning。数据源 = facts.dna（classify 抽的 DNA 契约 v1；变式与母题共享守恒维 DNA）。
+    🔴 已删除键（BE 实体已 DROP 这些列）：dim3Skill / auxTags / freeTag。
     label_status=1(AI已标) / labeled_by=agent标识 / labelConfidence=锚定置信。
-    auxTags = {agent, role, sourceImage}（V16 aux_tags 列已补，可恢复存）。
     """
-    src = item or facts
-    subject_id = facts.get("subject_id")
-    if subject_id:
-        bo["dim1KpId"] = str(subject_id)  # 知识点必绑
+    dna = facts.get("dna") or {}
+
+    # 主 kp 叶子 code（DNA 锚到的真知识点，知识点必绑）
+    dim1 = facts.get("dim1_kp_id")
+    if dim1:
+        bo["dim1KpId"] = str(dim1)
     bo["dim2Qtype"] = bo.get("questionType")
     dim4 = _clamp_difficult(
-        src.get("difficulty") if item is not None else facts.get("mother_difficulty")
+        (item or {}).get("difficulty") if item is not None else facts.get("mother_difficulty")
     )
     if dim4 is not None:
         bo["dim4Difficulty"] = dim4
     if facts.get("mother_structure"):
         bo["dim5Structure"] = facts["mother_structure"]
-    skills = (item or {}).get("skills") or facts.get("skills")
-    if isinstance(skills, list) and skills:
-        bo["dim3Skill"] = [str(s) for s in skills]
+
+    # 🔴 B1 全维 DNA（变式守恒 main kp/副 kp/考察类型/骨架，与母题共享 facts.dna） ---
+    sec = dna.get("secondary_kps") or []
+    sec_ids = [i for i in (_to_int_or_none(s.get("id")) for s in sec if isinstance(s, dict)) if i is not None]
+    if sec_ids:
+        bo["secondaryKpIds"] = sec_ids
+    tags = [str(t).strip() for t in (dna.get("tags") or []) if str(t).strip()]
+    if tags:
+        bo["tags"] = tags
+    skeleton = dna.get("skeleton")
+    if skeleton:
+        # 骨架步骤序列 → 落 ai.solution_skeleton（全文）；list 拼成换行串
+        bo["skeleton"] = "\n".join(str(s) for s in skeleton) if isinstance(skeleton, list) else str(skeleton)
+    if dna.get("scene"):
+        bo["scene"] = str(dna["scene"])
+    if dna.get("exam_type"):
+        bo["examType"] = str(dna["exam_type"])
+    hard = [str(h).strip() for h in (dna.get("hard_points") or []) if str(h).strip()]
+    if hard:
+        bo["hardPoints"] = hard  # BE 重算个数 → hard_point_count（不信 LLM 自报）
+
+    # 锚定审计（→ ai 表 anchor_id / need_anchor_review / reasoning）
+    if facts.get("dim1_kp_id"):
+        bo["anchorId"] = str(facts["dim1_kp_id"])
+    # 锚定存疑：DNA flags 含主 kp 越界 / 解析失败 → 需人审
+    flags = dna.get("flags") or []
+    bo["needAnchorReview"] = bool(
+        not facts.get("dim1_kp_id")
+        or dna_extract_oob_flags & set(flags)
+    )
+    if dna.get("reasoning"):
+        bo["reasoning"] = str(dna["reasoning"])
 
     # 轻量打标
     bo["labelStatus"] = LABEL_STATUS_AI
@@ -316,34 +447,14 @@ def _apply_labels(
     if conf is not None:
         bo["labelConfidence"] = conf
 
-    # 血缘溯源标签（aux_tags 列 V16 已补，恢复存；不放业务数据）
-    aux: dict[str, Any] = {"agent": IMPORT_SOURCE, "role": role}
-    if facts.get("image_url"):
-        aux["sourceImage"] = facts["image_url"]
-    # 🔴 PRD-C-010 闸B 验算标记透传（item.check 由 solve_explain 填）：
-    # verify = sympy_pass / fail_after_regen / unverified（入库可查的真机验证抓手）；
-    # review = proof_needs_human（证明/开放类人审兜底——labelStatus 维持 LABEL_STATUS_AI=1，
-    # 待审语义挂 auxTags.review，不发明新 label_status 值）。
-    check = (item or {}).get("check") or {}
-    if check.get("verify"):
-        aux["verify"] = str(check["verify"])
-    if check.get("review"):
-        aux["review"] = str(check["review"])
-    # 🔴 PRD-C-010 闸A·基因闸标记透传（item.gene 由 gene_gate 填）：
-    # gene_gate = pass / warn / skipped（平行度入库可查抓手；v1 只警示不硬拦）。
-    gene = (item or {}).get("gene") or {}
-    if gene.get("gate"):
-        aux["gene_gate"] = str(gene["gate"])
-    bo["auxTags"] = aux
-
 
 def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     """从上传图抽出的「母题(原题)」→ CreateQuestionBo。
 
     🔴 设计 §7 原为「图母题不入库」；维护者 2026-06-10 拍板改为：图母题不在库时**先把原题入库**，
        变式再 motherQuestionId 指向它 → 血缘完整可追。母题图 URL 落 stemImg。
-    🔴 PRD-C-009：V16 维度列已补到 dev 库 → 入库存 DNA/打标（dim1~5 + label_* + auxTags），
-       由 _apply_labels 统一塞（role="mother"）。aux_tags 列已存在，恢复溯源标签。
+    🔴 PRD-C-014 B1：全维 DNA + 轻量打标由 _apply_labels 统一塞（role="mother"）；
+       subjectId=科目锚 level1、dim1KpId=主 kp 叶子；新 8 表键见 _apply_labels（已删 auxTags 等）。
     """
     bo: dict[str, Any] = {
         "questionType": _map_qtype(facts.get("qtype")),
@@ -375,7 +486,8 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
 
     🔴 只放契约允许的字段；createBy/createUser/status/id 绝不放（后端强制，传了也忽略）。
     题型映射成整数；难度夹 1~4；带 AI 血缘（母题 id / 变式关系 / 来源）。
-    🔴 PRD-C-009：5 维度 DNA + 轻量打标 + auxTags 由 _apply_labels 统一塞（role="variant"）。
+    🔴 PRD-C-014 B1：全维 DNA（副 kp/标签/骨架/场景/考察类型/难点 + 锚定审计）+ 轻量打标
+       由 _apply_labels 统一塞（role="variant"）；变式与母题共享 facts.dna 守恒维。
     """
     bo: dict[str, Any] = {
         "questionType": _map_qtype(item.get("qtype") or facts.get("qtype")),
