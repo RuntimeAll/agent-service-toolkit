@@ -35,7 +35,6 @@ import agents.variant as variant_mod
 from agents import math_verify
 from agents.variant import (
     EXTRACT_PROMPT,
-    GENE_JUDGE_PROMPT,
     GENERATE_PROMPT,
     PARSE_PROMPT,
     REGEN_PROMPT,
@@ -733,7 +732,7 @@ def test_fixed_contract_segments_precede_variable_segments():
     assert GENERATE_PROMPT.index("格式硬规定") < GENERATE_PROMPT.index("母题 DNA：")
     assert EXTRACT_PROMPT.index("expr_equiv") < EXTRACT_PROMPT.index("题干: {stem}")
     assert SOLVE_PROMPT.index("solved_answer") < SOLVE_PROMPT.index("题干：{stem}")
-    assert GENE_JUDGE_PROMPT.index("surface_swapped") < GENE_JUDGE_PROMPT.index("{mother_stem}")
+    # B2·T2: GENE_JUDGE_PROMPT deleted (Gate-A LLM judge retired → pure-code three-check).
     assert PARSE_PROMPT.index("分类标准") < PARSE_PROMPT.index("{utterance}")
     assert PARSE_PROMPT.index("硬约束") < PARSE_PROMPT.index("主考点: {kp_name}")
 
@@ -749,10 +748,7 @@ def test_reordered_prompts_format_cleanly():
     )
     EXTRACT_PROMPT.format(qtype="解答", stem="s", answer="1", solved_answer="1")
     SOLVE_PROMPT.format(stem="s")
-    GENE_JUDGE_PROMPT.format(
-        kp_name="kp", grade="g", qtype="解答", difficulty=3, skeleton="k",
-        mother_stem="m", level="normal", v_qtype="解答", v_difficulty=3, variant_stem="v",
-    )
+    # B2·T2: GENE_JUDGE_PROMPT deleted; Gate-A is now pure code (no judge prompt to format).
     PARSE_PROMPT.format(n=3, kp_name="kp", grade="g", utterance="u")
 
 
@@ -768,13 +764,7 @@ def test_trace_markers_still_resolve_after_reorder():
             ),
             "generate",
         ),
-        (
-            GENE_JUDGE_PROMPT.format(
-                kp_name="k", grade="g", qtype="q", difficulty=3, skeleton="k",
-                mother_stem="m", level="normal", v_qtype="q", v_difficulty=3, variant_stem="v",
-            ),
-            "gene_judge",
-        ),
+        # B2·T2: gene_judge trace marker retired (no more Gate-A LLM judge calls).
         (
             REGEN_PROMPT.format(
                 kp_name="k", grade="g", stem="s", level="normal", qtype="q",

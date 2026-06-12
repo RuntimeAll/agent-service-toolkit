@@ -8,8 +8,6 @@ Now it becomes a first-class citizen:
 - normalize_knobs: pure clamp/normalization of the LLM extraction;
 - recipe_from_knobs: knobs -> generate recipe (empty knobs == legacy default);
 - shape_check: pure code-level recipe validation (count / qtype dist / monotonic);
-- gene_judge_knobs_spec + _gene_judge_prompt: Gate-A criteria realignment so
-  increasing-difficulty variants are not falsely reworked;
 - generate node: knobs extraction wiring + group retry + legacy-path regression;
 - assemble header: "按你的要求: ..." replaces the default recipe line.
 
@@ -26,7 +24,6 @@ from agents.variant import (
     DIFFICULTY_CAP,
     GENERATE_PROMPT,
     PLAN_INCREASING,
-    _gene_judge_prompt,
     _grade_difficulty,
     _is_proof_like,
     _mother_facts,
@@ -36,7 +33,6 @@ from agents.variant import (
     exec_remove,
     exec_regenerate,
     gene_gate,
-    gene_judge_knobs_spec,
     generate,
     knobs_desc,
     normalize_knobs,
@@ -246,130 +242,43 @@ def test_recipe_spec_carries_dist_and_note():
 
 
 # ---------------------------------------------------------------------------
-# Gate-A realignment: gene_judge_knobs_spec + prompt formatting never blows up
+# B2·T2: Gate-A is now decoupled from knobs entirely. The old judge-prompt
+# realignment (gene_judge_knobs_spec / _gene_judge_prompt) is gone; Gate-A is a
+# pure-code three-check. Recipe (count/qtype-dist) is enforced by shape_check,
+# not by Gate-A. These tests pin that Gate-A no longer reads knobs.
 # ---------------------------------------------------------------------------
 
 
-def test_gene_spec_empty_knobs_or_irrelevant_knobs_is_none():
-    assert gene_judge_knobs_spec({}, 3) is None
-    assert gene_judge_knobs_spec(None, 3) is None
-    # count/note alone do not touch qtype/difficulty criteria
-    assert gene_judge_knobs_spec({"count": 5, "note": "x"}, 3) is None
-
-
-def test_gene_spec_increasing_no_longer_injects_difficulty(monkeypatch):
-    """P12.1 (PRD-C-013): difficulty_match deleted from Gate-A -> an increasing plan
-    with no qtype_dist now injects NOTHING (difficulty consistency moved to the pure
-    function difficulty_consistency_defects, warn-only, zero LLM)."""
-    knobs = {"difficulty_plan": PLAN_INCREASING, "count": 3}
-    assert gene_judge_knobs_spec(knobs, 3) is None
-    assert gene_judge_knobs_spec(knobs, 5) is None
-    assert gene_judge_knobs_spec(knobs, None) is None
-
-
-def test_gene_spec_qtype_set_judging():
-    knobs = {"qtype_dist": {"选择": 2, "填空": 2, "解答": 1}}
-    spec = gene_judge_knobs_spec(knobs, None)
-    assert "qtype_match 改判" in spec and "选择/填空/解答" in spec
-
-
-def test_gene_judge_prompt_formats_with_and_without_knobs_spec():
-    facts = _mother_facts(_FACTS_STATE)
-    item = {"stem": "变式题干", "qtype": "选择", "difficulty": 4, "level": "hard"}
-    base = _gene_judge_prompt(item, facts)
-    assert "平行题基因比对器" in base and "老师指定配方" not in base
-
-    spec = gene_judge_knobs_spec(
-        {"difficulty_plan": PLAN_INCREASING, "qtype_dist": {"选择": 2, "解答": 1}}, 4
-    )
-    with_spec = _gene_judge_prompt(item, dict(facts, knobs_spec=spec))
-    assert with_spec.startswith(base)
-    # P12.1: only the qtype realignment survives; no difficulty section anymore
-    assert "老师指定配方" in with_spec and "qtype_match 改判" in with_spec
-    assert "预期难度档" not in with_spec
-
-
-def test_gene_gate_node_injects_qtype_spec_for_recipe_items(monkeypatch):
-    """Wiring: gene_gate hands each from_recipe item a facts copy carrying the qtype
-    realignment spec (P12.1: difficulty spec is gone; qtype-dist spec remains)."""
-    seen = []
-
-    async def judge_spy(item, facts):
-        seen.append(facts.get("knobs_spec"))
-        return {
-            "qtype_match": True,
-            "structure_match": True,
-            "surface_swapped": True,
-        }
-
-    async def solve_stub(stem):
-        return {"kp_name": "一元一次方程", "grade": "七年级上学期"}
-
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_spy)
-    monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
+def test_gene_gate_is_pure_code_and_knobs_agnostic(monkeypatch):
+    """Gate-A no longer consults knobs: from_recipe items judged the same regardless
+    of the recipe — clean parallel items (qtype 守恒 + 表皮已换) pass on pure code."""
     state = dict(
         _FACTS_STATE,
         items=[
-            {"stem": "a", "qtype": "选择", "from_recipe": True, "expected_difficulty": 3},
-            {"stem": "b", "qtype": "选择", "from_recipe": True, "expected_difficulty": 4},
+            {"stem": "全新题面 2x+1=7", "qtype": "解答", "from_recipe": True, "expected_difficulty": 3},
+            {"stem": "全新题面 3y-2=10", "qtype": "解答", "from_recipe": True, "expected_difficulty": 4},
         ],
-        knobs={"qtype_dist": {"选择": 2}, "count": 2},
+        knobs={"qtype_dist": {"解答": 2}, "count": 2},
     )
     out = asyncio.run(gene_gate(state, {}))
     assert out["messages"] == []
-    assert len(seen) == 2
-    assert all("qtype_match 改判" in s for s in seen)
-    assert all("预期难度档" not in s for s in seen)
+    assert all(it["gene"]["gate"] == "pass" for it in out["items"])
+    assert all(it["gene"]["flags"] == [] for it in out["items"])
 
 
-def test_gene_gate_edit_round_items_not_judged_by_stale_recipe(monkeypatch):
-    """Finding fix: after「出5道递增」, a later「再来2道简单的」add-round item carries no
-    from_recipe stamp -> gene_gate must NOT inject the old increasing plan's spec
-    (the teacher's deliberately-easy items would be falsely reworked/warned)."""
-    seen = []
-
-    async def judge_spy(item, facts):
-        seen.append(facts.get("knobs_spec"))
-        return {
-            "qtype_match": True,
-            "difficulty_match": True,
-            "structure_match": True,
-            "surface_swapped": True,
-        }
-
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_spy)
+def test_gene_gate_already_judged_items_not_rejudged():
+    # old item with gene present is left verbatim; only the fresh item is checked.
     state = dict(
         _FACTS_STATE,
-        # old items already judged (gene present) + one fresh add-round item (no stamp)
         items=[
-            {"stem": "old", "gene": {"gate": "pass"}, "from_recipe": True, "expected_difficulty": 3},
-            {"stem": "easy-new", "difficulty": 2},
+            {"stem": "old", "gene": {"gate": "pass"}},
+            {"stem": "全新题面 z=5", "qtype": "解答"},
         ],
         knobs={"difficulty_plan": PLAN_INCREASING, "count": 5},
     )
     out = asyncio.run(gene_gate(state, {}))
-    assert len(seen) == 1  # only the new item is judged
-    assert seen[0] is None  # and without the stale recipe spec
-    assert out["items"][1]["gene"]["gate"] == "pass"
-
-
-def test_gene_gate_node_without_knobs_keeps_plain_facts(monkeypatch):
-    seen = []
-
-    async def judge_spy(item, facts):
-        seen.append(facts)
-        return {
-            "qtype_match": True,
-            "difficulty_match": True,
-            "structure_match": True,
-            "surface_swapped": True,
-        }
-
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_spy)
-    state = dict(_FACTS_STATE, items=[{"stem": "a"}])
-    out = asyncio.run(gene_gate(state, {}))
-    assert out["items"][0]["gene"]["gate"] == "pass"
-    assert "knobs_spec" not in seen[0]
+    assert out["items"][0]["gene"]["gate"] == "pass"  # untouched
+    assert out["items"][1]["gene"]["gate"] == "pass"  # freshly checked, clean
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +320,15 @@ def test_generate_without_user_text_keeps_legacy_prompt_and_no_knobs_call(monkey
     out = asyncio.run(generate(state, {}))
 
     assert len(prompts) == 1  # no KNOBS extraction round-trip
-    expected = GENERATE_PROMPT.format(n=3, n_normal=2, n_hard=1, **_mother_facts(state))
-    assert prompts[0] == expected  # legacy behavior unchanged, no teacher section
+    # B2·T1: GENERATE 现固定追加 W2 守恒硬约束段（_conservation_clause），spec 空（无 knobs）。
+    facts = _mother_facts(state)
+    expected = (
+        GENERATE_PROMPT.format(n=3, n_normal=2, n_hard=1, **facts)
+        + "\n\n"
+        + variant_mod._conservation_clause(facts.get("dna"))
+    )
+    assert prompts[0] == expected  # legacy + W2 守恒段，无老师配方 spec
+    assert "守恒硬约束" in prompts[0]  # W2 段确在
     assert out["knobs"] == {}  # extracted-empty is persisted (never re-extract)
     assert out["shape_defects"] == []
     assert len(out["items"]) == 3 and "check" not in out["items"][0]

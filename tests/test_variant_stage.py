@@ -112,16 +112,9 @@ def test_node_survives_raising_writer_end_to_end(monkeypatch):
 
     monkeypatch.setattr(variant_mod, "get_stream_writer", lambda: boom)
 
-    async def judge_pass(item, facts):
-        return {
-            "qtype_match": True,
-            "difficulty_match": True,
-            "structure_match": True,
-            "surface_swapped": True,
-        }
-
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_pass)
-    state = dict(_FACTS_STATE, items=[{"stem": "v1"}])
+    # B2·T2: Gate-A is pure code (no LLM judge); a clean parallel item (qtype 守恒 + 表皮已换)
+    # passes the three-check even when the stream writer raises.
+    state = dict(_FACTS_STATE, items=[{"stem": "全新题面 5x=10", "qtype": "解答"}])
     out = asyncio.run(gene_gate(state, {}))
     assert out["messages"] == []
     assert out["items"][0]["gene"]["gate"] == "pass"
@@ -272,32 +265,22 @@ def test_generate_without_teacher_text_reports_default_recipe(monkeypatch):
     ]
 
 
-def test_gene_gate_emits_per_item_running_warn_on_rework_then_done(monkeypatch):
+def test_gene_gate_emits_per_item_running_then_done(monkeypatch):
+    # 🔴 B2·T2：闸A = 纯代码三检（无 LLM judge / 无回炉）→ 每题只发一条 running，最后 done。
+    #   旧「回炉重生中」warn 阶段灯随 judge 退役删除。三检命中仍只标 item.gene=warn（不发额外阶段灯）。
     calls = _record_stages(monkeypatch)
-
-    async def judge_rework(item, facts):
-        return {
-            "qtype_match": True,
-            "difficulty_match": True,
-            "structure_match": False,
-            "surface_swapped": True,
-            "reason": "结构漂了",
-        }
-
-    async def regen_none(item, facts, feedback=None):
-        return None  # rework fails -> keep original marked warn
-
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_rework)
-    monkeypatch.setattr(variant_mod, "_regen_once", regen_none)
-    state = dict(_FACTS_STATE, items=[{"stem": "v1"}, {"stem": "v2"}])
+    # 两道题型守恒破（选择 ≠ 母题解答）→ 三检命中 → gene=warn（不回炉）。
+    state = dict(
+        _FACTS_STATE,
+        items=[{"stem": "全新题面A", "qtype": "选择"}, {"stem": "全新题面B", "qtype": "选择"}],
+    )
     out = asyncio.run(gene_gate(state, {}))
     assert all(it["gene"]["gate"] == "warn" for it in out["items"])
-    # P14 叙事修正（RC3）：per-item running 去掉误导性「/总数」→「第 N 题比对中」
+    assert all("qtype_conservation" in it["gene"]["flags"] for it in out["items"])
+    # per-item running（去掉误导性「/总数」）+ 收尾 done；无回炉阶段灯。
     assert calls == [
         ("gene_gate", "平行度比对", "running", "第 1 题比对中"),
-        ("gene_gate", "平行度比对", "warn", "第 1 道回炉重生中"),
         ("gene_gate", "平行度比对", "running", "第 2 题比对中"),
-        ("gene_gate", "平行度比对", "warn", "第 2 道回炉重生中"),
         ("gene_gate", "平行度比对", "done", None),
     ]
 

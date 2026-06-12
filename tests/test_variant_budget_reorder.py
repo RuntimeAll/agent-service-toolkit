@@ -156,51 +156,51 @@ def test_ainvoke_text_ticks_budget_on_success(monkeypatch):
 # ===========================================================================
 
 
-def test_gene_rework_skipped_when_budget_exhausted(monkeypatch):
-    # 闸A judge=rework，但预算耗尽 → 不回炉，直接落 warn（保留原题，G5 降级）
-    rework_called = {"n": 0}
-
-    async def judge_rework(item, facts):
-        return {"qtype_match": True, "structure_match": False, "surface_swapped": True, "reason": "漂了"}
+def test_gene_gate_pure_code_never_reworks_or_spends_budget(monkeypatch):
+    # 🔴 B2·T2 换血后：闸A = 纯代码三检，无 LLM judge / 无回炉 / 不花预算。
+    #   旧「judge=rework → 预算耗尽跳回炉」语义整段退役（regen 永不被闸A 触达）。
+    #   即便预算耗尽，闸A 仍判得出（纯代码），且绝不调 _regen_once。
+    regen_called = {"n": 0}
 
     async def regen_spy(item, facts, feedback=None):
-        rework_called["n"] += 1
+        regen_called["n"] += 1
         return None
 
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_rework)
     monkeypatch.setattr(variant_mod, "_regen_once", regen_spy)
 
     async def go():
         _budget_begin(1)
-        _budget_tick()  # 耗尽
-        out = await variant_mod._gene_one_item({"stem": "v"}, _FACTS, 0, 1)
-        return out
+        _budget_tick()  # 耗尽——对纯代码闸A 无影响
+        # 干净平行题（题型守恒、表皮已换）→ 三检全过 → pass
+        return await variant_mod._gene_one_item(
+            {"stem": "全新题面 5x=10", "qtype": "解答"}, _FACTS, 0, 1
+        )
 
     out = asyncio.run(go())
-    assert out["gene"]["gate"] == "warn"  # 保留原题打 warn
-    assert rework_called["n"] == 0  # 增强类回炉被跳过
+    assert out["gene"]["gate"] == "pass"
+    assert regen_called["n"] == 0  # 闸A 纯代码，永不回炉
 
 
-def test_gene_rework_runs_when_budget_available(monkeypatch):
-    # 对照组：预算充足 → rework 正常发生（不跳）
-    rework_called = {"n": 0}
-
-    async def judge_rework(item, facts):
-        return {"qtype_match": True, "structure_match": False, "surface_swapped": True, "reason": "漂了"}
+def test_gene_gate_pure_code_flags_warn_without_rework(monkeypatch):
+    # 三检命中（题型守恒破：变式选择题 ≠ 母题解答）→ warn + flags，仍不回炉。
+    regen_called = {"n": 0}
 
     async def regen_spy(item, facts, feedback=None):
-        rework_called["n"] += 1
+        regen_called["n"] += 1
         return None
 
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_rework)
     monkeypatch.setattr(variant_mod, "_regen_once", regen_spy)
 
     async def go():
-        _budget_begin(10)  # 充足
-        return await variant_mod._gene_one_item({"stem": "v"}, _FACTS, 0, 1)
+        _budget_begin(10)  # 充足也不调回炉
+        return await variant_mod._gene_one_item(
+            {"stem": "全新题面 5x=10", "qtype": "选择"}, _FACTS, 0, 1
+        )
 
-    asyncio.run(go())
-    assert rework_called["n"] == 1
+    out = asyncio.run(go())
+    assert out["gene"]["gate"] == "warn"
+    assert "qtype_conservation" in out["gene"]["flags"]
+    assert regen_called["n"] == 0
 
 
 def test_check_heal_skipped_when_budget_exhausted_item_dropped(monkeypatch):
@@ -326,9 +326,6 @@ def test_generate_round_budget_exhaustion_still_finishes(monkeypatch):
     _capture_frames(monkeypatch)
     monkeypatch.setattr(variant_mod.settings, "VARIANT_BUDGET_GENERATE", 1)
 
-    async def judge_rework(item, facts):
-        return {"qtype_match": True, "structure_match": False, "surface_swapped": True, "reason": "x"}
-
     async def solve_stub(stem):
         return {"solved_answer": "x=2", "solution": "s"}
 
@@ -341,7 +338,7 @@ def test_generate_round_budget_exhaustion_still_finishes(monkeypatch):
         regen_calls["n"] += 1
         return None
 
-    monkeypatch.setattr(variant_mod, "_gene_judge_one", judge_rework)
+    # B2·T2: Gate-A is pure code now (no _gene_judge_one). 闸B sympy FAIL + 预算耗尽 → heal 跳过。
     monkeypatch.setattr(variant_mod, "_solve_one", solve_stub)
     monkeypatch.setattr(variant_mod, "_machine_verify", verify_fail)
     monkeypatch.setattr(variant_mod, "_regen_once", regen_spy)
@@ -364,7 +361,7 @@ def test_generate_round_budget_exhaustion_still_finishes(monkeypatch):
     # 流程收尾、items 在（剔除题转哨兵留位，下游 solve_explain 收口）
     assert len(out["items"]) == 3
     assert out["llm_call_budget"]["limit"] == 1
-    # 预算闸生效：闸A rework / 闸B heal 全被跳过（regen 一次没调）
+    # 预算闸生效：闸B heal 被跳过（regen 一次没调）；闸A 纯代码本就不回炉
     assert regen_calls["n"] == 0
 
 

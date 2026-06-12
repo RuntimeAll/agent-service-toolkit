@@ -455,6 +455,57 @@ async def variant_persist(input: VariantPersistInput) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
+class VariantPersistOneInput(BaseModel):
+    """单题入库直连请求（PRD-C-014 B2·T5·B3 前置）：index=1-based。"""
+
+    thread_id: str
+    index: int
+    ruoyi_token: str  # 必填：入库 owner = 登录老师本人（与「全部入库」同源身份硬闸）
+
+
+@router.post("/variant/persist-one")
+async def variant_persist_one(input: VariantPersistOneInput) -> dict[str, Any]:
+    """C 线扩展：「单题入库」直连——按 thread_id 取题组 → 调 persist_one_to_bank（复用
+    persist_items 单 item 路径，item 级 persisted 防重：已收录的重复调直接回已有 id，不二次落行）
+    → 回写 state（persisted 标记 + 母题血缘 id）→ 返回 {ok, id, artifact}。
+
+    与 /variant/persist 同范式（确定性动作不过 LLM 分类器）；index 越界 → 400；
+    单题落库失败 → 200 带 ok=False（不当 500，前端按 ok 提示）。
+    """
+    from agents.variant import _artifact_payload, persist_one_to_bank
+
+    if conv_trace.teacher_id_from_token(input.ruoyi_token) is None:
+        raise HTTPException(status_code=401, detail="登录态缺失或已过期，请重新登录")
+    agent: AgentGraph = get_agent("variant")
+    cfg = RunnableConfig(
+        configurable={"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
+    )
+    try:
+        snapshot = await agent.aget_state(config=cfg)
+        values: dict[str, Any] = snapshot.values or {}
+        update, result, error = await persist_one_to_bank(
+            values, input.index, token=input.ruoyi_token
+        )
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        # 有 state 变更（成功落库/回填血缘）才回写 checkpointer（防重簿记不丢）。
+        if update:
+            await agent.aupdate_state(cfg, update, as_node="persist_to_bank")
+        merged = {**values, **update}
+        return {
+            "ok": bool(result.get("ok")),
+            "id": result.get("id"),
+            "skipped": bool(result.get("skipped")),
+            "error": result.get("error"),
+            "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"variant_persist_one error: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error")
+
+
 @router.post("/variant/artifact")
 async def variant_artifact(input: ChatHistoryInput) -> dict[str, Any]:
     """C 线扩展（2026-06-11 会话持久化）：按 thread_id 从 checkpointer 重建右栏

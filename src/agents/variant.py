@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import difflib
 import json
 import os
 import re
@@ -145,17 +146,16 @@ TIER_MANUAL = "manual"  # 中性：老师手动编辑、验算待重跑（题组
 
 # ---------------------------------------------------------------------------
 # 闸A·基因闸（验"是不是平行题"，与闸B"答案对不对"正交。依据 12-题目DNA方法论 §2/§5）：
-# 骨架基因(题型/难度/结构=解法骨架)必须 match —— 一变就不是平行题；
-# 皮肤变量(数字/场景)必须换 —— 没换 = 复读母题，也不算平行题。
-# 判决 = 一次轻量 LLM 比对(受约束 JSON) + 纯函数 gene_gate_decision；
-# rework → 既有 REGEN 回炉 1 次再判；仍不过 → gene_gate:"warn" 只警示不硬拦(v1)；
-# judge 调用/解析失败 → 按 pass 放行标 "skipped"（闸A是增强不是关卡，绝不卡死流程，G5）。
-# 标记落 item.gene.gate → 入库透传 auxTags.gene_gate（_apply_labels）；4d 后 gene=warn
+# 🔴 B2·T2 退役换血（PRD-C-014）：闸A LLM judge 全链已删，内涵改为**纯代码三检**
+#   （gene_gate_check）：① structure_lint 题型结构 lint；② _surface_check 表皮距离防抄题；
+#   ③ 守恒透传（题型/考察类型守恒的声明性校验）。任一检命中 = gene=warn + flags（只警示
+#   不硬拦、不回炉、不剔题，闸门必有降级路径）；三检全过 = gene=pass。
+# 标记落 item.gene.gate（+ flags/reason）→ FE 4d 展示 + 快照透传；BO 不带 gene（B1 收敛）。
 # 单闸不再外显负面（沉默），仅参与 _apply_visibility 双闸裁决。
 # ---------------------------------------------------------------------------
-GENE_GATE_PASS = "pass"  # 基因比对通过（平行题）
-GENE_GATE_WARN = "warn"  # 回炉 1 次后仍不过 → 真值留档；外显层按 4d 矩阵裁决
-GENE_GATE_SKIPPED = "skipped"  # judge 调用失败/JSON 解析失败 → 放行留痕
+GENE_GATE_PASS = "pass"  # 纯代码三检全过（合格平行题）
+GENE_GATE_WARN = "warn"  # 三检任一命中 → 真值 + flags 留档；外显层按 4d 矩阵裁决
+GENE_GATE_SKIPPED = "skipped"  # 历史值（judge 退役后纯代码不再产生 skipped；保留供旧线程兼容）
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ _TRACE_MARKERS: list[tuple[str, str]] = [
     ("看这张题目图", "analyze"),
     ("出题配方", "knobs"),
     ("数学验算载荷抽取器", "extract"),
-    ("平行题基因比对器", "gene_judge"),
+    # 🔴 B2·T2：闸A LLM judge 已退役（gene_judge 全链删），不再有「平行题基因比对器」调用。
     ("独立解出的答案与题面标答不一致", "regen"),
     ("你是严谨的数学阅卷老师", "solve"),
     ("举一反三 agent 的指令解析器", "parse"),
@@ -1008,12 +1008,116 @@ def _mother_facts(state: VariantState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 🔴 W2 守恒注入（PRD-C-014 B2·T1）：母题 DNA（facts.dna，由 B1 dna_extract 抽）→ 出题
+# 硬约束段，GENERATE / REGEN / ADD 三处共用单一事实源。守恒四件套：
+#   ① 知识点白名单：解题所需 kp ⊆ 母题{main_kp + secondary_kps}（列 id+名称），白名单为空集
+#      则不放行生成（上层降级 clarify/报错，不裸出）——见 _conservation_blocked。
+#   ② 考察类型守恒（= 母题 exam_type）。
+#   ③ 解法骨架【最难步】基因保留（变式必须保留母题骨架中【】标注的最难步结构）。
+#   ④ 表皮必换：数字全换且解整洁（解不整洁宁可换数），场景可换。
+# 🔴 文本含 {…} 字面量须双写转义（本段会被拼进 .format() 的 prompt 模板）。
+# ---------------------------------------------------------------------------
+def _kp_whitelist(dna: dict | None) -> list[tuple[str, str]]:
+    """从母题 DNA 取知识点守恒白名单 [(id, name), ...] = 主 kp + 副 kp（去重、去空）。
+
+    纯函数（可单测）。白名单为空 = 母题 DNA 没锚到任何知识点 → 上层据此不放行生成。
+    """
+    dna = dna or {}
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(kp: Any) -> None:
+        if not isinstance(kp, dict):
+            return
+        kid = str(kp.get("id") or "").strip()
+        name = str(kp.get("name") or "").strip()
+        key = kid or name
+        if not key or key in seen:
+            return
+        seen.add(key)
+        out.append((kid, name))
+
+    _add(dna.get("main_kp"))
+    for s in dna.get("secondary_kps") or []:
+        _add(s)
+    return out
+
+
+def _conservation_blocked(dna: dict | None) -> str | None:
+    """🔴 白名单空集守门（T1）：母题 DNA **已抽取但**无任何锚定知识点（白名单空集）→ 返回拦截
+    原因（上层降级，不放行生成）；白名单非空 → None（放行）。纯函数、可单测。
+
+    🔴 边界：dna 完全缺失（{} / None，= 库内母题直进 generate 未走 B1 DNA 抽取的合法路径，
+    其考点来自 analysis.kp 而非 DNA）→ None（不拦），由既有 mother_confirmed/_conf_ok 闸把关。
+    只有「DNA 被抽过（dict 非空）却没锚到任何 kp」才是真·守恒失守，必拦。
+    """
+    if not dna:
+        return None  # 无 DNA = 库内母题合法路径，不归本闸管
+    if not _kp_whitelist(dna):
+        return "母题 DNA 未锚定任何知识点（守恒白名单为空），无法保证变式不超纲，已暂停生成"
+    return None
+
+
+def _conservation_clause(dna: dict | None) -> str:
+    """🔴 W2 守恒硬约束段（GENERATE/REGEN/ADD 共用单一事实源·T1）。返回可拼进 prompt 的文本。
+
+    数据源 = 母题 DNA（facts.dna）：白名单 / 考察类型 / 解法骨架最难步。空字段优雅降级
+    （某项缺则该条不注入，绝不输出半截占位）。调用前应已过 _conservation_blocked（白名单非空）。
+    """
+    dna = dna or {}
+    lines: list[str] = ["🔴 守恒硬约束（W2·违反 = 不是合格平行变式）："]
+
+    wl = _kp_whitelist(dna)
+    if wl:
+        wl_s = "、".join(f"{name}（{kid}）" if kid else name for kid, name in wl)
+        lines.append(
+            f"① 知识点守恒：解这道变式**所需的知识点必须 ⊆ {{{wl_s}}}**——只能用白名单内的知识点，"
+            "禁止引入白名单外的知识点（超纲即废）。"
+        )
+
+    exam_type = str(dna.get("exam_type") or "").strip()
+    if exam_type:
+        lines.append(
+            f"② 考察类型守恒：变式的考察类型必须仍是「{exam_type}」（与母题同——不许把"
+            "「直接计算」改成「证明推理」之类换赛道）。"
+        )
+
+    skeleton = dna.get("skeleton") or []
+    hardest = next(
+        (str(s) for s in skeleton if "【" in str(s) and "】" in str(s)), None
+    )
+    if hardest:
+        lines.append(
+            f"③ 解法骨架【最难步】基因保留：母题骨架的最难一步是「{hardest}」——变式必须保留"
+            "这一步**同类挑战**（同样的构造/转化/分类讨论难度），不许把它简化掉或绕开。"
+        )
+    elif skeleton:
+        sk_s = "；".join(str(s) for s in skeleton)
+        lines.append(
+            f"③ 解法骨架基因保留：变式必须按母题同一解法骨架可解——骨架为「{sk_s}」。"
+        )
+
+    lines.append(
+        "④ 表皮必换：数字必须**全部换掉**且设计成解依然整洁（解不整洁宁可再换一组数），"
+        "场景可换同类；与母题题面几乎相同（只是复读）= 废。"
+    )
+    # 🔴 难度规则（T3·22-SSOT §2）：normal 与母题同档；hard = 母题档 +1（封顶 4）——
+    #    hard 按构造定义就是在同一骨架上**多加一个真实突破口**（一步构造/转化/分类讨论），
+    #    不是把数字变丑。
+    lines.append(
+        "⑤ 难度档：level=\"normal\" 的题与母题同档；level=\"hard\" 的题 = 母题档 +1（封顶 4），"
+        "靠在同一骨架上**多加一个真实突破口**（一步构造/转化/分类讨论）升档，不是把数字变丑。"
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # 首轮配方旋钮（修 bug：首轮带图附带的文字要求被整条丢弃 → 旋钮成一等公民）
 # 链路：generate 入口（knobs 为 None 时）一次受约束 LLM 抽取（KNOBS_PROMPT）
 #   → 纯函数 normalize_knobs 钳制 → 存回 state（跨轮保留）
 #   → recipe_from_knobs 驱动 GENERATE_PROMPT 配方段
 #   → 代码级 shape_check（数量/题型分布/递增单调）不符整组 retry 1 次，仍不符 → 头部 ⚠ 外显
-#   → 闸A 对齐：gene_judge_knobs_spec 注入 judge prompt（递增难度不被基因闸误判回炉）。
+#   （B2·T2：闸A LLM judge 退役后，配方对齐不再注入 judge prompt——闸A 改纯代码三检）。
 # 🔴 抽取失败/解析失败 → knobs={} 回落默认，绝不卡死出题（G5）。
 # ---------------------------------------------------------------------------
 KNOBS_PROMPT = """你是举一反三 agent 的出题配方抽取器（受约束抽取：只抽老师明说的，绝不脑补）。老师贴题目图时附带了下面这句话，请从中抽出出题配方旋钮。
@@ -1348,36 +1452,9 @@ def knobs_desc(knobs: dict[str, Any] | None) -> str:
     return "·".join(bits)
 
 
-def gene_judge_knobs_spec(
-    knobs: dict[str, Any] | None, expected_difficulty: Any = None
-) -> str | None:
-    """🔴 纯函数·闸A 配方对齐段：knobs 非空时注入 GENE_JUDGE_PROMPT 尾部，改判标准跟老师配方走。
-
-    🔴 只对**产生该配方那一轮**生成的题注入（item 带 from_recipe 印记，gene_gate 把关）——
-    编辑轮（再来2道简单的）新增的题不受旧配方改判，老师点名的简单补题不会被旧递增计划误警。
-
-    - qtype_match：按老师指定题型集合判（属于配比内任一题型即 match），不再要求与母题题型一致；
-    - 🔴 P12.1（PRD-C-013）：difficulty_match 已从闸A 删除，本段不再注入任何难度改判
-      （难度一致性走纯函数 difficulty_consistency_defects 组内相对关系，零 LLM）；
-    - knobs 没碰题型（如只给 count/note/难度）→ 返回 None（判别标准保持现状）。
-    expected_difficulty 参数保留签名以免上游调用点改动，本函数已不消费它。
-    """
-    knobs = knobs or {}
-    if not knobs:
-        return None
-    lines: list[str] = []
-
-    dist = knobs.get("qtype_dist") or {}
-    if dist:
-        allowed = "/".join(dist.keys())
-        lines.append(
-            f"- qtype_match 改判：老师指定了题型配比（{'、'.join(f'{k}×{v}' for k, v in dist.items())}），"
-            f"变式题型属于 {{{allowed}}} 之一即算 match（不再要求与母题题型一致；配比总量由程序另行校验）。"
-        )
-
-    if not lines:
-        return None
-    return "老师指定配方（🔴 优先于上面的判别标准）：\n" + "\n".join(lines)
+# 🔴 B2·T2：gene_judge_knobs_spec（闸A judge prompt 配方对齐段）随 LLM judge 全链删除——
+#    闸A 改纯代码三检（gene_gate_check），不再有 judge prompt 可注入。配方的题型/数量校验
+#    仍由 shape_check（纯函数，generate 整组 retry）把关，与闸A 解耦。
 
 
 def _normalize_generated_item(it: dict[str, Any], facts: dict) -> dict[str, Any]:
@@ -1495,6 +1572,17 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     )
 
     facts = _mother_facts(state)
+    # 🔴 W2 守恒守门（T1）：母题 DNA 白名单为空集 → 不放行生成，降级回 clarify 语义（不裸出）。
+    blocked = _conservation_blocked(facts.get("dna"))
+    if blocked:
+        _emit_stage("generate", "生成题目", "warn", "母题知识点未锚定")
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"{blocked}。请补充确认这道母题考的知识点（年级 + 考点），我再造变式。"
+                )
+            ]
+        }
     mother_d = (state.get("mother_dna") or {}).get("difficulty")
     recipe = recipe_from_knobs(knobs, mother_d)
     _emit_stage("generate", "生成题目", "running", f"{recipe['n']} 道")
@@ -1502,6 +1590,8 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         GENERATE_PROMPT.format(
             n=recipe["n"], n_normal=recipe["n_normal"], n_hard=recipe["n_hard"], **facts
         )
+        + "\n\n"
+        + _conservation_clause(facts.get("dna"))  # 🔴 W2 守恒硬约束注入（T1）
         + recipe["spec"]
     )
 
@@ -1564,7 +1654,8 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         （G5：eager 是增强不是关卡，失败的题留给下游节点照旧串行补判）。"""
         try:
             async with sem:
-                judged = await _gene_one_item(item, _gene_facts_for(item, facts, knobs), idx, total_n)
+                # B2·T2：闸A 内涵换纯代码三检（facts 直传，judge 配方对齐 facts 组装已退役）。
+                judged = await _gene_one_item(item, facts, idx, total_n)
                 kept, note = await _check_one_item(judged, facts, idx, total_n)
             if stale["flag"]:
                 return  # 本轮 eager 已作废（流重启/整组 retry）→ 不记账、不发作废题的帧
@@ -1998,6 +2089,43 @@ def _conservation_ok(solved_kp: str, solved_grade: str, facts: dict) -> bool:
     return bool(kp_ok and grade_ok)
 
 
+# ---------------------------------------------------------------------------
+# 🔴 表皮闸纯函数（PRD-C-014 B2·T4）：闸A 三检之②——题干过近 / 数字全同 = 抄母题。
+# 纯函数零 LLM 零 IO，可单测；语义搬自 tools/e2_constrained_gen_probe._surface_check。
+# 降级铁律：只打 ⚠ flag（返回缺陷描述），不卡死、不剔题——上层据此标记继续（闸门必有降级路径）。
+# ---------------------------------------------------------------------------
+_SURFACE_SIM_THRESHOLD = 0.85  # 题干归一化相似度 > 此阈值 = 疑似抄题
+
+
+def _surface_norm_stem(s: Any) -> str:
+    """题干归一化：去空白/LaTeX 定界符/花括号/反斜杠后小写，专供相似度比对（不入库）。"""
+    return re.sub(r"[\s$\\{}]+", "", str(s or "")).lower()
+
+
+def _surface_nums(s: Any) -> list[str]:
+    """抽题干里的数字串（含小数），用于「数字与母题全同」检测。"""
+    return re.findall(r"\d+(?:\.\d+)?", str(s or ""))
+
+
+def _surface_check(variant_stem: Any, mother_stem: Any) -> str | None:
+    """🔴 表皮距离纯函数（T4）：题干过近 = 抄母题；数字与母题完全相同也算（表皮没换）。
+
+    返回缺陷描述（疑似抄题，上层打 ⚠ flag）或 None（正常变式，表皮已换）。
+    母题题干为空 → 无从比对 → None（不误报）。纯函数，可单测。
+    """
+    m = _surface_norm_stem(mother_stem)
+    if not m:
+        return None
+    v = _surface_norm_stem(variant_stem)
+    ratio = difflib.SequenceMatcher(None, v, m).ratio()
+    if ratio > _SURFACE_SIM_THRESHOLD:
+        return f"题干与母题相似度{ratio:.2f}>{_SURFACE_SIM_THRESHOLD}（疑似抄题，表皮未换）"
+    v_nums, m_nums = _surface_nums(variant_stem), _surface_nums(mother_stem)
+    if v_nums and v_nums == m_nums:
+        return "数字与母题完全相同（表皮没换）"
+    return None
+
+
 async def _solve_one(stem: str) -> dict:
     """真解一道题。🔴 LLM 调用异常吞掉返 {}（与 _extract_payload/_gene_judge_one 契约对齐）：
     瞬时网关抖动绝不外抛炸掉 solve_explain/gene_gate 节点（G5），调用方按"没解出来"降级。"""
@@ -2041,6 +2169,9 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
                         difficulty=item.get("difficulty") or 3,
                         injected_kp=json.dumps(item.get("injected_kp"), ensure_ascii=False),
                     )
+                    # 🔴 W2 守恒硬约束注入（T1）：回炉重出仍守白名单/考察类型/最难步基因。
+                    + "\n\n"
+                    + _conservation_clause(facts.get("dna"))
                 )
             ]
         )
@@ -2367,284 +2498,139 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
 # ---------------------------------------------------------------------------
 # 闸A·基因闸（验"是不是平行题"）：generate / exec_regenerate / exec_add 产出新变式后、
 # solve_explain 之前过本闸。与闸B（答案对不对）正交：本闸只比 DNA 基因，不验数学。
-# 🔴 宏观控制流仍是确定性 DAG —— 闸A是图上固定节点，LLM 只产 judge JSON，
-#    pass/rework 判决 = 纯函数 gene_gate_decision（可单测），不采信 LLM 自评流程走向。
+#
+# 🔴 B2·T2 退役换血（PRD-C-014）：闸A LLM judge 全链删（GENE_JUDGE_PROMPT / _gene_judge_one /
+#    _gene_judge_prompt / _gene_feedback / gene_judge_knobs_spec / _gene_target_qtype* /
+#    _gene_facts_for / gene_gate_decision 等），内涵换为**纯代码三检**：
+#      ① structure_lint：题型/结构闭集 lint（_QTYPE_CONTRACT 代码镜像，复用 structure_lint）。
+#      ② 表皮距离 _surface_check：题干归一化相似度 >0.85 或 数字与母题全同 → 判抄题打 ⚠ flag。
+#      ③ 守恒透传：W2 注入的考察类型/题型守恒在 item 上的声明性校验，结果作为 flag 透传。
+# 🔴 判决铁律不破：闸A 三检全是**结构/表皮形态校验**，不碰答案对错（对错归闸B sympy）。
+#    任一检命中 = 打 flag（⚠ warn）**不卡死、不剔题、不回炉**——闸门必有降级路径（铁律④）。
+#    干净/三检全过 = gene={gate:"pass"}；命中 = gene={gate:"warn", flags, reason}。
+#    judge LLM 已无 → 不再有 skipped 语义的「调用失败放行」（纯代码不会失败，异常一律降级 pass）。
 # ---------------------------------------------------------------------------
-# 🔴 排版（PRD-C-012 任务3）：判别标准/输出契约固定段前移，变动段（母题摘要/变式题）
-# 移末尾（runtime 追加的 knobs_spec 改判段照旧排在最后）；语义一字不改。
-GENE_JUDGE_PROMPT = """你是平行题基因比对器。对照母题，判断下面这道变式是否是母题的「平行题」：骨架基因(题型/解法结构)必须一致，皮肤(数字/场景)必须已换。
-
-判别标准：
-- qtype_match: 变式题型与母题一致。
-- structure_match: 解法主结构/骨架与母题一致（难题在主骨架外综合一个相邻考点不算破坏结构）。
-- surface_swapped: 数字/场景至少一类已换；与母题题面几乎相同(只是复读) = false。
-
-🔴 难度不是本闸判项：难度一致性由程序按组内相对关系另行校验（hard 题难度 ≥ 同组 normal 题），你**不要**因为「感觉难一点/简单一点」打回——只看题型与解法骨架是否平行、皮肤是否已换。
-
-只输出一个 JSON（不要解释）：
-{{"qtype_match": true/false, "structure_match": true/false, "surface_swapped": true/false, "reason": "一句话依据"}}
-
-母题摘要：
-- 主考点: {kp_name} / 年级: {grade}
-- 题型: {qtype} / 难度: {difficulty}
-- 解法骨架: {skeleton}
-- 题干: {mother_stem}
-
-变式题（申报 level={level} / 题型 {v_qtype} / 难度 {v_difficulty}）：
-{variant_stem}"""
-
-# 骨架基因键（必须全 match）；皮肤键（必须 swapped）
-# 🔴 P12.1（PRD-C-013）：difficulty_match 从闸A 删除 —— judge 主观目测对赌 generate 算术
-# 申报值是两个噪声源互比（最近 40 次失败 difficulty 占 28，完美平行题被「感觉难一点」打回）。
-# 难度一致性下沉为纯函数组内相对关系校验（difficulty_consistency_defects，零 LLM），只 warn 不回炉。
-_GENE_SKELETON_KEYS = ("qtype_match", "structure_match")
 
 
-def _clip(s: Any, n: int = 300) -> str:
-    """截断长文本（控制 judge prompt 预算：只给摘要+题干，不塞全解析）。"""
-    t = str(s or "")
-    return t if len(t) <= n else t[:n] + "…"
+def _exam_type_conserved(item: dict, facts_i: dict) -> bool | None:
+    """③ 考察类型守恒声明性校验（纯函数·可单测）。
 
-
-def _gene_bool(v: Any) -> bool:
-    """宽容布尔：LLM 偶发吐字符串 "true"/"false" 也能吃；其余非真值一律 False（偏保守→rework）。"""
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, str):
-        return v.strip().lower() in ("true", "1", "yes", "是")
-    if isinstance(v, (int, float)):
-        return bool(v)
-    return False
-
-
-def gene_gate_decision(judge: dict) -> Literal["pass", "rework"]:
-    """🔴 闸A 纯函数判决（零 LLM / 零 IO，可单测）。
-
-    - 骨架基因（题型/难度/结构）任一不 match → rework（一变就不是平行题）；
-    - surface_swapped=False → rework（皮肤没换 = 复读母题）；
-    - 键缺失/类型怪 → 按 False 处理（保守偏 rework，绝不静默放行）。
+    数据源 = 母题 DNA（facts_i.dna.exam_type，W2 注入 prompt 的同一事实源）。
+    - item 声明了 exam_type 且与母题 exam_type 不一致 → False（守恒破）。
+    - item 未声明 exam_type（绝大多数 generate 产物不回 exam_type 字段）→ None（无从声明性校验，
+      不误报；prompt 侧 W2 已硬约束守恒，这里只做「若声明则核」的透传校验）。
+    - 母题无 exam_type → None。
     """
-    skeleton_ok = all(_gene_bool(judge.get(k)) for k in _GENE_SKELETON_KEYS)
-    surface_ok = _gene_bool(judge.get("surface_swapped"))
-    return "pass" if (skeleton_ok and surface_ok) else "rework"
+    me = str((facts_i.get("dna") or {}).get("exam_type") or "").strip()
+    if not me:
+        return None
+    ve = str(item.get("exam_type") or "").strip()
+    if not ve:
+        return None
+    return ve == me
 
 
-def _gene_feedback(judge: dict, facts: dict | None = None, target_qtype: str | None = None) -> str:
-    """rework 时给 REGEN 回炉的**结构定向**反馈（P12.3·PRD-C-013）。
+def _qtype_conserved(item: dict, facts_i: dict) -> bool:
+    """③ 题型守恒声明性校验（纯函数）：变式 qtype 过别名归一后与母题一致。
 
-    旧版只点名「难度档不对/解法结构变了」却不把**母题骨架**给回炉端 —— prompt 里没有
-    母题骨架却要求「与母题一致」，收敛率≈随机。本版把母题 stem/skeleton 直接放进反馈，
-    明示「符合目标题型规范结构 + 解法核心步骤同源(考点级)」。
-    - difficulty 已不是闸A 判项（P12.1），不再产难度类反馈；
-    - target_qtype 非空（转题型场景，RC1）→ 结构标准对齐**目标题型规范结构**，不再让回炉
-      端去贴母题原骨架（否则规范单问选择题会被反复打回成嵌合体）。
+    转题型（老师明确把母题改造成别的题型）是合法编辑场景——item 带 from_edit 印记时不算破守恒
+    （老师意志优先，由调用方处理）。本函数只比形态：相等 = 守恒。母题 qtype 缺 → 视作守恒（不误报）。
     """
-    fails: list[str] = []
-    if not _gene_bool(judge.get("qtype_match")):
-        fails.append("题型不在目标范围")
-    if not _gene_bool(judge.get("structure_match")):
-        fails.append("解法核心步骤未与母题同源")
-    if not _gene_bool(judge.get("surface_swapped")):
-        fails.append("皮肤没换(数字/场景照抄母题)")
-    reason = str(judge.get("reason") or "").strip()
-    facts = facts or {}
-    skeleton = _clip(facts.get("skeleton"), 400)
-    mother_stem = _clip(facts.get("stem"), 400)
-    parts = [
-        "基因闸判定与母题平行度不足：" + ("、".join(fails) or "未知")
-        + (f"（{reason}）" if reason else "")
-    ]
-    if mother_stem:
-        parts.append(f"母题题干：{mother_stem}")
-    if skeleton:
-        parts.append(f"母题解法骨架：{skeleton}")
-    if target_qtype:
-        parts.append(
-            f"请重出一道「{target_qtype}」题：① 符合「{target_qtype}」的**规范结构**"
-            "（不必照搬母题原题型的骨架形态）；② 解法核心步骤与母题**同源（考点级）**；"
-            "③ 只换数字与场景，不照抄母题题面。"
-        )
-    else:
-        parts.append(
-            "请重出一道：题型与母题一致；**解法核心步骤同源（考点级，可参照上面骨架）**；"
-            "只换数字与场景，不照抄母题题面。"
-        )
-    return "\n".join(parts)
-
-
-def _gene_target_qtype(item: dict, facts: dict) -> str | None:
-    """🔴 RC1（PRD-C-013）：判变式是否在做**题型转换**（变式 qtype ≠ 母题 qtype，过别名归一后）。
-
-    返回目标题型规范名（归一后，如「选择」）当且仅当确实转了题型；否则 None（同题型，
-    结构闸照旧对照母题原骨架）。用于把 structure_match 改判为「符合目标题型规范结构」，
-    避免规范的单问选择题被按母题解答题骨架判成「解法结构变了」→ 嵌合体回炉死循环。
-    """
+    m_raw = str(facts_i.get("qtype") or "").strip()
+    if not m_raw:
+        return True
     v_raw = str(item.get("qtype") or "").strip()
-    m_raw = str(facts.get("qtype") or "").strip()
-    v = _QTYPE_ALIAS.get(v_raw, v_raw)
-    m = _QTYPE_ALIAS.get(m_raw, m_raw)
-    if not v or v == m:
-        return None
-    return v
+    if not v_raw:
+        return True
+    return _QTYPE_ALIAS.get(v_raw, v_raw) == _QTYPE_ALIAS.get(m_raw, m_raw)
 
 
-def _gene_target_qtype_spec(target_qtype: str) -> str:
-    """🔴 RC1：转题型时注入 judge 的 structure_match 改判段 —— 以 S2 的 _QTYPE_CONTRACT 为
-    目标题型规范依据，把结构标准从「贴母题原骨架」改成「符合目标题型规范结构 + 解法核心步骤同源」。"""
-    return (
-        f"🔴 题型转换语境（最高优先级，覆盖上面 structure_match 标准）：本变式在把母题改造成「{target_qtype}」题。\n"
-        f"- structure_match 改判：只要求 ① 符合「{target_qtype}」的**规范结构**（见下方题型结构契约）"
-        "② 解法核心步骤与母题**同源（考点级）**；**不再**要求与母题原题型的骨架形态一致"
-        "（规范的单问选择题不算「解法结构变了」）。\n"
-        f"- qtype_match：变式题型为「{target_qtype}」即算 match（老师指定的转题型，不要求与母题题型一致）。\n\n"
-        + _QTYPE_CONTRACT
-    )
+def gene_gate_check(item: dict, facts_i: dict) -> dict[str, Any]:
+    """🔴 闸A 纯代码三检（B2·T2，零 LLM / 零 IO，可单测）。
 
-
-def _gene_judge_prompt(item: dict, facts: dict) -> str:
-    """组装基因比对 prompt（纯函数，可单测格式化不炸）。
-
-    🔴 闸A·配方对齐：facts 带 knobs_spec（gene_gate 按 state.knobs + 题序注入）时追加
-    「老师指定配方」改判段（P12.1 后只剩 qtype 改判，难度不再判）。
-    🔴 RC1·转题型：facts 带 target_qtype_spec（_gene_facts_for 在变式 qtype≠母题 qtype 时注入）
-    时追加「目标题型规范结构」改判段，structure_match 不再对照母题原骨架。knobs 为空且未转
-    题型 → 无附加段，判别标准保持现状。
+    返回 {gate, flags, reason}：
+      - gate=pass：三检全过（含全部 None/无从校验的宽松项）；flags=[]。
+      - gate=warn：任一检命中缺陷；flags=命中项标识列表；reason=人话拼接。
+    三检（全是形态/表皮校验，不碰答案对错）：
+      ① structure_lint：题型结构 lint（选择题别长成多小问嵌合体/选项不足/标答非字母；填空缺空位）。
+      ② _surface_check：题干与母题相似度 >0.85 或 数字全同 = 抄题。
+      ③ 守恒透传：题型守恒（转题型 from_edit 豁免，由调用方判）+ 考察类型守恒（若声明）。
+    🔴 降级：任何异常一律视作三检通过（gate=pass），绝不卡死出题（铁律④ + G5）。
     """
-    # 🔴 P12.2（PRD-C-013）：judge 输入不再 _clip(300) 砍半多小问解答 —— 母题/变式题干放宽到
-    # 1200，骨架放宽到 400。判错维度的一大根因是 judge 只看到半截解答就误判结构变了。
-    prompt = GENE_JUDGE_PROMPT.format(
-        kp_name=facts["kp_name"],
-        grade=facts["grade"],
-        qtype=facts["qtype"],
-        difficulty=facts.get("mother_difficulty") or "?",
-        skeleton=_clip(facts.get("skeleton"), 400),
-        mother_stem=_clip(facts.get("stem"), 1200),
-        level=item.get("level") or "normal",
-        v_qtype=item.get("qtype") or "?",
-        v_difficulty=item.get("difficulty") or "?",
-        variant_stem=_clip(item.get("stem"), 1200),
-    )
-    spec = facts.get("knobs_spec")
-    if spec:
-        prompt += "\n\n" + str(spec)
-    tq_spec = facts.get("target_qtype_spec")
-    if tq_spec:
-        prompt += "\n\n" + str(tq_spec)
-    return prompt
-
-
-async def _gene_judge_one(item: dict, facts: dict) -> dict | None:
-    """一次轻量 LLM 基因比对（受约束 JSON）。调用失败/解析失败返 None（调用方按 skipped 放行）。"""
     try:
-        text = await _ainvoke_text([HumanMessage(content=_gene_judge_prompt(item, facts))])
-    except Exception:  # noqa: BLE001 — 闸A是增强不是关卡：judge 异常绝不外抛卡死出题（G5）
-        return None
-    data = _parse_json(text)
-    return data if isinstance(data, dict) else None
+        flags: list[str] = []
+        reasons: list[str] = []
 
+        # ① 结构 lint（题型闭集形态）
+        struct_defects = structure_lint(item)
+        if struct_defects:
+            flags.append("structure")
+            reasons.extend(struct_defects)
 
-def _gene_facts_for(item: dict, facts: dict, knobs: dict[str, Any] | None) -> dict:
-    """🔴 闸A·配方对齐 facts（gene_gate 节点与 generate 流内 eager 共用的单一事实源）：
-    只对带 from_recipe 印记的题（产生该配方那一轮生成的）注入 qtype 改判段。编辑轮 add 的
-    新题无印记 → 按默认标准判，绝不被旧配方（如「5道递增」）误改判。
-    🔴 RC1（PRD-C-013）：变式 qtype≠母题 qtype（转题型）→ 注入 target_qtype_spec，让
-    structure_match 按目标题型规范结构判（与 from_recipe 无关，任何轮转题型都注入）。"""
-    out = facts
-    if knobs and item.get("from_recipe"):
-        spec = gene_judge_knobs_spec(knobs, item.get("expected_difficulty"))
-        if spec:
-            out = dict(out, knobs_spec=spec)
-    target_qtype = _gene_target_qtype(item, facts)
-    if target_qtype:
-        out = dict(out, target_qtype_spec=_gene_target_qtype_spec(target_qtype))
-    return out
+        # ② 表皮距离（防抄母题）
+        surface_defect = _surface_check(item.get("stem"), facts_i.get("stem"))
+        if surface_defect:
+            flags.append("surface")
+            reasons.append(surface_defect)
+
+        # ③ 守恒透传（W2 注入的题型/考察类型守恒的声明性校验）
+        #    转题型编辑（from_edit）豁免题型守恒——老师明确点名改造，不算破基因。
+        if not item.get("from_edit") and not _qtype_conserved(item, facts_i):
+            flags.append("qtype_conservation")
+            reasons.append(
+                f"题型守恒破：变式题型「{item.get('qtype')}」≠ 母题题型「{facts_i.get('qtype')}」"
+            )
+        if _exam_type_conserved(item, facts_i) is False:
+            flags.append("exam_type_conservation")
+            reasons.append(
+                f"考察类型守恒破：变式「{item.get('exam_type')}」≠ 母题「{(facts_i.get('dna') or {}).get('exam_type')}」"
+            )
+
+        if not flags:
+            return {"gate": GENE_GATE_PASS, "flags": []}
+        return {
+            "gate": GENE_GATE_WARN,
+            "flags": flags,
+            "reason": "；".join(reasons) or None,
+        }
+    except Exception:  # noqa: BLE001 — 闸A是增强不是关卡：三检异常一律降级放行（铁律④/G5）
+        return {"gate": GENE_GATE_PASS, "flags": []}
 
 
 async def _gene_one_item(item: dict, facts_i: dict, idx: int, total: int) -> dict:
     """🔴 闸A per-item 协程（P2 单一事实源：gene_gate 节点与 generate 流内 eager 共用）。
 
-    入参 item 视为本协程私有（调用方传副本）；idx/total 只用于思路条叙事编号。
-    判决/降级语义：
-    - pass → item.gene={gate:"pass"}；
-    - rework → 带 reason 走既有 _regen_once 回炉 1 次 → 重生版再判：
-        re_judge 过 **且 代码级 _conservation_ok 守恒校验过**（主考点+年级硬守恒贯穿重生，
-          不只采信 LLM）→ 换用重生版（gene=pass，🔴 不带 check → 下游闸B 必判，正交不破）；
-        仍不过/守恒破/重生失败 → 保留原版 gene={gate:"warn", reason}（v1 只警示不硬拦）；
-    - 🔴 RC2（PRD-C-013）：编辑轮产物（item.from_edit，exec_regenerate 带老师 note 的题）
-      **永不回炉** —— 判不过只标 warn（4d 下沉默），老师意志优先于基因闸；
-    - judge 失败 → gene={gate:"skipped"} 放行（闸A是增强不是关卡，G5）。
+    B2·T2 起内涵 = 纯代码三检（gene_gate_check），LLM judge 全链已删：
+    - 三检全过 → item.gene={gate:"pass", flags:[]}；
+    - 任一检命中 → item.gene={gate:"warn", flags, reason}（**只警示不硬拦、不回炉、不剔题**，
+      闸门降级路径；真值随 item.gene 透传进 FE 4d 展示，铁律④）。
     已带 gene 的题原样通过（不重判、不发 stage）。
+    🔴 保持 async 签名（节点 gather 并发 + generate eager 链 await 调用契约不变）。
+    入参 item 视为本协程私有（调用方传副本）；idx/total 只用于思路条叙事编号。
     """
     if item.get("gene"):  # 已判过 → 不重判（旧题预算保护）
         return item
 
-    # 🔴 P14 叙事修正（RC3·PRD-C-013）：同 _check_one_item——并发闸去掉误导性「/总数」；
-    #   编辑轮单题重出明示「只重比第 N 题」。
+    # 🔴 P14 叙事修正（RC3·PRD-C-013）：并发闸去掉误导性「/总数」；编辑轮单题明示「只重比第 N 题」。
     _emit_stage(
         "gene_gate", "平行度比对", "running",
         (f"只重比第 {idx + 1} 题" if item.get("from_edit") else f"第 {idx + 1} 题比对中"),
     )
-    judge = await _gene_judge_one(item, facts_i)
-    if judge is None:
-        item["gene"] = {"gate": GENE_GATE_SKIPPED}
-        return item
-
-    if gene_gate_decision(judge) == "pass":
-        item["gene"] = {"gate": GENE_GATE_PASS}
-        return item
-
-    # 🔴 RC2：编辑轮产物只判不回炉（老师已点名改造，重出会丢老师意志）→ 直接落 warn。
-    if item.get("from_edit"):
-        item["gene"] = {
-            "gate": GENE_GATE_WARN,
-            "reason": str(judge.get("reason") or "").strip() or None,
-        }
-        return item
-
-    # 🔴 P13 预算闸：rework 回炉是**增强类**调用，预算耗尽 → 跳过回炉，直接落 warn 走 G5
-    #   降级（保留原版 + 警示，绝不卡死、绝不抛）。宏观 DAG 不破（节点照常往下走）。
-    if _budget_exhausted():
-        item["gene"] = {
-            "gate": GENE_GATE_WARN,
-            "reason": str(judge.get("reason") or "").strip() or None,
-        }
-        return item
-
-    # rework：既有回炉重生 1 次（结构定向反馈含母题骨架 + 转题型目标规范注回 prompt）→ 重生版再判一次
-    _emit_stage("gene_gate", "平行度比对", "warn", f"第 {idx + 1} 道回炉重生中")
-    feedback = _gene_feedback(judge, facts_i, _gene_target_qtype(item, facts_i))
-    draft = await _regen_once(item, facts_i, feedback=feedback)
-    if draft:
-        re_judge = await _gene_judge_one(draft, facts_i)
-        if re_judge is not None and gene_gate_decision(re_judge) == "pass":
-            # 🔴 重生稿接受前仍须过**代码级**守恒闸（主考点+年级硬守恒贯穿"重生"，
-            # 不能只采信 LLM re_judge）：破守恒 → 丢弃重生稿，落下方"保留原版打 warn"。
-            resolved = await _solve_one(draft.get("stem", ""))
-            if _conservation_ok(
-                resolved.get("kp_name", ""), resolved.get("grade", ""), facts_i
-            ):
-                draft["gene"] = {"gate": GENE_GATE_PASS}
-                return draft  # 不带 check → solve_explain（闸B）必判
-
-    # 回炉仍不过 → 保留原版打 warn（不拦截入库，aux_tags + 题卡可见警示）
-    item["gene"] = {
-        "gate": GENE_GATE_WARN,
-        "reason": str(judge.get("reason") or "").strip() or None,
-    }
+    item["gene"] = gene_gate_check(item, facts_i)
     return item
 
 
 async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState:
-    """闸A 节点：对每道**未判过基因**的变式做母题基因比对（判决语义见 _gene_one_item）。
+    """闸A 节点：对每道**未判过基因**的变式做纯代码三检（B2·T2，判决语义见 _gene_one_item）。
 
-    P2（PRD-C-012）：循环体已抽成 per-item 协程 _gene_one_item，本节点按题
-    asyncio.gather + Semaphore(GATE_CONCURRENCY=3) 并发，结果按原下标顺序回填。
-    🔴 已带 gene 的题（exec_add 追加时的旧题等）原样通过，不重判不重复花预算。
+    P2（PRD-C-012）：循环体抽成 per-item 协程 _gene_one_item，本节点按题 asyncio.gather +
+    Semaphore(GATE_CONCURRENCY) 并发，结果按原下标顺序回填（三检纯代码、无 IO，并发只为
+    保持与 eager 链调用契约一致；不再有 LLM 调用，无预算消耗回炉）。
+    🔴 已带 gene 的题（exec_add 追加时的旧题等）原样通过，不重判。
     """
-    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（出题/编辑轮共用本节点）
+    budget = _budget_bind(state)  # P13：轮内下游节点携带预算（本节点 T2 后不再花 LLM 预算）
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
-    knobs = state.get("knobs") or {}
     total = len(items)
     sem = asyncio.Semaphore(GATE_CONCURRENCY)
 
@@ -2653,7 +2639,7 @@ async def gene_gate(state: VariantState, config: RunnableConfig) -> VariantState
         if item.get("gene"):  # 已判过 → 不进并发槽、不发 stage
             return item
         async with sem:
-            return await _gene_one_item(item, _gene_facts_for(item, facts, knobs), i, total)
+            return await _gene_one_item(item, facts, i, total)
 
     out = list(await asyncio.gather(*(_run(i, it) for i, it in enumerate(items))))
     _emit_stage("gene_gate", "平行度比对", "done")
@@ -2677,12 +2663,15 @@ def _status_summary(items: list[dict]) -> str:
 
 # --- P8 难度总评（S1.2）：assemble 前一次 nano call 按绝对 rubric 复评全组难度 -----
 # 绝对锚浙教版初中：不与母题相对，让一组题难度可比、入库 difficult/dim4 更准。
-_GRADE_DIFFICULTY_PROMPT = """你是浙教版初中数学难度评定器。下面是同一组变式题（已编号），请按【绝对 rubric】给每道题打 1-4 的难度档（不是相对母题，是绝对难度）：
+# 🔴 难度四档 rubric（B2·T3，事实源 = 22-题目维度-唯一事实源.md §2，2026-06-12 改 LLM rubric 断言）。
+#   难度是「评级」归 LLM rubric 断言，对错是「判决」归闸B sympy——两件事不混（铁律不破）。
+#   档语义照 SSOT §2 原文：1 送分 / 2 常规 / 3 多步综合 / 4 压轴。
+_GRADE_DIFFICULTY_PROMPT = """你是浙教版初中数学难度评定器。下面是同一组变式题（已编号），请拿着下面这张【难度四档 rubric】给每道题断一个 1-4 的难度档（按标准判级，不是相对母题，是绝对难度；难度是评级不是判对错）：
 
-1 = 送分概念直读（直接套定义/公式，一眼出答案）
-2 = 常规（单步套用 ~ 两三步常规综合）
-3 = 多步综合，或需构造、转化才能解
-4 = 压轴级（多知识点交汇、难想到的关键转化/分类讨论）
+- 4（压轴）：≥2 个真实难点 / 多突破口综合。
+- 3（多步综合）：1 个难点，或 考察类型∈{{证明推理·应用建模·探究归纳}}，或 解法骨架含【最难步】构造。
+- 2（常规）：无难点 + 考察类型∈{{直接计算·公式套用·性质判定}} + 多步骨架。
+- 1（送分）：无难点 +（概念辨析 或 单步骨架）。
 
 只输出 JSON 数组，每项是一个整数难度档，顺序、个数与下面题目严格一一对应，禁止多写少写、禁止解释：
 例：[2,2,3,1]
@@ -3305,6 +3294,9 @@ async def exec_add(state: VariantState, config: RunnableConfig) -> VariantState:
                     skeleton=facts["skeleton"],
                     extra=extra,
                 )
+                # 🔴 W2 守恒硬约束注入（T1）：补题同样守白名单/考察类型/最难步基因。
+                + "\n\n"
+                + _conservation_clause(facts.get("dna"))
             )
         ]
     )
@@ -3544,6 +3536,58 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     lines.append("\n可回平台「我的题库」找题、组卷、导出 PDF。")
     update["messages"] = [AIMessage(content="\n".join(lines))]
     return update
+
+
+async def persist_one_to_bank(
+    state: VariantState, index: int, token: str | None = None
+) -> tuple[VariantState, dict[str, Any], str | None]:
+    """🔴 单题入库（PRD-C-014 B2·T5·B3 前置）：把第 index 道（1-based）单独落库。
+
+    复用 persist_items 的单 item 路径（同一段簿记/血缘/owner 逻辑，零分叉）：
+    - 🔴 item 级 persisted 防重：该题已 persisted → 直接回已有 id（item._persist_id），
+      **不二次落行**（已收录的重复调幂等）。
+    - 母题血缘：persist_items 在 facts 无 mother_question_id 且有母题题干时先落母题、回填 id；
+      回写 state.mother_dna.mother_question_id（与「全部入库」同源，后续单题/全量不重复建母题）。
+
+    返回 (update, result, error)：
+      - index 越界 → ({}, {}, 错误串)（端点回 400）。
+      - 成功/已收录 → (含 items[+mother_dna] 的 update, {ok, id, role, skipped?}, None)。
+      - 单题落库失败 → (空 update, {ok:False, error}, None)（端点回 200 带 ok=False，不当 500）。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, {}, f"index 越界（须 1..{len(items)}），收到 {index}"
+
+    target = items[index - 1]
+    # item 级防重：已收录 → 直接回已有 id，不二次落行
+    if target.get("persisted"):
+        return (
+            {},
+            {"ok": True, "id": target.get("_persist_id"), "role": "variant", "skipped": True},
+            None,
+        )
+
+    facts = _mother_facts(state)
+    receipts = await persist_items([target], facts, token=token)
+    mother = next((r for r in receipts if r.get("role") == "mother"), None)
+    var = next((r for r in receipts if r.get("role") != "mother"), None) or {"ok": False, "error": "无入库回执"}
+
+    update: VariantState = {}
+    if var.get("ok"):
+        new_items = [dict(it) for it in items]
+        new_items[index - 1]["persisted"] = True
+        if var.get("id") is not None:
+            new_items[index - 1]["_persist_id"] = var.get("id")  # 防重回查用（内部键，不入库）
+        update["items"] = new_items
+        if mother and mother.get("ok") and mother.get("id") is not None:
+            update["mother_dna"] = dict(
+                state.get("mother_dna") or {}, mother_question_id=mother.get("id")
+            )
+
+    result = {"ok": bool(var.get("ok")), "id": var.get("id"), "role": "variant"}
+    if not var.get("ok"):
+        result["error"] = var.get("error")
+    return update, result, None
 
 
 # ---------------------------------------------------------------------------
