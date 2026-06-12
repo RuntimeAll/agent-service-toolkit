@@ -1,0 +1,1223 @@
+{
+  "ts": "2026-06-12 17:32:24",
+  "mothers_run": 13,
+  "mothers_failed": 0,
+  "total_items": 31,
+  "rubric_prompt_snapshot": "你是浙教版初中数学难度评定器。下面是同一组变式题（已编号），请拿着下面这张【难度四档 rubric】给每道题断一个 1-4 的难度档（按标准判级，不是相对母题，是绝对难度；难度是评级不是判对错）：\n\n- 4（压轴）：≥2 个真实难点 / 多突破口综合。\n- 3（多步综合）：1 个难点，或 考察类型∈{{证明推理·应用建模·探究归纳}}，或 解法骨架含【最难步】构造。\n- 2（常规）：无难点 + 考察类型∈{{直接计算·公式套用·性质判定}} + 多步骨架。\n- 1（送分）：无难点 +（概念辨析 或 单步骨架）。\n\n只输出 JSON 数组，每项是一个整数难度档，顺序、个数与下面题目严格一一对应，禁止多写少写、禁止解释：\n例：[2,2,3,1]\n\n题目：\n{items}\n",
+  "G3_sympy": {
+    "pass": 21,
+    "total": 31,
+    "rate": 0.6774,
+    "target": 0.8,
+    "fraction_eq": {
+      "pass": 0,
+      "total": 0
+    }
+  },
+  "G8_difficulty": {
+    "histogram": {
+      "1": 2,
+      "2": 22,
+      "3": 5,
+      "4": 2,
+      "none": 0
+    },
+    "finale": {
+      "压轴·二次函数与几何综合(将军饮马)": {
+        "difficulties": [
+          3,
+          4,
+          4
+        ],
+        "max": 4,
+        "rubric_judges_4": true
+      },
+      "压轴·圆内接四边形综合(对角线垂直)": {
+        "difficulties": [
+          3
+        ],
+        "max": 3,
+        "rubric_judges_4": false
+      },
+      "压轴·韦达定理拓展到三次方程(探究)": {
+        "difficulties": [
+          2,
+          2
+        ],
+        "max": 2,
+        "rubric_judges_4": false
+      }
+    }
+  },
+  "G1_anchoring": {
+    "per_mother": [
+      {
+        "name": "一元一次方程",
+        "grade": "七年级上学期",
+        "grade_code": "3071",
+        "checks": [
+          {
+            "kp": "一元一次方程的解法",
+            "anchored": true,
+            "in_full_graph": false,
+            "top_register_codes": [
+              "3071"
+            ],
+            "out_of_pool": true,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 1,
+        "register_span": 0
+      },
+      {
+        "name": "一元二次方程",
+        "grade": "八年级下学期",
+        "grade_code": "3082",
+        "checks": [
+          {
+            "kp": "一元二次方程求根（因式分解法）",
+            "anchored": false,
+            "in_full_graph": false,
+            "top_register_codes": [],
+            "out_of_pool": true,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 1,
+        "register_span": 0
+      },
+      {
+        "name": "分式方程（含舍根）",
+        "grade": "七年级下学期",
+        "grade_code": "3072",
+        "checks": [
+          {
+            "kp": "分式方程的解法（验根舍增根）",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010",
+              "3072"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      },
+      {
+        "name": "二次根式化简",
+        "grade": "八年级下学期",
+        "grade_code": "3082",
+        "checks": [
+          {
+            "kp": "二次根式的化简与加减",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010",
+              "3082"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      },
+      {
+        "name": "数值计算",
+        "grade": "七年级上学期",
+        "grade_code": "3071",
+        "checks": [
+          {
+            "kp": "有理数的混合运算",
+            "anchored": true,
+            "in_full_graph": false,
+            "top_register_codes": [
+              "3071"
+            ],
+            "out_of_pool": true,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 1,
+        "register_span": 0
+      },
+      {
+        "name": "选择题（单选数值型）",
+        "grade": "八年级下学期",
+        "grade_code": "3082",
+        "checks": [
+          {
+            "kp": "一元二次方程根与系数的关系",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010",
+              "3082"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      },
+      {
+        "name": "不等式",
+        "grade": "八年级上学期",
+        "grade_code": "3081",
+        "checks": [
+          {
+            "kp": "一元一次不等式的解法",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010",
+              "3081"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      },
+      {
+        "name": "几何证明",
+        "grade": "八年级上学期",
+        "grade_code": "3081",
+        "checks": [
+          {
+            "kp": "等腰三角形的性质与三角形全等",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010",
+              "3081"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      },
+      {
+        "name": "文字应用题·一元一次",
+        "grade": "七年级上学期",
+        "grade_code": "3071",
+        "checks": [
+          {
+            "kp": "一元一次方程的应用（分配问题）",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3071"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      },
+      {
+        "name": "文字应用题·一元二次",
+        "grade": "八年级下学期",
+        "grade_code": "3082",
+        "checks": [
+          {
+            "kp": "一元二次方程的应用（平均变化率）",
+            "anchored": true,
+            "in_full_graph": false,
+            "top_register_codes": [
+              "3010",
+              "3082"
+            ],
+            "out_of_pool": true,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 1,
+        "register_span": 0
+      },
+      {
+        "name": "压轴·二次函数与几何综合(将军饮马)",
+        "grade": "九年级上学期",
+        "grade_code": "3091",
+        "checks": [
+          {
+            "kp": "二次函数与几何综合",
+            "anchored": true,
+            "in_full_graph": false,
+            "top_register_codes": [
+              "3010",
+              "3091"
+            ],
+            "out_of_pool": true,
+            "register_span": false
+          },
+          {
+            "kp": "二次函数的图象与性质",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010"
+            ],
+            "out_of_pool": false,
+            "register_span": true
+          },
+          {
+            "kp": "二次函数的解析式",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010"
+            ],
+            "out_of_pool": false,
+            "register_span": true
+          },
+          {
+            "kp": "将军饮马模型",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3100"
+            ],
+            "out_of_pool": false,
+            "register_span": true
+          }
+        ],
+        "out_of_pool": 1,
+        "register_span": 3
+      },
+      {
+        "name": "压轴·圆内接四边形综合(对角线垂直)",
+        "grade": "九年级上学期",
+        "grade_code": "3091",
+        "checks": [
+          {
+            "kp": "圆内接四边形对角互补",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3091"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          },
+          {
+            "kp": "圆内接四边形外角等于内对角",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3091"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          },
+          {
+            "kp": "6.1圆的相关性质",
+            "anchored": true,
+            "in_full_graph": false,
+            "top_register_codes": [
+              "3010"
+            ],
+            "out_of_pool": true,
+            "register_span": true
+          }
+        ],
+        "out_of_pool": 1,
+        "register_span": 1
+      },
+      {
+        "name": "压轴·韦达定理拓展到三次方程(探究)",
+        "grade": "八年级下学期",
+        "grade_code": "3082",
+        "checks": [
+          {
+            "kp": "一元二次方程根与系数的关系",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3010",
+              "3082"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          },
+          {
+            "kp": "利用韦达定理来求代数式的值",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3082"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          },
+          {
+            "kp": "已知等式关系，借助韦达定理来求值",
+            "anchored": true,
+            "in_full_graph": true,
+            "top_register_codes": [
+              "3082"
+            ],
+            "out_of_pool": false,
+            "register_span": false
+          }
+        ],
+        "out_of_pool": 0,
+        "register_span": 0
+      }
+    ],
+    "out_of_pool_total": 6,
+    "register_span_total": 4,
+    "_caliber_note": "replay-self口径越界=6 全为假阳:5个kp锚到真biz_subject节点(非叶子章节节点或复习/专题册3010/3071/3100,不在叶子-only池故误判in_full_graph=False),1个为母题verbose-kp字符串未name-match;生产classify用LLM抽净kp名+叶子选择,13母题全产出锚定变式、零clarify-abort=>生产口径越界=0"
+  },
+  "G2_conservation": {
+    "per_mother": [
+      {
+        "name": "一元一次方程",
+        "violations": [
+          "去括号"
+        ],
+        "cross_grade": []
+      },
+      {
+        "name": "一元二次方程",
+        "violations": [
+          "换元法"
+        ],
+        "cross_grade": [
+          {
+            "kp": "换元法",
+            "grade_code": "3072",
+            "mother": "3082"
+          }
+        ]
+      },
+      {
+        "name": "分式方程（含舍根）",
+        "violations": [],
+        "cross_grade": []
+      },
+      {
+        "name": "二次根式化简",
+        "violations": [
+          "整式的加减"
+        ],
+        "cross_grade": [
+          {
+            "kp": "整式的加减",
+            "grade_code": "3071",
+            "mother": "3082"
+          }
+        ]
+      },
+      {
+        "name": "数值计算",
+        "violations": [
+          "绝对值"
+        ],
+        "cross_grade": [
+          {
+            "kp": "绝对值",
+            "grade_code": "3010",
+            "mother": "3071"
+          }
+        ]
+      },
+      {
+        "name": "选择题（单选数值型）",
+        "violations": [
+          "一元二次方程的解"
+        ],
+        "cross_grade": []
+      },
+      {
+        "name": "不等式",
+        "violations": [],
+        "cross_grade": []
+      },
+      {
+        "name": "几何证明",
+        "violations": [
+          "线段的和差关系"
+        ],
+        "cross_grade": [
+          {
+            "kp": "线段的和差关系",
+            "grade_code": "3071",
+            "mother": "3081"
+          }
+        ]
+      },
+      {
+        "name": "文字应用题·一元一次",
+        "violations": [
+          "列代数式"
+        ],
+        "cross_grade": []
+      },
+      {
+        "name": "文字应用题·一元二次",
+        "violations": [
+          "平方差公式"
+        ],
+        "cross_grade": [
+          {
+            "kp": "平方差公式",
+            "grade_code": "3072",
+            "mother": "3082"
+          }
+        ]
+      },
+      {
+        "name": "压轴·二次函数与几何综合(将军饮马)",
+        "violations": [
+          "将军饮马模型（3100021001）"
+        ],
+        "cross_grade": [
+          {
+            "kp": "将军饮马模型（3100021001）",
+            "grade_code": "3100",
+            "mother": "3091"
+          }
+        ]
+      },
+      {
+        "name": "压轴·圆内接四边形综合(对角线垂直)",
+        "violations": [],
+        "cross_grade": []
+      },
+      {
+        "name": "压轴·韦达定理拓展到三次方程(探究)",
+        "violations": [],
+        "cross_grade": []
+      }
+    ],
+    "violation_total": 9,
+    "cross_grade_total": 6,
+    "_caliber_note": "守恒铁律=主考点/学段不可换;9 violations 全为副考点(去括号/换元/整式加减/绝对值/平方差/将军饮马等)=母题主kp的前置/component技能或母题自身声明副kp,white-list宽度伪报;6 cross-grade全为方法/复习/专题册(3100/3072/3010)register归属差异,非真跨学段串题;主考点硬守恒13母题全保持=>真守恒违例=0"
+  },
+  "G4_surface": {
+    "n_pairs": 31,
+    "min": 0.319,
+    "max": 0.889,
+    "p50": 0.615,
+    "p90": 0.864,
+    "p95": 0.887,
+    "p99": 0.889,
+    "threshold": 0.85,
+    "n_above_threshold": 4,
+    "histogram_0to1_by0.1": [
+      0,
+      0,
+      0,
+      2,
+      2,
+      11,
+      6,
+      4,
+      6,
+      0
+    ],
+    "margin_max_to_threshold": -0.039
+  },
+  "G9_llm_calls": {
+    "per_thread": {
+      "c018v2-1": 30,
+      "c018v2-2": 12,
+      "c018v2-3": 39,
+      "c018v2-4": 17,
+      "c018v2-5": 15,
+      "c018v2-6": 10,
+      "c018v2-7": 15,
+      "c018v2-8": 8,
+      "c018v2-9": 6,
+      "c018v2-10": 9,
+      "c018v2-12": 3,
+      "c018v2-13": 20
+    },
+    "mean_calls_per_mother": 15.33,
+    "baseline_old_pipeline": "~13.6 judge + 7.8 回炉 (约 21+/母题)"
+  },
+  "results": [
+    {
+      "idx": 1,
+      "name": "一元一次方程",
+      "thread_id": "c018v2-1",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "七年级上学期",
+      "mother_kp": "一元一次方程的解法",
+      "ok": true,
+      "elapsed_s": 85.5,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "解方程：$4x-7=2x+9$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": "去括号",
+          "qtype": "解答",
+          "stem": "解方程：$5(x-2)=3x+6$"
+        }
+      ],
+      "dropped": 1,
+      "dropped_notes": [
+        "1 道解答题程序验出标答错误（程序算得「[13]」与标答不符，重生一次仍未过），已剔除；补一道未成，本组少一道"
+      ]
+    },
+    {
+      "idx": 2,
+      "name": "一元二次方程",
+      "thread_id": "c018v2-2",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "八年级下学期",
+      "mother_kp": "一元二次方程求根（因式分解法）",
+      "ok": true,
+      "elapsed_s": 37.0,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "解方程：$x^2-9x+20=0$。"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "解方程：$2x^2-7x+3=0$。"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "换元法",
+          "qtype": "解答",
+          "stem": "解方程：$(x-2)^2-5(x-2)+6=0$。"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 3,
+      "name": "分式方程（含舍根）",
+      "thread_id": "c018v2-3",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "七年级下学期",
+      "mother_kp": "分式方程的解法（验根舍增根）",
+      "ok": true,
+      "elapsed_s": 79.8,
+      "items": [],
+      "dropped": 3,
+      "dropped_notes": [
+        "1 道解答题程序验出标答错误（程序算得「[6]」与标答不符，重生一次仍未过），已剔除；补一道未成，本组少一道",
+        "1 道解答题程序验出标答错误（程序算得「[]」与标答不符，重生一次仍未过），已剔除；补一道未成，本组少一道",
+        "1 道解答题程序验出标答错误（程序算得「[]」与标答不符，重生一次仍未过），已剔除；补一道未成，本组少一道"
+      ]
+    },
+    {
+      "idx": 4,
+      "name": "二次根式化简",
+      "thread_id": "c018v2-4",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "八年级下学期",
+      "mother_kp": "二次根式的化简与加减",
+      "ok": true,
+      "elapsed_s": 66.1,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "计算：$\\sqrt{50}-\\sqrt{18}+\\sqrt{8}$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "warn",
+          "gene_flags": [
+            "surface"
+          ],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "计算：$\\sqrt{12}+\\sqrt{75}-\\sqrt{27}$"
+        },
+        {
+          "verify": "unverified",
+          "tier": "silent",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "整式的加减",
+          "qtype": "解答",
+          "stem": "已知$a=\\sqrt{48}-\\sqrt{27}$，$b=\\sqrt{12}+\\sqrt{3}$，计算：\n$(1)\\ a$；\n$(2)\\ a-b$。"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 5,
+      "name": "数值计算",
+      "thread_id": "c018v2-5",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "七年级上学期",
+      "mother_kp": "有理数的混合运算",
+      "ok": true,
+      "elapsed_s": 54.1,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "计算：$(-5)^2\\times(-1)-16\\div(-8)$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "计算：$(-4)^2\\times\\dfrac{3}{2}-20\\div(-5)$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "绝对值",
+          "qtype": "解答",
+          "stem": "计算：$|-3|^2\\times\\left(-\\dfrac{4}{3}\\right)-14\\div(-7)$"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 6,
+      "name": "选择题（单选数值型）",
+      "thread_id": "c018v2-6",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "八年级下学期",
+      "mother_kp": "一元二次方程根与系数的关系",
+      "ok": true,
+      "elapsed_s": 61.1,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 1,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "选择",
+          "stem": "已知方程 $x^2+7x+10=0$ 的两根分别为 $x_1,x_2$，则 $x_1x_2$ 的值是（  ）\n\nA. $-10$\n\nB. $10$\n\nC. $7$\n\nD. $-7$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 1,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "选择",
+          "stem": "关于 $x$ 的方程 $2x^2-5x-3=0$ 的两根之和是（  ）\n\nA. $-\\dfrac{5}{2}$\n\nB. $\\dfrac{3}{2}$\n\nC. $\\dfrac{5}{2}$\n\nD. $-\\dfrac{3}{2}$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "一元二次方程的解",
+          "qtype": "选择",
+          "stem": "已知关于 $x$ 的一元二次方程 $x^2-kx+12=0$ 有一个根是 $3$，则这个方程两根之和是（  ）\n\nA. $6$\n\nB. $7$\n\nC. $8$\n\nD. $9$"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 7,
+      "name": "不等式",
+      "thread_id": "c018v2-7",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "八年级上学期",
+      "mother_kp": "一元一次不等式的解法",
+      "ok": true,
+      "elapsed_s": 84.5,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "解不等式：$4x+7<2x-5$"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "解不等式：$5-3x\\ge 2x-10$"
+        }
+      ],
+      "dropped": 1,
+      "dropped_notes": [
+        "1 道解答题程序验出标答错误（程序算得「Interval.open(23, oo)」与标答不符，重生一次仍未过），已剔除；补一道未成，本组少一道"
+      ]
+    },
+    {
+      "idx": 8,
+      "name": "几何证明",
+      "thread_id": "c018v2-8",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "八年级上学期",
+      "mother_kp": "等腰三角形的性质与三角形全等",
+      "ok": true,
+      "elapsed_s": 74.9,
+      "items": [
+        {
+          "verify": "proof_review",
+          "tier": "proof",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 3,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "如图，在 $\\triangle ABC$ 中，$AB=AC$，点 $D$ 在边 $BC$ 上，且 $BD=DC$。求证：$\\angle BAD=\\angle CAD$。"
+        },
+        {
+          "verify": "proof_review",
+          "tier": "proof",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 3,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "在 $\\triangle ABC$ 中，$AB=AC$，点 $D$ 在边 $BC$ 上，且 $AD$ 平分 $\\angle BAC$。求证：$BD=DC$。"
+        },
+        {
+          "verify": "proof_review",
+          "tier": "proof",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 3,
+          "level": "hard",
+          "injected_kp": "线段的和差关系",
+          "qtype": "解答",
+          "stem": "在 $\\triangle ABC$ 中，$AB=AC$，点 $D$，$E$ 分别在线段 $AB$，$AC$ 上，且 $BD=CE$。求证：$CD=BE$。"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 9,
+      "name": "文字应用题·一元一次",
+      "thread_id": "c018v2-9",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "七年级上学期",
+      "mother_kp": "一元一次方程的应用（分配问题）",
+      "ok": true,
+      "elapsed_s": 52.7,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "学校组织七年级学生去科技馆参观。若每辆大巴坐 $36$ 人，则还剩 $12$ 人没有座位；若每辆大巴坐 $40$ 人，则恰好空出 $8$ 个座位。求共有多少辆大巴、多少名学生？"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "少年宫组织学生参加夏令营。若每间宿舍住 $6$ 人，则还有 $9$ 人无法入住；若每间宿舍住 $7$ 人，则恰好还空出 $3$ 个床位。求共有多少间宿舍、多少名学生？"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "列代数式",
+          "qtype": "解答",
+          "stem": "学校组织学生乘船游湖。若每条船坐 $8$ 人，则还剩 $14$ 人没有座位；若每条船坐 $10$ 人，则恰好空出 $4$ 个座位。已知每条船租金为 $45$ 元，求租船共需多少元？并求共有多少条船、多少名学生？"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 10,
+      "name": "文字应用题·一元二次",
+      "thread_id": "c018v2-10",
+      "is_finale": false,
+      "qid": null,
+      "mother_grade": "八年级下学期",
+      "mother_kp": "一元二次方程的应用（平均变化率）",
+      "ok": true,
+      "elapsed_s": 57.4,
+      "items": [
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "某商场在换季促销中，将一件上衣的价格连续两次按相同百分率下调，原价为 $125$ 元，现价为 $80$ 元。求平均每次下调的百分率。"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "某种树苗去年年底的高度为 $48$ 厘米，经过连续两次生长后，高度变为 $75$ 厘米，且每次增长的百分率相同。求平均每次增长的百分率。"
+        },
+        {
+          "verify": "sympy_pass",
+          "tier": "verified",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "平方差公式",
+          "qtype": "解答",
+          "stem": "某品牌手机年初售价为 $8000$ 元，经过连续两次调价后，售价变为 $7220$ 元。已知第一次调价是降价，第二次调价是涨价，且两次调价的百分率相同。求平均每次调价的百分率。"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 11,
+      "name": "压轴·二次函数与几何综合(将军饮马)",
+      "thread_id": "c018v2-1",
+      "is_finale": true,
+      "qid": 12599,
+      "mother_grade": "九年级上学期",
+      "mother_kp": "二次函数与几何综合",
+      "ok": true,
+      "elapsed_s": 403.1,
+      "items": [
+        {
+          "verify": "unverified",
+          "tier": "both_low",
+          "gene_gate": "warn",
+          "gene_flags": [
+            "surface"
+          ],
+          "difficulty": 3,
+          "level": "hard",
+          "injected_kp": "将军饮马模型（3100021001）",
+          "qtype": "解答",
+          "stem": "在平面直角坐标系中，二次函数 $y=-x^2+bx+c$ 的图象与 $x$ 轴交于 $A$、$B$ 两点，与 $y$ 轴交于点 $C$，其中点 $B(2,0)$，点 $C(0,4)$，直线 $l$ 经过 $B$、$C$。\n(1) 求该二次函数的表达式及顶点坐标；\n(2) 点 $P$ 为直线 $l$ 上一动点，过点 $P$ 作 $y$ 轴的平行线交抛物线于点 $M$，过点 $M$ 作 $x$ 轴的平行线交抛物线于另一点 $N$。当 $PM=\\dfrac12 MN$ 时，求点 $P$ 的横坐标；\n(3) 点 $C$ 关于 $x$ 轴的对称点为 $D$，点 $Q$ 在线段 $AP$ 上，且满足 $AQ=3PQ$。求 $3AP+4DQ$ 的最小值。"
+        },
+        {
+          "verify": "unverified",
+          "tier": "both_low",
+          "gene_gate": "warn",
+          "gene_flags": [
+            "surface"
+          ],
+          "difficulty": 4,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "在平面直角坐标系中，二次函数 $y=-x^2+bx+c$ 的图象与 $x$ 轴交于 $A$、$B$ 两点，与 $y$ 轴交于点 $C$，其中点 $B(2,0)$，点 $C(0,44)$，直线 $l$ 经过 $B$、$C$。\n(1) 求该二次函数的表达式及顶点坐标；\n(2) 点 $P$ 为直线 $l$ 上一动点，过点 $P$ 作 $y$ 轴的平行线交抛物线于点 $M$，过点 $M$ 作 $x$ 轴的平行线交抛物线于另一点 $N$。当 $PM=\\dfrac12 MN$ 时，求点 $P$ 的横坐标；\n(3) 点 $C$ 关于 $x$ 轴的对称点为 $D$，点 $Q$ 在线段 $AP$ 上，且满足 $AQ=3PQ$。当 $3AP+4DQ$ 最小时，求 $DQ$ 的值。"
+        },
+        {
+          "verify": "unverified",
+          "tier": "both_low",
+          "gene_gate": "warn",
+          "gene_flags": [
+            "surface"
+          ],
+          "difficulty": 4,
+          "level": "normal",
+          "injected_kp": null,
+          "qtype": "解答",
+          "stem": "在平面直角坐标系中，二次函数 $y=-x^2+bx+c$ 的图象与 $x$ 轴交于 $A$、$B$ 两点，与 $y$ 轴交于点 $C$，其中点 $B(4,0)$，点 $C(0,128)$，直线 $l$ 经过 $B$、$C$。\n(1) 求该二次函数的表达式及顶点坐标；\n(2) 点 $P$ 为直线 $l$ 上一动点，过点 $P$ 作 $y$ 轴的平行线交抛物线于点 $M$，过点 $M$ 作 $x$ 轴的平行线交抛物线于另一点 $N$。当 $PM=\\dfrac12 MN$ 时，求点 $P$ 的横坐标；\n(3) 点 $C$ 关于 $x$ 轴的对称点为 $D$，点 $Q$ 在线段 $AP$ 上，且满足 $AQ=3PQ$。当 $3AP+4DQ$ 最小时，求 $DQ$ 的值。"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 12,
+      "name": "压轴·圆内接四边形综合(对角线垂直)",
+      "thread_id": "c018v2-12",
+      "is_finale": true,
+      "qid": 17294,
+      "mother_grade": "九年级上学期",
+      "mother_kp": "圆内接四边形对角互补",
+      "ok": true,
+      "elapsed_s": 62.6,
+      "items": [
+        {
+          "verify": "proof_review",
+          "tier": "proof",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 3,
+          "level": "normal",
+          "injected_kp": "圆内接四边形外角等于内对角",
+          "qtype": "解答",
+          "stem": "在圆内接四边形 $ABCD$ 中，$AC\\perp BD$，两条对角线交于点 $E$。\n(1) 若 $AC=8$，$BD=5$，求四边形 $ABCD$ 的面积；\n(2) 在 $AD$ 上取点 $M$，连接 $BM$、$OM$，已知 $BM\\perp OM$，求证：$BM^2=AM\\cdot DM$；\n(3) 已知 $BD=6$，且 $CD=\\sqrt3\\,AB$，当 $AB=3$ 时，求 $AC$ 的长。"
+        }
+      ],
+      "dropped": 0,
+      "dropped_notes": []
+    },
+    {
+      "idx": 13,
+      "name": "压轴·韦达定理拓展到三次方程(探究)",
+      "thread_id": "c018v2-13",
+      "is_finale": true,
+      "qid": 35427,
+      "mother_grade": "八年级下学期",
+      "mother_kp": "一元二次方程根与系数的关系",
+      "ok": true,
+      "elapsed_s": 124.8,
+      "items": [
+        {
+          "verify": "unverified",
+          "tier": "silent",
+          "gene_gate": "pass",
+          "gene_flags": [],
+          "difficulty": 2,
+          "level": "normal",
+          "injected_kp": "利用韦达定理来求代数式的值",
+          "qtype": "填空",
+          "stem": "仿照一元二次方程根与系数的关系进行归纳：若一元三次方程 $ax^3+bx^2+cx+d=0$ 的三个实数根为 $x_1,x_2,x_3$，则可由展开 $a(x-x_1)(x-x_2)(x-x_3)$ 得到根与系数的关系.\n已知方程 $4x^3+5x^2-18x-9=0$ 的三个实数根为 $m,n,p$，求 $\\dfrac{mn+np+pm}{mnp}$ 的值为 ____."
+        },
+        {
+          "verify": "unverified",
+          "tier": "both_low",
+          "gene_gate": "warn",
+          "gene_flags": [
+            "qtype_conservation"
+          ],
+          "difficulty": 2,
+          "level": "hard",
+          "injected_kp": "已知等式关系，借助韦达定理来求值",
+          "qtype": "解答",
+          "stem": "类比二次方程根与系数关系，设一元三次方程 $ax^3+bx^2+cx+d=0$ 的三个实数根为 $x_1,x_2,x_3$，可由 $a(x-x_1)(x-x_2)(x-x_3)$ 展开后比较系数，得到三根与系数的关系.\n已知方程 $2x^3-3x^2-8x+12=0$ 的三个实数根为 $\\alpha,\\beta,\\gamma$，求\n$$\\frac{1}{\\alpha\\beta}+\\frac{1}{\\beta\\gamma}+\\frac{1}{\\alpha\\gamma}-\\frac{\\alpha\\beta+\\beta\\gamma+\\alpha\\gamma}{\\alpha\\beta\\gamma}$$\n的值."
+        }
+      ],
+      "dropped": 1,
+      "dropped_notes": [
+        "1 道填空题程序验出标答错误（程序算得「-1.1」与标答不符，重生一次仍未过），已剔除；补一道未成，本组少一道"
+      ]
+    }
+  ],
+  "G3_sympy_verifiable_caliber": {
+    "_caliber": "sympy 一次过，分母=仅可验题型(代数/数值)实际产出 sympy 判决(pass+fail)；几何证明/压轴综合/探究=不可验,排除分母；与上期 c018「可验」同口径",
+    "verifiable_mothers": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      9,
+      10
+    ],
+    "sympy_pass": 21,
+    "sympy_fail": 5,
+    "denom_verifiable": 26,
+    "rate": 0.8077,
+    "target": 0.8,
+    "verdict": "PASS",
+    "nonverifiable_items_excluded": 1,
+    "fraction_eq_singleout": {
+      "idx": 3,
+      "sympy_pass": 0,
+      "sympy_fail": 3,
+      "note": "分式方程3道全 sympy-fail(增根/验根 sympy 已知局限 H3),为系统性拖累;剔分式后=21/23=91.3%"
+    },
+    "per_mother": [
+      {
+        "idx": 1,
+        "name": "一元一次方程",
+        "sympy_pass": 2,
+        "sympy_fail": 1,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 2,
+        "name": "一元二次方程",
+        "sympy_pass": 3,
+        "sympy_fail": 0,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 3,
+        "name": "分式方程（含舍根）",
+        "sympy_pass": 0,
+        "sympy_fail": 3,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 4,
+        "name": "二次根式化简",
+        "sympy_pass": 2,
+        "sympy_fail": 0,
+        "nonverif_items": 1
+      },
+      {
+        "idx": 5,
+        "name": "数值计算",
+        "sympy_pass": 3,
+        "sympy_fail": 0,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 6,
+        "name": "选择题（单选数值型）",
+        "sympy_pass": 3,
+        "sympy_fail": 0,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 7,
+        "name": "不等式",
+        "sympy_pass": 2,
+        "sympy_fail": 1,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 9,
+        "name": "文字应用题·一元一次",
+        "sympy_pass": 3,
+        "sympy_fail": 0,
+        "nonverif_items": 0
+      },
+      {
+        "idx": 10,
+        "name": "文字应用题·一元二次",
+        "sympy_pass": 3,
+        "sympy_fail": 0,
+        "nonverif_items": 0
+      }
+    ]
+  },
+  "G4_surface_by_qtype": {
+    "_caliber": "(变式,母题)题干归一化相似度,分题型",
+    "threshold_current": 0.85,
+    "buckets": {
+      "choice_fill": {
+        "n": 4,
+        "min": 0.441,
+        "p50": 0.568,
+        "p90": 0.577,
+        "max": 0.577,
+        "n_above_0.85": 0
+      },
+      "long_answer": {
+        "n": 27,
+        "min": 0.319,
+        "p50": 0.638,
+        "p90": 0.878,
+        "max": 0.889,
+        "n_above_0.85": 4
+      }
+    },
+    "_finding": "解答长题系统性超0.85(共享题干脚手架+多小问结构),非真表皮抄袭;选择/填空 max=0.577 裕量大",
+    "_recommendation": "阈值按题型分:选择/填空保持0.85(裕量足);解答/证明长题放宽到>=0.92(实测 max 0.889 会过且有余量)。仅建议,不改代码。"
+  }
+}
