@@ -1,0 +1,464 @@
+{
+  "rows": [
+    {
+      "name": "一元一次方程",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "解方程：$4x - 7 = 2x - 19$",
+          "answer": "$x = -6$",
+          "payload_kind": "equation_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed set matches the solution set"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "解方程：$5x + 8 = 3x - 4$",
+          "answer": "$x = -6$",
+          "payload_kind": "equation_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed set matches the solution set"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "解方程：$3(x - 2) + 5 = 2(x + 1) - 11$",
+          "answer": "$x = -6$",
+          "payload_kind": "equation_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "fail",
+            "detail": "claimed value -6 is not a solution"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1680,
+        "out": 1341
+      }
+    },
+    {
+      "name": "一元二次方程",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "解方程：$x^2 - 9x + 20 = 0$",
+          "answer": "$x_1=4,\\ x_2=5$",
+          "payload_kind": "equation_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed set matches the solution set"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "解方程：$x^2 + x - 12 = 0$",
+          "answer": "$x_1=-4,\\ x_2=3$",
+          "payload_kind": "equation_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed set matches the solution set"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "解方程：$x^2 - 2x - 8 = 3x - 6$",
+          "answer": "$x_1=-1,\\ x_2=6$",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "fail",
+            "detail": "claimed value -1 is not a solution"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1704,
+        "out": 902
+      }
+    },
+    {
+      "name": "分式方程（含舍根）",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "解方程：$x + \\dfrac{9}{x-3} = 6$",
+          "answer": "$x=5$",
+          "payload_kind": "rational_roots",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "fail",
+            "detail": "claimed value 5 is not a solution"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "解方程：$\\dfrac{x^2}{x+1}=\\dfrac{2}{x+1}+1$",
+          "answer": "$x=2$",
+          "payload_kind": "rational_roots",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "fail",
+            "detail": "claimed value 2 is not a solution"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "解方程：$\\dfrac{x^2-4}{x-2}=\\dfrac{6}{x-2}$",
+          "answer": "$x=5$",
+          "payload_kind": "rational_roots",
+          "defects": [
+            "题干与母题相似度0.89>0.85（疑似抄题）"
+          ],
+          "verify": {
+            "route": "sympy",
+            "verdict": "fail",
+            "detail": "claimed value 5 is not a solution"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1740,
+        "out": 1658
+      }
+    },
+    {
+      "name": "二次根式化简",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "计算：$sqrt(12)+sqrt(27)-sqrt(3)$",
+          "answer": "$4*sqrt(3)$",
+          "payload_kind": "expr_equiv",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "expressions are equivalent"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "计算：$sqrt(50)-sqrt(18)+sqrt(8)$",
+          "answer": "$4*sqrt(2)$",
+          "payload_kind": "expr_equiv",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "expressions are equivalent"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "已知$a=sqrt(20)-sqrt(5)$，$b=sqrt(45)-2*sqrt(5)$，计算：$",
+          "answer": "$4*sqrt(5)$",
+          "payload_kind": "expr_equiv",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "expressions are equivalent"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1703,
+        "out": 610
+      }
+    },
+    {
+      "name": "数值计算",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "计算：$(-3)^2 * 4 - 18 / (-6)$",
+          "answer": "$39$",
+          "payload_kind": "numeric",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=39.0, claimed=39.0, tol=1e-06: within tolerance"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "计算：$(-4)^2 * 2 - 20 / (-5)$",
+          "answer": "$36$",
+          "payload_kind": "numeric",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=36.0, claimed=36.0, tol=1e-06: within tolerance"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "计算：$(-2)^4 / 4 * (-3) - 24 / (-6)$",
+          "answer": "$-8$",
+          "payload_kind": "numeric",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=-8.0, claimed=-8.0, tol=1e-06: within tolerance"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1682,
+        "out": 504
+      }
+    },
+    {
+      "name": "选择题（单选数值型）",
+      "qtype": "选择",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "方程 $x^2-7*x+10=0$ 的两根之和是（  ）\nA. $10$\nB. $7$\nC. $-7",
+          "answer": "B",
+          "payload_kind": "choice",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "option 'B' uniquely matches the ground truth"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "方程 $x^2+6*x+5=0$ 的两根之和是（  ）\nA. $6$\nB. $5$\nC. $-6$\n",
+          "answer": "C",
+          "payload_kind": "choice",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "option 'C' uniquely matches the ground truth"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "已知关于 $x$ 的方程 $2*x^2-8*x+m=0$ 的两根之和是 $4$，则（  ）\nA. $",
+          "answer": "C",
+          "payload_kind": "choice",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "option 'C' uniquely matches the ground truth"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1731,
+        "out": 759
+      }
+    },
+    {
+      "name": "不等式",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "解不等式：$4x - 7 > 9x + 8$",
+          "answer": "$x < -3$",
+          "payload_kind": "inequality_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed solution set matches the true solution set"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "解不等式：$6x + 5 > 8x + 13$",
+          "answer": "$x < -4$",
+          "payload_kind": "inequality_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed solution set matches the true solution set"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "解不等式：$3(x - 2) + 1 > 5x + 7$",
+          "answer": "$x < -6$",
+          "payload_kind": "inequality_solve",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "claimed solution set matches the true solution set"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1687,
+        "out": 584
+      }
+    },
+    {
+      "name": "几何证明",
+      "qtype": "证明",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "如图，在 $\\triangle PQR$ 中，$PQ=PR$，点 $M$ 是 $QR$ 的中点。求证",
+          "answer": "证明：由点 $M$ 是 $QR$ 的中点，得 $QM=MR$。又已知 $PQ=P",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "proof",
+            "verdict": "struct_ok"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "已知：在 $\\triangle DEF$ 中，$DE=DF$，点 $N$ 是 $EF$ 的中点。求证",
+          "answer": "证明：因为点 $N$ 是 $EF$ 的中点，所以 $EN=NF$。又已知 $DE",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "proof",
+            "verdict": "struct_ok"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "如图，在 $\\triangle ABC$ 中，$AB=AC$，点 $D$ 在边 $BC$ 上，点 $",
+          "answer": "证明：先由 $AE=DE$ 且点 $A,E,D$ 在同一直线上，可知点 $E$ ",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "proof",
+            "verdict": "struct_ok"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1877,
+        "out": 1257
+      }
+    },
+    {
+      "name": "文字应用题·一元一次",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "学校组织七年级学生去科技馆参观，租用若干辆观光车。若每辆车坐 $6$ 人，则还有 $9$ 人没有座位",
+          "answer": "设共有 $x$ 辆观光车，则学生人数可表示为 $6x+9$，也可表示为 $7x-",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=93.0, claimed=93.0, tol=1e-06: within tolerance"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "某校学生外出劳动实践，乘坐若干辆小巴车。若每辆车坐 $8$ 人，则还剩 $6$ 人无座；若每辆车坐 ",
+          "answer": "设共有 $x$ 辆小巴车，则学生人数可表示为 $8x+6$，也可表示为 $9x-",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=96.0, claimed=96.0, tol=1e-06: within tolerance"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "七年级学生去研学基地参加活动，原计划租用若干辆校车。若每辆车坐 $11$ 人，则还有 $7$ 人没有",
+          "answer": "设原计划租用 $x$ 辆校车。\n则学生总人数可表示为 $11x+7$。\n后来增加",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=12.0, claimed=12.0, tol=1e-06: within tolerance"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1821,
+        "out": 1805
+      }
+    },
+    {
+      "name": "文字应用题·一元二次",
+      "qtype": "解答",
+      "items": [
+        {
+          "level": "normal",
+          "stem_head": "某件服装原价为 $200$ 元，经过连续两次按相同百分率降价后，售价变为 $128$ 元。求平均每次",
+          "answer": "平均每次降价的百分率为 $20\\%$。",
+          "payload_kind": "numeric",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=20.0, claimed=20.0, tol=1e-06: within tolerance"
+          }
+        },
+        {
+          "level": "normal",
+          "stem_head": "某种电器原价为 $250$ 元，连续两次按相同百分率降价后，现价为 $160$ 元。求平均每次降价的",
+          "answer": "平均每次降价的百分率为 $20\\%$。",
+          "payload_kind": "numeric",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=20.0, claimed=20.0, tol=1e-06: within tolerance"
+          }
+        },
+        {
+          "level": "hard",
+          "stem_head": "某商品经过连续两次按相同百分率降价后，售价变为原价的 $49\\%$。已知该商品原价为 $400$ 元",
+          "answer": "(1) 第二次降价后的售价为 $196$ 元。\n(2) 平均每次降价的百分率为 ",
+          "payload_kind": "none",
+          "defects": [],
+          "verify": {
+            "route": "sympy",
+            "verdict": "pass",
+            "detail": "computed=196.0, claimed=196.0, tol=1e-06: within tolerance"
+          }
+        }
+      ],
+      "tokens": {
+        "in": 1736,
+        "out": 783
+      }
+    }
+  ],
+  "errors": []
+}
