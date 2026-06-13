@@ -38,7 +38,7 @@ from langchain_core.runnables.config import ensure_config
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents import conv_trace, dna_extract, math_verify
+from agents import conv_trace, dna_extract, math_verify, model_anchor
 from agents.qtype_format import format_by_qtype
 from agents.variant_support import (
     RuoyiClient,
@@ -864,6 +864,14 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     if hp_raw is None:
         hp_raw = dna.get("hard_points")
     hard_points = [str(h) for h in (hp_raw or []) if str(h).strip()]
+    # 🔴 PRD-C-015 批2·models 维（双轴「怎么解」轴）：母题级，整组共享 facts.dna.models。
+    #   item 级可被 edit-dna 覆盖（it["models"]，批4 接重写解析）；缺则回退母题 DNA。非空（M00 兜底）。
+    models_raw = it.get("models") if it.get("models") is not None else dna.get("models")
+    models = [
+        {"id": str(m.get("id") or ""), "name": str(m.get("name") or "")}
+        for m in (models_raw or [])
+        if isinstance(m, dict) and (m.get("id") or m.get("name"))
+    ]
     return {
         "main_kp": str(main_kp.get("name") or "") or None,
         "main_kp_id": str(main_kp.get("id") or "") or None,
@@ -873,6 +881,10 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
         "scene": str(dna.get("scene") or "") or None,
         "skeleton": skeleton or None,
         "hard_points": hard_points,
+        # 双轴模型维（批2）：models 非空（M00 兜底）；model_overflow/model_warn 给 FE 标 ⚠（批5 渲染）。
+        "models": models,
+        "model_overflow": [str(x) for x in (dna.get("model_overflow") or []) if str(x).strip()],
+        "model_warn": bool(dna.get("model_warn")),
         "manual_edited": bool(it.get("manual_edited")),
     }
 
@@ -1238,7 +1250,33 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             )
 
     await client.aclose()
+
+    # --- 🔴 PRD-C-015 批2·W1' 模型锚定（双轴「怎么解」轴）：母题 DNA 抽完即锚 models ---
+    #   按主+副 kp 反查候选（纯只读 ETL，≤8 按 sort）→ gpt-5.4-mini「先解题再选」确认 ≤3（池内选/禁造词）；
+    #   无命中→M00 保底（模型维永不为空）；池外名→落待命名池+⚠（不入正式维）；反查库故障→M00+⚠。
+    #   写进 mother_dna.dna.models / model_overflow（契约 v2，批1 已留字段位）。
+    try:
+        m_ref = str((main_kp or {}).get("id") or "") or None
+        m_res = await model_anchor.anchor_models(
+            dna,
+            stem=mother_dna.get("stem") or "",
+            answer=mother_dna.get("answer") or mother_dna.get("solution_skeleton") or "",
+            invoke=_ainvoke_text,
+            model=settings.variant_model("model_confirm"),  # H2：确认档走 gpt-5.4-mini（.env VARIANT_MODEL_MODEL_CONFIRM）
+            record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
+                name, mm, question_ref=m_ref
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底，绝不空维/卡死）
+        analysis.setdefault("_model_anchor_error", str(e))
+        m_res = {"models": [dict(model_anchor.M00)], "model_overflow": [], "model_warn": True,
+                 "model_flag": "lookup_unavailable"}
+    dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
+    dna["model_overflow"] = m_res.get("model_overflow") or []
+    if m_res.get("model_warn"):
+        dna["model_warn"] = True
     mother_dna["dna"] = dna
+
     if main_kp and main_kp.get("id"):
         # 池内锚到真知识点 → anchored.code = 知识点叶子 code（dim1KpId 主 kp）
         kp_node["anchored"] = {

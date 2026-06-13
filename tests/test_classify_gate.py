@@ -65,6 +65,14 @@ def _patch(monkeypatch, *, pool, dna):
     monkeypatch.setattr(variant_mod, "leaf_pool_for_grade", fake_leaf_pool)
     monkeypatch.setattr(variant_mod.dna_extract, "extract_dna", fake_extract)
 
+    # 🔴 PRD-C-015 批2：classify 现会跑 model_anchor（连库反查 + LLM 确认）。单测桩成确定性 M00 兜底
+    #   （零库零 LLM），避免连真库；models 维非空契约由 batch2 专测覆盖，这里只保 classify 主链不破。
+    async def fake_anchor(dna, **kw):
+        return {"models": [dict(variant_mod.model_anchor.M00)], "model_overflow": [],
+                "model_warn": False, "model_flag": "m00_fallback"}
+
+    monkeypatch.setattr(variant_mod.model_anchor, "anchor_models", fake_anchor)
+
 
 # ---------------------------------------------------------------------------
 # 锚定成功 → generate
@@ -140,7 +148,8 @@ def test_bo_carries_new_dna_keys_and_split_anchors(monkeypatch):
     assert bo["dim1KpId"] == "3071001001001"  # 主 kp 叶子
     # B1 新增键（键名钉死）
     assert bo["secondaryKpIds"] == [3071001001002]
-    assert bo["tags"] == ["解方程", "移项变号"]
+    # 🔴 批2：models 维（桩为 M00 兜底）走 `模型:` 标签三轨，续接在普通标签后（零 DDL）。
+    assert bo["tags"] == ["解方程", "移项变号", "模型:概念直用"]
     assert bo["skeleton"] == "移项\n求解"
     assert bo["scene"] == "纯代数"
     assert bo["examType"] == "直接计算"

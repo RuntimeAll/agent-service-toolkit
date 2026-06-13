@@ -358,6 +358,9 @@ REL_VARIANT = "AI-数值变式"  # 变式题默认 variant_relation
 # 🔴 PRD-C-009 轻量打标：举一反三入库即 AI 已标（label_status=1），打标人 = agent/模型标识。
 LABEL_STATUS_AI = 1
 
+# 🔴 PRD-C-015 批2·W5'：模型维落库走标签三轨的前缀（`模型:<name>`，零 DDL；26号 §0 注入协议④）。
+MODEL_TAG_PREFIX = "模型:"
+
 # 🔴 biz_question.subject_id 是 varchar(20) NOT NULL 无默认值（V1 建表）。锚定失败时
 #   facts.subject_id = None（classify 没命中 biz_subject 节点，但 DNA 闸可能凭 LLM 置信放行）→
 #   旧代码 `if subject_id:` 漏列 → 入库 INSERT subject_id=NULL → SQLException "Column 'subject_id'
@@ -451,12 +454,29 @@ def _apply_labels(
     if facts.get("mother_structure"):
         bo["dim5Structure"] = facts["mother_structure"]
 
+    # 🔴 PRD-C-015 批2·缺口11 守恒维落库一致性（AC21/G21）：主 kp「0」未分类（dim1 缺）时，
+    #   副考点/考察类型这两个**依赖知识图谱锚定的守恒维一并不落**，绝不产「主考点未分类却有副考点」
+    #   的矛盾行。dim1 在库 → 正常落。（标签/骨架/难点不依赖主 kp 锚定，照旧落。）
+    main_kp_unclassified = not dim1
+
     # 🔴 B1 全维 DNA（变式守恒 main kp/副 kp/考察类型/骨架，与母题共享 facts.dna） ---
     sec = dna.get("secondary_kps") or []
     sec_ids = [i for i in (_to_int_or_none(s.get("id")) for s in sec if isinstance(s, dict)) if i is not None]
-    if sec_ids:
+    if sec_ids and not main_kp_unclassified:
         bo["secondaryKpIds"] = sec_ids
     tags = [str(t).strip() for t in (dna.get("tags") or []) if str(t).strip()]
+    # 🔴 PRD-C-015 批2·W5' 模型维落库：模型名走标签三轨（前缀 `模型:`），零 DDL（不加列、不动 biz_question_ai）。
+    #   透传给 book-server create（RuoYi 写库），toolkit 不直写库（架构铁律）。M00=概念直用 也照落（模型维非空）。
+    #   去重：同名不重复挂；与普通 tag 各自独立（`模型:` 前缀避免与普通标签撞）。
+    for m in dna.get("models") or []:
+        if not isinstance(m, dict):
+            continue
+        mname = str(m.get("name") or "").strip()
+        if not mname:
+            continue
+        mtag = f"{MODEL_TAG_PREFIX}{mname}"
+        if mtag not in tags:
+            tags.append(mtag)
     if tags:
         bo["tags"] = tags
     skeleton = dna.get("skeleton")
@@ -465,7 +485,8 @@ def _apply_labels(
         bo["skeleton"] = "\n".join(str(s) for s in skeleton) if isinstance(skeleton, list) else str(skeleton)
     if dna.get("scene"):
         bo["scene"] = str(dna["scene"])
-    if dna.get("exam_type"):
+    # 考察类型守恒维（缺口11）：主 kp 未分类时不落（不产矛盾行）。
+    if dna.get("exam_type") and not main_kp_unclassified:
         bo["examType"] = str(dna["exam_type"])
     hard = [str(h).strip() for h in (dna.get("hard_points") or []) if str(h).strip()]
     if hard:

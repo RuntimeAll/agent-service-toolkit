@@ -501,6 +501,10 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
             "scene": None,
             "skeleton": None,
             "hard_points": [],
+            # PRD-C-015 批2：双轴 models 维（裸题无 dna → 空，FE 显「未标」）。
+            "models": [],
+            "model_overflow": [],
+            "model_warn": False,
             "manual_edited": False,
         },
     }
@@ -552,6 +556,10 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
             "scene": None,
             "skeleton": None,
             "hard_points": [],
+            # PRD-C-015 批2：双轴 models 维（裸题无 dna → 空）。
+            "models": [],
+            "model_overflow": [],
+            "model_warn": False,
             "manual_edited": False,
         },
     }

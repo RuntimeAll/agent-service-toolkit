@@ -192,6 +192,10 @@ class Settings(BaseSettings):
     VARIANT_MODEL_DNA: str | None = None
     VARIANT_MODEL_SOLVE: str | None = None
     VARIANT_MODEL_GENERATE: str | None = None
+    # 🔴 PRD-C-015 批2·W1' 模型确认档（H2 预飞行推翻 nano）：候选池内确认解题模型用 gpt-5.4-mini
+    #   +「先解题再选」prompt（nano recall 仅 24% 欠选成性；gpt-5.4 主模型 31% 发散；mini recall 69%/
+    #   头牌 9/9）。缺省（None）→ 回退 LLM_MODEL_LIGHT（nano）；.env 显式切 gpt-5.4-mini 生效（推荐配）。
+    VARIANT_MODEL_MODEL_CONFIRM: str | None = None
     RELAY_FAIL_THRESHOLD: int = 3  # 连续失败 N 次 → 熔断器 trip
     RELAY_COOLDOWN_S: float = 30.0  # 熔断冷却秒数（之后 half-open 探活）
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
@@ -327,6 +331,8 @@ class Settings(BaseSettings):
             "dna": self.VARIANT_MODEL_DNA,
             "solve": self.VARIANT_MODEL_SOLVE,
             "generate": self.VARIANT_MODEL_GENERATE,
+            # 模型确认档（PRD-C-015 批2·H2）：候选池内确认解题模型。
+            "model_confirm": self.VARIANT_MODEL_MODEL_CONFIRM,
         }.get(env)
         if override:
             return override
@@ -336,6 +342,8 @@ class Settings(BaseSettings):
             "dna": self.LLM_MODEL_LIGHT,
             "solve": None,
             "generate": None,
+            # 缺省回退 nano（与 dna 同档）；.env 显式切 gpt-5.4-mini（H2 甜点档）覆盖。
+            "model_confirm": self.LLM_MODEL_LIGHT,
         }
         return defaults.get(env)
 
