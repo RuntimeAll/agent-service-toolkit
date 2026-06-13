@@ -20,6 +20,8 @@ Coverage map:
 - routing: every guardrail output intent maps onto an existing graph branch
 """
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from agents.variant import (
     ADD_COUNT_MAX,
     EDIT_ACTIONS,
@@ -31,6 +33,9 @@ from agents.variant import (
     INTENT_SOLUTION_ONLY,
     VALID_INTENTS,
     _is_multi_subquestion,
+    _latest_ai_text,
+    _looks_like_conservation_hit,
+    _qtype_from_note,
     route_after_parse,
     structure_lint,
     validate_instruction,
@@ -437,3 +442,72 @@ def test_structure_lint_choice_real_chimera_still_caught():
     }
     defects = structure_lint(item)
     assert any("多小问" in d for d in defects)
+
+
+# ---------------------------------------------------------------------------
+# BUG-001 · _qtype_from_note：编辑 note → 目标题型抽取（改题型才真改）
+# ---------------------------------------------------------------------------
+
+def test_qtype_from_note_change_to_choice():
+    assert _qtype_from_note("改成选择题") == "选择"
+    assert _qtype_from_note("这题改填空") == "填空"
+    assert _qtype_from_note("换成解答题") == "解答"
+
+
+def test_qtype_from_note_aliases_map_to_canon():
+    # 计算/应用/证明/大题 → 解答；单选 → 选择
+    assert _qtype_from_note("改成计算题") == "解答"
+    assert _qtype_from_note("换成应用题") == "解答"
+    assert _qtype_from_note("改成单选") == "选择"
+
+
+def test_qtype_from_note_takes_last_when_from_x_to_y():
+    # 「从填空改成选择」→ 取最后出现的目标题型（选择）
+    assert _qtype_from_note("从填空改成选择题") == "选择"
+
+
+def test_qtype_from_note_no_change_verb_returns_none():
+    # 只是陈述题型 / 无改动词 → 不判改题型（避免「这是选择题，数字简单点」误伤）
+    assert _qtype_from_note("数字简单点") is None
+    assert _qtype_from_note("这是一道选择题") is None  # 含"选择"但无改/换/变/成动词
+    assert _qtype_from_note("") is None
+    assert _qtype_from_note(None) is None
+
+
+# ---------------------------------------------------------------------------
+# BUG-003 · _looks_like_conservation_hit：clarify 文案归因二分
+# ---------------------------------------------------------------------------
+
+def test_conservation_hit_detects_kp_grade_change():
+    # 显式动「考点/知识点/年级/学段」对象词 + 改动词 → 判疑似撞守恒（给守恒说明）
+    assert _looks_like_conservation_hit("换个考点")
+    assert _looks_like_conservation_hit("改成八年级的")
+    assert _looks_like_conservation_hit("换知识点")
+    assert _looks_like_conservation_hit("改下年级")
+
+
+def test_conservation_hit_false_for_normal_edits():
+    # 改题型/换场景/改数量 都不是撞守恒 → 不触发守恒文案
+    assert not _looks_like_conservation_hit("第1题改成选择题")
+    assert not _looks_like_conservation_hit("加入杭州场景")
+    assert not _looks_like_conservation_hit("出两道")
+    assert not _looks_like_conservation_hit("阿巴阿巴乱说一通")
+    assert not _looks_like_conservation_hit("")
+
+
+# ---------------------------------------------------------------------------
+# BUG-006 · _latest_ai_text：注入上一轮 AI 消息供承接判别
+# ---------------------------------------------------------------------------
+
+def test_latest_ai_text_returns_most_recent_ai():
+    msgs = [
+        HumanMessage(content="贴图"),
+        AIMessage(content="我可以把第2题完整讲一遍"),
+        HumanMessage(content="给学生讲"),
+    ]
+    assert _latest_ai_text(msgs) == "我可以把第2题完整讲一遍"
+
+
+def test_latest_ai_text_empty_when_no_ai():
+    assert _latest_ai_text([HumanMessage(content="hi")]) == ""
+    assert _latest_ai_text([]) == ""

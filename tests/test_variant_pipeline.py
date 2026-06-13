@@ -750,14 +750,14 @@ def test_reordered_prompts_format_cleanly():
     EXTRACT_PROMPT.format(qtype="解答", stem="s", answer="1", solved_answer="1")
     SOLVE_PROMPT.format(stem="s")
     # B2·T2: GENE_JUDGE_PROMPT deleted; Gate-A is now pure code (no judge prompt to format).
-    PARSE_PROMPT.format(n=3, kp_name="kp", grade="g", utterance="u")
+    PARSE_PROMPT.format(n=3, kp_name="kp", grade="g", prev_ai="", utterance="u")
 
 
 def test_trace_markers_still_resolve_after_reorder():
     cases = [
         (SOLVE_PROMPT.format(stem="s"), "solve"),
         (EXTRACT_PROMPT.format(qtype="q", stem="s", answer="a", solved_answer="x"), "extract"),
-        (PARSE_PROMPT.format(n=1, kp_name="k", grade="g", utterance="u"), "parse"),
+        (PARSE_PROMPT.format(n=1, kp_name="k", grade="g", prev_ai="", utterance="u"), "parse"),
         (
             GENERATE_PROMPT.format(
                 n=3, n_normal=2, n_hard=1, kp_name="k", grade="g",

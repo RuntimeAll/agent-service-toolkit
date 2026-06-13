@@ -725,17 +725,18 @@ def test_analyze_same_url_repaste_preserves_knobs(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 改动1（PRD-C-009 整改）：配方 knobs 并入读图（analyze）同一次调用，省独立 _extract_knobs
-# 串行往返。合并调用产出 knobs 段 → 直接采信；缺/非 dict → 兜底走原 _extract_knobs（降级）。
+# 🔴 BUG-002 D1（2026-06-13）：utterance 非空 → **强制走独立纯文本 _extract_knobs 抽取**，
+#   不再采信读图 multimodal 兼任产出的 knobs 段（中文数量词在读图主任务下召回不稳）。
+#   代价 = utterance 非空多一次 nano 往返（D4 接受）；utterance 空 → 首轮零新增调用（AC6/G5）。
 # ---------------------------------------------------------------------------
 
 
-def test_analyze_merged_knobs_from_single_call_no_separate_extraction(monkeypatch):
-    """合并调用同出 analysis + knobs → 不再发独立 _extract_knobs 往返（核心提速点）。"""
+def test_analyze_with_text_always_uses_independent_extract(monkeypatch):
+    """BUG-002 D1：老师附带人话 → 强制独立 _extract_knobs，读图返回的 knobs 段被忽略。"""
     extract_called = []
 
     async def fake_llm(messages, retry=True, **kwargs):
-        # 母题分析 + knobs 段一次返回（老师附带「出3道，难度递增」）
+        # 读图调用故意返回一个**错的** knobs 段（count 99），证明不被采信
         return json.dumps(
             {
                 "is_question_image": True,
@@ -743,67 +744,29 @@ def test_analyze_merged_knobs_from_single_call_no_separate_extraction(monkeypatc
                 "kp": {"value": "一元一次方程", "confidence": 0.8},
                 "qtype": {"value": "解答", "confidence": 0.9},
                 "stem": "题干", "answer": "x=1", "difficulty": 3,
-                "knobs": {"count": 3, "difficulty_plan": "递增", "qtype_dist": None, "note": ""},
+                "knobs": {"count": 99, "difficulty_plan": "递增", "qtype_dist": None, "note": ""},
             },
             ensure_ascii=False,
         )
 
     async def fake_extract(state):
         extract_called.append(1)
-        return {"count": 99}  # 若被调到（不该）→ count 会变 99，断言会抓
+        return {"count": 2}  # 独立抽取（数量词稳）→ 实际采用的就是这个
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
     monkeypatch.setattr(variant_mod, "_extract_knobs", fake_extract)
-    state = {"messages": [HumanMessage(content="https://oss/q.png 出3道，难度递增")]}
+    state = {"messages": [HumanMessage(content="https://oss/q.png 出两道相似的题")]}
     out = asyncio.run(analyze(state, {}))
-    assert extract_called == []  # 🔴 合并产出 knobs → 零独立抽取往返
-    assert out["knobs"] == {"count": 3, "difficulty_plan": PLAN_INCREASING}
+    assert extract_called == [1]  # 🔴 utterance 非空 → 独立抽取必被调用
+    assert out["knobs"] == {"count": 2}  # 🔴 采用独立抽取结果，读图 99 被忽略
 
 
-def test_analyze_merged_knobs_missing_falls_back_to_extract(monkeypatch):
-    """合并调用没给 knobs 段（老模型/解析丢字段）+ 老师有要求 → 兜底走一次 _extract_knobs，不挂死。"""
+def test_analyze_empty_text_no_extraction_roundtrip(monkeypatch):
+    """BUG-002 AC6/G5：纯贴图（utterance 空）→ 首轮不新增任何 _extract_knobs 调用。"""
     extract_called = []
 
     async def fake_llm(messages, retry=True, **kwargs):
-        return json.dumps(  # 故意不含 knobs 键
-            {
-                "is_question_image": True,
-                "grade": {"value": "七年级上学期", "confidence": 0.9},
-                "kp": {"value": "一元一次方程", "confidence": 0.8},
-                "qtype": {"value": "解答", "confidence": 0.9},
-                "stem": "题干", "answer": "x=1", "difficulty": 3,
-            },
-            ensure_ascii=False,
-        )
-
-    async def fake_extract(state):
-        extract_called.append(1)
-        return {"count": 4}
-
-    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
-    monkeypatch.setattr(variant_mod, "_extract_knobs", fake_extract)
-    state = {"messages": [HumanMessage(content="https://oss/q.png 出4道")]}
-    out = asyncio.run(analyze(state, {}))
-    assert extract_called == [1]  # 🔴 缺 knobs 段 → 兜底独立抽取（降级路径）
-    assert out["knobs"] == {"count": 4}
-
-
-def test_analyze_merged_empty_knobs_is_trusted_no_fallback(monkeypatch):
-    """合并给了 dict 但全 null（老师没提）→ 归一成 {}，采信、不再兜底重抽（不浪费一次往返）。"""
-    extract_called = []
-
-    async def fake_llm(messages, retry=True, **kwargs):
-        return json.dumps(
-            {
-                "is_question_image": True,
-                "grade": {"value": "七年级上学期", "confidence": 0.9},
-                "kp": {"value": "一元一次方程", "confidence": 0.8},
-                "qtype": {"value": "解答", "confidence": 0.9},
-                "stem": "题干", "answer": "x=1", "difficulty": 3,
-                "knobs": {"count": None, "difficulty_plan": None, "qtype_dist": None, "note": ""},
-            },
-            ensure_ascii=False,
-        )
+        return _ANALYZE_JSON
 
     async def fake_extract(state):
         extract_called.append(1)
@@ -811,10 +774,9 @@ def test_analyze_merged_empty_knobs_is_trusted_no_fallback(monkeypatch):
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
     monkeypatch.setattr(variant_mod, "_extract_knobs", fake_extract)
-    # 老师附带了人话但无配方词 → 合并产出全 null knobs → 采信 {}，不兜底
-    state = {"messages": [HumanMessage(content="https://oss/q.png 这题挺好的")]}
+    state = {"messages": [HumanMessage(content="https://oss/q.png")]}  # 纯贴图无人话
     out = asyncio.run(analyze(state, {}))
-    assert extract_called == []
+    assert extract_called == []  # 🔴 空 utterance → 零抽取往返
     assert out["knobs"] == {}
 
 
@@ -913,3 +875,45 @@ def test_exec_regenerate_clears_defects_and_carries_recipe_stamps(monkeypatch):
     assert new_item["stem"] == "重出的题" and "check" not in new_item
     # stamps follow the item (it still occupies the original plan slot)
     assert new_item["from_recipe"] is True and new_item["expected_difficulty"] == 4
+
+
+def test_exec_regenerate_change_qtype_via_note(monkeypatch):
+    """BUG-001 AC1：「第1题改成选择题」→ note 抽出目标题型，REGEN 出题用新题型（不被原题型钉死）。"""
+    captured = {}
+
+    async def fake_llm(messages, retry=True, **kwargs):
+        captured["prompt"] = messages[0].content
+        # 模型若返回 qtype 缺失，也应回落到 target_qtype（选择）；这里故意不给 qtype 字段
+        return json.dumps(
+            {"stem": "新选择题", "answer": "A", "solution": "略", "difficulty": 3, "level": "normal"},
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    items = [{"stem": "原解答题", "qtype": "解答", "difficulty": 3, "level": "normal"}]
+    state = _edit_state(
+        [{"action": "regenerate", "index": 1, "note": "改成选择题"}], items=items
+    )
+    out = asyncio.run(exec_regenerate(state, {}))
+    # 出题 prompt 用新题型「选择」（不再钉死原「解答」）
+    assert '"qtype":"选择"' in captured["prompt"] or "qtype\":\"选择" in captured["prompt"]
+    # 结果题 qtype 落「选择」（模型没给 qtype → 回落 target_qtype）
+    assert out["items"][0]["qtype"] == "选择"
+    assert out["items"][0]["edit_note"] == "改成选择题"
+
+
+def test_exec_regenerate_keeps_qtype_when_note_not_change_type(monkeypatch):
+    """note 只说「数字简单点」（无改题型）→ qtype 不变（行为不变回归锚）。"""
+    captured = {}
+
+    async def fake_llm(messages, retry=True, **kwargs):
+        captured["prompt"] = messages[0].content
+        return json.dumps(dict(_ITEM_JSON, stem="重出", qtype="解答"), ensure_ascii=False)
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    items = [{"stem": "原题", "qtype": "解答", "difficulty": 3, "level": "normal"}]
+    state = _edit_state(
+        [{"action": "regenerate", "index": 1, "note": "数字简单点"}], items=items
+    )
+    out = asyncio.run(exec_regenerate(state, {}))
+    assert out["items"][0]["qtype"] == "解答"  # 题型守原

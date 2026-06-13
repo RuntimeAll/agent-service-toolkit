@@ -542,6 +542,18 @@ def _latest_human_text(messages: list[BaseMessage]) -> str:
     return ""
 
 
+def _latest_ai_text(messages: list[BaseMessage]) -> str:
+    """BUG-006：取最近一条 AI 消息文本（注入 parse，让分类器能判老师对 AI 提议的承接）。
+
+    只读最近一条 AI 消息这一项（不建状态机/不建 pending_offer，最小止血）。无 AI 消息 → ""。
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            c = msg.content
+            return c if isinstance(c, str) else _content_text(msg)
+    return ""
+
+
 _URL_RE = re.compile(r"https?://[^\s)>'\"]+", re.IGNORECASE)
 
 
@@ -808,7 +820,7 @@ def route_entry(
 ANALYZE_PROMPT = """你是浙教版初中数学命题专家。看这张题目图，**流式**输出母题分析。
 🔴 老师贴图时可能附带了出题要求（出几道、难度安排、题型配比等），如下：
 {utterance}
-（上面为空 = 老师没提要求，knobs 段一律 null/""，绝不脑补默认值。）
+（仅作语境参考——出题配方由独立纯文本抽取器另行解析，这里**不要**抽 knobs。）
 
 只输出一个 JSON（不要解释），结构：
 {{
@@ -823,16 +835,10 @@ ANALYZE_PROMPT = """你是浙教版初中数学命题专家。看这张题目图
   "answer": "标准答案(图里没有就先解母题得出)",
   "difficulty": 1~5,
   "structure": "结构指纹/解法骨架简述",
-  "solution_skeleton": "解法骨架(步骤)",
-  "knobs": {{                          // 🔴 出题配方旋钮（受约束抽取：只抽老师上面明说的，没说一律 null/""）
-    "count": null,                     // 要出几道题(正整数 1~8)；没说填 null
-    "difficulty_plan": null,           // "increasing"=难度递增/越来越难/一道比一道难；没提填 null；其它难度要求填原话(如"都出难题")
-    "qtype_dist": null,                // 题型配比如 {{"选择":2,"填空":2,"解答":1}}；题型只能用 选择/填空/解答(应用题/计算题/证明题等都归"解答")；没说填 null
-    "note": ""                         // 其余装不进上面旋钮的自由要求原话(如"贴近生活场景")；没有填 ""
-  }}
+  "solution_skeleton": "解法骨架(步骤)"
 }}
 🔴 无答案先解母题得答案/解法骨架(作 verify 基准)。各锚(年级/考点/题型)如实给 confidence。
-🔴 knobs 段只抽老师上面明确说了的；老师没附要求或某旋钮没提 → 一律 null/""，绝不脑补。"""
+🔴 BUG-002 D1：出题配方（数量/难度/题型配比）由独立 _extract_knobs 纯文本抽取，本调用**不输出 knobs**。"""
 
 
 # 🔴 阶段灯·锚定考点首灯定时翻绿（PRD-C-009 整改·改动2）：合并读图+配方+锚定后，
@@ -933,15 +939,14 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
     #   - 没抽出新配方：同图重贴（clarify 迂回/澄清应答）→ 保留首轮已抽配方；
     #     新图 → 重置 {}（旧母题的「5道递增」绝不错套到新母题上）。
     # shape_defects 一并清零（上一母题的缺陷外显不带进新母题轮）。
-    # 🔴 改动1·容错降级：合并调用产出的 knobs 段缺失/不是 dict → 兜底走一次原 _extract_knobs
-    #   （独立串行往返，但仅在合并没正常给出 knobs 段时才付这次代价，不让首轮挂死）。
-    #   合并给了 dict（含老师没提时全 null 归一成 {}）→ 直接采信，不再额外重抽。
+    # 🔴 BUG-002 D1（2026-06-13）：utterance 非空 → **强制走独立纯文本 _extract_knobs 抽取**，
+    #   不再采信读图 multimodal 兼任产出的 knobs 段。根因：中文数量词（两/俩/一对）在读图主任务
+    #   下召回不稳（"两道仍出 3 道"），纯文本 light 单跑对数量词稳。代价 = utterance 非空多一次
+    #   nano 往返（D4 已接受）；utterance 空（纯贴图）→ 首轮不新增任何调用（AC6/G5 守）。
     if not user_text:
-        new_knobs = {}
-    elif isinstance(data.get("knobs"), dict):
-        new_knobs = normalize_knobs(data["knobs"])  # 合并正常产出（{} = 老师没提）→ 采信
+        new_knobs = {}  # 纯贴图：首轮不抽（不新增 LLM 调用）
     else:
-        new_knobs = await _extract_knobs(state)  # 合并缺 knobs 段/非 dict → 兜底独立抽取
+        new_knobs = await _extract_knobs(state)  # utterance 非空 → 独立纯文本抽取（数量词稳）
     if not new_knobs and url == state.get("image_url") and state.get("knobs") is not None:
         knobs = state.get("knobs")  # 同图重贴且本轮无新配方 → 保留
     else:
@@ -1546,7 +1551,7 @@ KNOBS_PROMPT = """你是举一反三 agent 的出题配方抽取器（受约束�
 
 只输出一个 JSON（不要解释、不要 markdown fence）：
 {{
-  "count": null,            // 要出几道题（正整数，1~8）；没说填 null
+  "count": null,            // 要出几道题（正整数，1~8）；没说填 null。🔴 中文数量词必须映射成阿拉伯数字：一/壹/一道/一个→1，两/俩/二/一对/两道→2，仨/三→3，四→4，五→5，六→6，七→7，八→8（"再来两道"=2，"出俩"=2，"一对"=2）
   "difficulty_plan": null,  // 难度安排："increasing"=难度递增/越来越难/一道比一道难；没提难度安排填 null；其它难度要求把老师原话填进来（如"都出难题"）
   "qtype_dist": null,       // 题型配比，如 {{"选择":2,"填空":2,"解答":1}}；题型只能用 选择/填空/解答 三类（应用题/计算题/证明题等都归"解答"）；没说填 null
   "note": ""                // 其余装不进上面旋钮的自由要求原话（如"贴近生活场景"、"数字简单点"）；没有填 ""
@@ -1576,6 +1581,36 @@ _QTYPE_ALIAS: dict[str, str] = {
 }
 # 归一后要在 note 里保留语义的原始题型词（应用题 → 解答 + note "应用场景"）
 _QTYPE_NOTE_HINTS: dict[str, str] = {"应用": "应用场景", "应用题": "应用场景"}
+
+# BUG-001：编辑·regenerate 的 note 里若含「改成X题」这类显式改题型诉求，需从 note 抽出目标
+# 题型覆盖 REGEN 出题的 qtype（否则 REGEN_PROMPT 把 qtype 钉死成原题型，改题型形同没改）。
+# 纯字符串匹配（零 LLM）：命中题型关键词且 note 出现「改/换/变/成」改动词才算（避免「这是选择题，
+# 数字简单点」这类陈述被误判为改题型）。
+_QTYPE_KEYWORDS: list[tuple[str, str]] = [
+    ("选择", "选择"), ("单选", "选择"),
+    ("填空", "填空"),
+    ("解答", "解答"), ("计算", "解答"), ("应用", "解答"), ("证明", "解答"), ("大题", "解答"),
+]
+_QTYPE_CHANGE_VERBS = ("改", "换", "变", "成", "出", "做")
+
+
+def _qtype_from_note(note: str | None) -> str | None:
+    """从编辑 note 里抽出老师要求的目标题型（选择/填空/解答），抽不出返 None。
+
+    纯函数（零 LLM/零 IO，可单测）。命中规则：note 同时含「改/换/变/成…」改动词 + 某题型关键词。
+    多个题型关键词命中时取**最后出现**的（更贴近「从X改成Y」的 Y）。
+    """
+    s = str(note or "")
+    if not s or not any(v in s for v in _QTYPE_CHANGE_VERBS):
+        return None
+    best: tuple[int, str] | None = None
+    for kw, canon in _QTYPE_KEYWORDS:
+        pos = s.rfind(kw)
+        if pos >= 0 and (best is None or pos > best[0]):
+            best = (pos, canon)
+    return best[1] if best else None
+
+
 KNOBS_COUNT_MIN, KNOBS_COUNT_MAX = 1, 8
 PLAN_INCREASING = "increasing"
 _PLAN_INCREASING_WORDS = ("increasing", "递增", "越来越难", "逐题变难", "一道比一道难")
@@ -3311,9 +3346,15 @@ ADD_COUNT_MAX = 5  # 与 exec_add 单轮上限同口径（min(n,5)），护栏�
 PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类器：intent 只能从 6 个枚举值里选 1 个，禁止发明新值）。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
 
 【分类标准】逐条对照，命中哪条选哪条；都不命中选 "clarify"（其中"编辑"细分 4 种 action）：
-1. "答疑" —— 判别：只是在问某题怎么解/为什么，不要求改动任何题。例：「为什么第3题选B？」
+1. "答疑" —— 判别：只是要老师**讲解/解惑**某题（问怎么解、为什么，**或祈使式要求讲一遍**），不要求改动任何题。
+   - 疑问句例：「为什么第3题选B？」「第2题怎么解？」
+   - 🔴 祈使式也算答疑（常见漏判）：「第2题讲一遍」「给学生讲」「按给学生讲的方式讲讲」「再讲讲第1题」「这道题展开说说」——都是要讲解，不是改题。
+   - 🔴 承接上一轮 AI 主动提议时尤其要认（见末尾「上一轮 AI 说了什么」）：若 AI 上一句提议「我可以把第N题完整讲一遍」，老师回「好/可以/讲/给学生讲」= 承接该提议 → 答疑（讲第N题），别判 clarify。
 2. "编辑"+remove —— 判别：点名删掉某道题，且能给出 1~{n} 内的题号。例：「第2题删掉」→ ops=[{{"action":"remove","index":2}}]
-3. "编辑"+regenerate —— 判别：点名重出/换掉/改造某道题（**换一道新题**），且能给出 1~{n} 内的题号。例：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
+3. "编辑"+regenerate —— 判别：点名**改造/重出某道题**（换数字 / 换一道新题 / **改题型 / 换题型 / 加情境/换场景**），且能给出 1~{n} 内的题号。**改题型与换场景都归这里**（题型、场景都不在硬守恒里，可以改）。把目标题型/场景要求写进 note。
+   - 例（换题）：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
+   - 例（改题型）：「第1题改成选择题」/「这题改填空」→ ops=[{{"action":"regenerate","index":1,"note":"改成选择题"}}]
+   - 例（换场景）：「第2题加入杭州元素」/「换成行程问题的情境」→ ops=[{{"action":"regenerate","index":2,"note":"加入杭州元素场景"}}]
 4. "编辑"+add —— 判别：要求再加 N 道题（N 为正整数，单轮最多 5）。例：「再来2道难的」→ ops=[{{"action":"add","count":2,"note":"难的"}}]
 4b. "编辑"+reorder —— 判别：只调整题目**顺序**（不改题/不增删），且能给出一个**覆盖全部 {n} 道**的新次序。例（共3道）：「把顺序换成 3 1 2」→ ops=[{{"action":"reorder","order":[3,1,2]}}]。order 必须是 1~{n} 的**全排列**（每个题号恰出现一次）；只说「按难度排」「倒过来」这种没给出明确全排列的，**不要自己编 order**，留空 ops、intent 取 "clarify" 让老师给次序。
 5. "解法修正" —— 判别：老师**约束解题方法**、或**纠正年级/进度从而限定能用的解法**，但**不要求换题**（题面保留，只改解析/解法）。例：「这里是7年级的题目，没学二元方程，只能用一元一次去解题」→ intent=解法修正，method_constraint=「只能用一元一次方程，不用二元方程」，grade_correction=「七年级」。又例：「解析别用因式分解，改用配方法」→ 解法修正，method_constraint=「改用配方法，不用因式分解」。🔴 关键区分：老师明确改的是**怎么解**（解析/方法），不是**换一道题**——别误判成"修正(整组重锚重做)"或"编辑+regenerate(换题)"。
@@ -3325,9 +3366,8 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 {{
   "intent": "解法修正|修正|编辑|确认|答疑|clarify",   // 6 选 1
   "ops": [                                  // intent=编辑 时的操作列表（其余为空数组）
-    {{"action":"remove|regenerate|add|reorder", "index": 1, "count": 1, "order": [3,1,2], "note":"自由约束/旋钮说明"}}
+    {{"action":"remove|regenerate|add|reorder", "index": 1, "count": 1, "order": [3,1,2], "note":"自由约束/旋钮说明(改题型/换场景/数字等要求一律写这里)"}}
   ],
-  "knobs": {{"count":null, "number":null, "scene":null, "difficulty":null, "qtype":null, "method":null}},
   "comp": "可被旋钮吸收的软约束(超旋钮但 best-effort 能顺的)，没有填 null",
   "extra_constraints": ["其余自由约束句"],
   "mother_correction": {{"grade":null, "kp":null}},  // intent=修正 时老师纠正的年级/考点，否则全 null
@@ -3348,6 +3388,9 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
 - 主考点: {kp_name}
 - 年级: {grade}
+
+上一轮 AI 说了什么（🔴 BUG-006·承接判别用：老师最新一句若在承接/回应 AI 上一句的提议，按上一句语境定意图，比如 AI 提议「我可以讲一遍第2题」、老师回「给学生讲」= 答疑·讲第2题）：
+{prev_ai}
 
 老师最新一句话：
 {utterance}"""
@@ -3496,12 +3539,18 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
     #   同轮共享）。parse 本身是核心分类调用（受预算约束但不被跳过）。
     budget = _budget_bind(state, reset_limit=settings.VARIANT_BUDGET_EDIT)
     utterance = _latest_human_text(state.get("messages", []))
+    # BUG-006：注入上一轮 AI 消息（尤其主动提议句），让分类器能判承接语（「给学生讲」承接
+    #   AI「我可以讲一遍第N题」→ 答疑，而非无状态单句分类掉 clarify）。截断防 prompt 膨胀。
+    prev_ai = _latest_ai_text(state.get("messages", []))
+    if len(prev_ai) > 600:
+        prev_ai = prev_ai[:600] + "…"
     facts = _mother_facts(state)
     items = state.get("items") or []
     prompt = PARSE_PROMPT.format(
         n=len(items),
         kp_name=facts["kp_name"],
         grade=facts["grade"],
+        prev_ai=prev_ai or "(无，这是本组第一轮交互)",
         utterance=utterance or "(空)",
     )
     # 🔴 17 号修复 §5：在途母题（停在 clarify、还没出题）的回答语境 —— 此时没有可编辑的
@@ -3662,6 +3711,9 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
 
     for t in targets:
         old = items[t]
+        # BUG-001 AC1：note 里含「改成X题」→ 抽出目标题型覆盖 REGEN 的 qtype（REGEN_PROMPT 把
+        #   qtype 钉死成入参，不覆盖则改题型形同没改）。抽不出 → 沿用原题型（行为不变）。
+        target_qtype = _qtype_from_note(notes.get(t)) or old.get("qtype") or facts["qtype"]
         regen_text = await _ainvoke_text(
             [
                 HumanMessage(
@@ -3671,7 +3723,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                         stem=(old.get("stem") or "")
                         + (f"\n额外要求：{notes[t]}" if t in notes else ""),
                         level=old.get("level") or "normal",
-                        qtype=old.get("qtype") or facts["qtype"],
+                        qtype=target_qtype,
                         difficulty=old.get("difficulty") or 3,
                         injected_kp=json.dumps(old.get("injected_kp"), ensure_ascii=False),
                     )
@@ -3693,7 +3745,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                     "stem": regen.get("stem"),
                     "answer": regen.get("answer"),
                     "solution": regen.get("solution"),
-                    "qtype": regen.get("qtype") or old.get("qtype") or facts["qtype"],
+                    "qtype": regen.get("qtype") or target_qtype,
                     "difficulty": regen.get("difficulty") or old.get("difficulty"),
                     "level": regen.get("level") or old.get("level") or "normal",
                     "injected_kp": regen.get("injected_kp"),
@@ -4114,21 +4166,53 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
     }
 
 
+# BUG-003：clarify 文案归因区分——只有老师真在「换考点/换年级」时才说撞守恒，否则不甩。
+#   纯字符串启发式（零 LLM）：utterance 同时含「改/换/变…」改动词 + 考点/年级类对象词，
+#   才判为「疑似撞守恒」，给守恒说明；其余一律走「没听懂」分支，不误导。
+_CONSERV_OBJECT_WORDS = ("考点", "知识点", "年级", "学段", "年纪")
+_CONSERV_CHANGE_VERBS = ("改", "换", "变", "成")
+
+
+def _looks_like_conservation_hit(utterance: str) -> bool:
+    """老师这句是否疑似在动「考点/年级」硬守恒（用于 clarify 文案归因，宁缺毋滥）。"""
+    s = str(utterance or "")
+    if not s:
+        return False
+    return any(v in s for v in _CONSERV_CHANGE_VERBS) and any(
+        w in s for w in _CONSERV_OBJECT_WORDS
+    )
+
+
 async def ask_clarify(state: VariantState, config: RunnableConfig) -> VariantState:
-    """三层漏斗第③层 / 答非所问兜底：撞守恒 / 说不清 → 回问（设计 §6，不改 items）。"""
+    """三层漏斗第③层 / 答非所问兜底：撞守恒 / 说不清 → 回问（设计 §6，不改 items）。
+
+    🔴 BUG-003：归因二分——真撞守恒（动考点/年级）才说守恒不可改并明示可改维度；否则只说没听懂，
+    不甩「可能撞硬守恒」误导（守恒只有考点+年级两项，题型/场景/数量/难度/解法都能改）。
+    """
     pending = state.get("pending") or {}
     utterance = pending.get("utterance") or ""
     facts = _mother_facts(state)
-    body = (
-        "我没完全 get 到你的意思（也可能撞到了不能改的硬守恒）。\n\n"
-        f"这组变式的硬守恒是：考点「{facts['kp_name']}」+ 年级「{facts['grade']}」——这两项不能改"
-        "（要换考点/年级等于换一道母题，请重新贴图）。\n\n"
+    actionable = (
         "你可以这样说：\n"
-        "- 删/重出/再加题（如「第 2 题重出」「再来 2 道难的」）\n"
-        "- 拨旋钮（数字 / 场景 / 难度 / 题型配比）\n"
+        "- 删/重出/再加题（如「第 2 题重出」「第 1 题改成选择题」「再来 2 道难的」）\n"
+        "- 拨旋钮（数字 / 场景 / 难度 / 题型配比，如「第 2 题加入杭州场景」）\n"
         "- 问解析（如「第 1 题为什么这么解」）\n"
         "- 「这组可以了」入库"
     )
+    if _looks_like_conservation_hit(utterance):
+        # 真撞守恒：明示守恒=考点+年级两项不可改，其余维度都能改
+        body = (
+            f"这组变式的硬守恒只有两项：考点「{facts['kp_name']}」+ 年级「{facts['grade']}」"
+            "——这两项不能改（换考点/换年级等于换一道母题，请重新贴图）。\n\n"
+            "**除这两项外都能改**：题型、场景、数量、难度、解法都可以拨。\n\n"
+            + actionable
+        )
+    else:
+        # 真没听懂：不甩守恒（守恒不是被撞的原因），只请老师说具体点
+        body = (
+            "我没太 get 到你想改什么，能再说具体点吗？\n\n"
+            + actionable
+        )
     if utterance:
         body += f"\n\n（你刚说的是：「{utterance}」）"
     return {"messages": [AIMessage(content=body)], "pending": None}
