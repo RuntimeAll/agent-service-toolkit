@@ -586,6 +586,134 @@ def _verify_choice(payload: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ⑦ 反退化代码闸 (PRD-C-015 批3): endpoint-degeneracy detection — PURE ALGEBRA, ZERO LLM
+# ---------------------------------------------------------------------------
+# Detect the "临界 k 陷阱" (predicted by H1 preflight as a cross-model defect):
+# a 最值/动点 construction whose optimal-solution stationary point happens to land
+# on an ENDPOINT of the moving-point's interval (e.g. 胡不归 P=B / PB=0). The
+# answer may be numerically correct but the construction mechanism has collapsed —
+# a degenerate junk variant that must trigger REGEN.
+#
+# Contract: ``check_endpoint_degeneracy(payload) -> dict`` returns
+#   {"verdict": "degenerate"|"ok"|"degrade", "detail": str, "computed": str|None}.
+# Hard rules (与 verify() 同精神):
+#   - pure function: zero LLM, zero network; any sympy failure / out-of-scope -> degrade
+#     (NEVER raises, NEVER mis-flags as degenerate) — 闸必有降级路径, 算不了 -> ⚠继续不卡死。
+#   - 判决只读代数计算结果, 永不采信 LLM 自评 (本函数压根不碰 LLM)。
+#   - 容差 (eps): 驻点在端点 eps 内 (相对区间长度归一) 才算落端点 = 退化。
+#
+# payload schema (extractor 抽不成 -> {"kind":"none"} -> 上层不判, 即降级放行):
+#   {"kind": "endpoint_extremum",
+#    "objective": "<f(t) 表达式, 单变量 t>",   # 要被最小化/最大化的目标函数
+#    "var": "t",                               # 动点参数名
+#    "interval": ["<lo>", "<hi>"],             # 动点定义区间端点 (表达式或数)
+#    "sense": "min"|"max"}                     # 求最小还是最大 (缺省 min)
+DEGENERATE = "degenerate"
+DEGEN_OK = "ok"
+# 端点判定相对容差 (归一到区间长度): |t* - 端点| / |hi - lo| < eps -> 落端点。
+_DEGEN_EPS = 1e-6
+
+
+def check_endpoint_degeneracy(payload: Any) -> dict:
+    """⑦ 反退化闸: 目标函数在动点区间上的最优点是否落在区间端点 (退化构型)。Never raises.
+
+    Returns {"verdict": "degenerate"|"ok"|"degrade", "detail": str, "computed": str|None}.
+      - degenerate: 最优点落在区间端点 (机制失效的退化废题) -> 上层 REGEN。
+      - ok        : 最优点在区间内部 (合法构型) -> 放行。
+      - degrade   : 抽不成 / 超范围 / sympy 算不了 -> 上层标 ⚠ 继续 (降级路径, 不卡死)。
+    """
+    try:
+        if not isinstance(payload, dict):
+            return _result(DEGRADE, f"payload must be a dict, got {type(payload).__name__}")
+        if payload.get("kind") != "endpoint_extremum":
+            return _result(DEGRADE, f"not an endpoint_extremum payload: {payload.get('kind')!r}")
+
+        name = str(payload.get("var") or "t").strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return _result(DEGRADE, f"invalid var name: {name!r}")
+        var = sp.Symbol(name, real=True)
+
+        # _parse builds plain Symbols (no real-assumption) -> rebind by NAME to the
+        # real-domain var so diff/solve/subs all reference the same symbol (matches
+        # the inequality_solve rebinding pattern). Compare by free-symbol NAMES.
+        objective = _parse(payload.get("objective"))
+        free_names = {s.name for s in objective.free_symbols}
+        if name not in free_names:
+            return _result(DEGRADE, f"objective does not contain var {name!r}")
+        if free_names - {name}:
+            return _result(DEGRADE, "objective has free symbols other than var (out of scope)")
+        objective = objective.subs(sp.Symbol(name), var)
+
+        interval = payload.get("interval")
+        if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+            return _result(DEGRADE, f"interval must be a [lo, hi] pair: {interval!r}")
+        lo = _to_float(_parse(interval[0]), "interval lo")
+        hi = _to_float(_parse(interval[1]), "interval hi")
+        if not (hi > lo):
+            return _result(DEGRADE, f"degenerate interval (hi must exceed lo): [{lo}, {hi}]")
+        span = hi - lo
+
+        sense = str(payload.get("sense") or "min").strip().lower()
+        if sense not in ("min", "max"):
+            return _result(DEGRADE, f"sense must be 'min' or 'max': {sense!r}")
+
+        # 候选最优点 = 内部驻点 (f'=0 在 (lo,hi) 内) + 两端点。逐个数值求目标值, 取最优。
+        try:
+            deriv = sp.diff(objective, var)
+            crit = sp.solve(sp.Eq(deriv, 0), var)
+        except Exception as exc:
+            return _result(DEGRADE, f"sympy cannot find critical points: {exc}")
+        if isinstance(crit, dict):
+            crit = [crit[var]] if var in crit else []
+
+        interior: list[float] = []
+        for c in crit:
+            if isinstance(c, (tuple, list)):
+                continue
+            try:
+                cf = _to_float(c, "critical point")
+            except _DegradeError:
+                continue  # 复根/符号根 -> 跳过该驻点 (不降级整闸)
+            if lo + _DEGEN_EPS * span < cf < hi - _DEGEN_EPS * span:
+                interior.append(cf)
+
+        def _val(t: float) -> float:
+            return _to_float(objective.subs(var, sp.Float(t)), "objective value")
+
+        candidates: list[tuple[float, float, str]] = []  # (objective_value, t, where)
+        candidates.append((_val(lo), lo, "endpoint"))
+        candidates.append((_val(hi), hi, "endpoint"))
+        for cf in interior:
+            candidates.append((_val(cf), cf, "interior"))
+
+        best = min(candidates, key=lambda x: x[0]) if sense == "min" else max(
+            candidates, key=lambda x: x[0]
+        )
+        best_val, best_t, where = best
+        # 平局判定: 若内部驻点取到与端点相同的最优值 (容差内), 视为「内部也最优」= 不退化
+        # (机制并未失效, 端点只是碰巧并列)。只有「最优值唯一在端点」才判退化。
+        tol = max(abs(best_val), 1.0) * 1e-9 + 1e-12
+        interior_best = None
+        for v, t, w in candidates:
+            if w == "interior" and abs(v - best_val) <= tol:
+                interior_best = t
+                break
+        computed = f"{sense} at {name}={best_t!r} (value={best_val!r}); interval=[{lo}, {hi}]"
+        if where == "interior" or interior_best is not None:
+            return _result(DEGEN_OK, "optimum is attained at an interior stationary point", computed)
+        return _result(
+            DEGENERATE,
+            f"optimum is attained only at interval endpoint {name}={best_t!r} "
+            "(degenerate construction — mechanism collapsed)",
+            computed,
+        )
+    except _DegradeError as exc:
+        return _result(DEGRADE, str(exc))
+    except Exception as exc:  # absolute last resort: never propagate (G5)
+        return _result(DEGRADE, f"unexpected error: {type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # public entry
 # ---------------------------------------------------------------------------
 

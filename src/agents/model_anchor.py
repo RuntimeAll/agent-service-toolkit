@@ -339,3 +339,144 @@ async def anchor_models(
         "model_warn": bool(overflow),
         "model_flag": "overflow" if overflow else None,
     }
+
+
+# ===========================================================================
+# 🔴 PRD-C-015 批3·W2' 难题注卡（模型卡片注入 GENERATE/REGEN prompt）
+# 数据源 = 词库表 biz_solution_model（trigger_feature + action_conclusion 整行，G3 逐字一致）。
+# 注卡条件矩阵（§3.2）：难度≥3 且命中**非 M00** 模型 → 注卡；难度<3 或仅 M00 → 不注。
+# 注卡是 prompt 引导（生成侧），不是判决侧——绝不混进 pass/fail（铁律）。
+# ===========================================================================
+
+# 注卡难度阈值（§3.1 拍板，默认）：母题难度 ≥ 此值才注卡。
+NOTE_CARD_DIFFICULTY_MIN = 3
+
+
+def fetch_model_cards(model_ids: list[str]) -> dict[str, dict[str, str]]:
+    """按 model id 取「模型卡片」整行（纯只读 ETL）。返回 {id: {id,name,trigger_feature,action_conclusion}}。
+
+    🔴 与反查同一只读连接（架构允许的唯一直连例外）；M00 等无表条目/库故障 → 该 id 缺省（上层容缺）。
+    模型卡片文本 = 词库表原行（G3：注入 prompt 的文本与词库表逐字一致），不在代码里改写。
+    🔴 取数失败（库未起/表不存在）→ 抛 pymysql 异常，由上层（变式注卡）兜成「不注卡」降级（不卡死出题）。
+    """
+    ids = [str(i).strip() for i in (model_ids or []) if str(i).strip()]
+    # M00 是代码兜底值（V908 有行但 trigger/action 为「保底」语义、不注卡），无需查表注卡。
+    ids = [i for i in ids if i != M00_ID]
+    if not ids:
+        return {}
+    conn = pymysql.connect(**_db_kwargs())
+    try:
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        placeholders = ",".join(["%s"] * len(ids))
+        cur.execute(
+            f"""
+            SELECT id, name, trigger_feature, action_conclusion
+            FROM biz_solution_model
+            WHERE id IN ({placeholders})
+            """,
+            tuple(ids),
+        )
+        out: dict[str, dict[str, str]] = {}
+        for r in cur.fetchall():
+            mid = str(r.get("id") or "").strip()
+            if mid:
+                out[mid] = {
+                    "id": mid,
+                    "name": str(r.get("name") or "").strip(),
+                    "trigger_feature": str(r.get("trigger_feature") or "").strip(),
+                    "action_conclusion": str(r.get("action_conclusion") or "").strip(),
+                }
+        return out
+    finally:
+        conn.close()
+
+
+# 反退化 / 反表皮缩放约束（预研 H1 实测 B 组两副作用：换皮变薄 / 最优点端点退化）。
+# 🔴 prompt 引导（生成侧），与 ⑦ 反退化代码闸（判决侧·纯代数）正交并存——这段是「让 LLM 别那样出」，
+#    代码闸是「真出了那样就 REGEN」。两条都要，不互相替代。
+ANTI_DEGEN_CLAUSE = (
+    "🔴 反退化 / 反表皮缩放硬约束（违反 = 不合格变式）：\n"
+    "① **不许换皮变薄**：变式必须保住上面模型卡片的**完整解法机制**（触发特征→动作→结论整条链），"
+    "不许只换个数字/场景却把母题的关键构造步（隐圆/对称/旋转/相似等）简化掉或绕开——"
+    "「换皮不换骨」，骨架最难步基因必须同类保留。\n"
+    "② **不许最优点退化到区间端点**：若本题是最值/动点构型（动点在某线段/区间/弧上变化），"
+    "设计数字时务必让**最优解（最大/最小值的取得点）落在动点定义区间的内部驻点**，"
+    "**严禁**让最优点恰好落在区间端点（如动点 P 与定点 B 重合、PB=0、k 取临界值使机制失效），"
+    "那是「答案碰巧对、解法机制其实失效」的退化废题，必须避免。\n"
+    "③ 数字全换且设计成解恰好整洁；解不整洁宁可再换一组数。"
+)
+
+# 反退化代码闸（⑦）的载荷契约：仅最值/动点构型才产出 degen_payload，供程序纯代数判退化
+# （最优点是否落动点区间端点）。非最值/动点题不产出此字段（缺省 = 不判退化）。
+# 🔴 与 verify_payload（答案验算）正交：那个验答案对不对，这个验构型退不退化。
+DEGEN_PAYLOAD_CONTRACT = (
+    "🔴 反退化载荷（仅当本题是**最值 / 动点构型**时额外产出，供程序纯代数判「最优点是否落区间端点」）：\n"
+    "在 JSON 里加一个 `degen_payload` 字段（不是最值/动点题就**不要**加这个字段）：\n"
+    '  {"kind":"endpoint_extremum","objective":"<目标函数 f(t)，单变量，sympy 可解析纯 ASCII>",'
+    '"var":"t","interval":["<动点区间下界>","<上界>"],"sense":"min"|"max"}\n'
+    "其中 objective = 要最小化/最大化的目标量随动点参数 t 的表达式，interval = 动点 t 的定义区间，"
+    "sense = 求最小(min)还是最大(max)。建模不出来就不要加 degen_payload。"
+)
+
+
+def build_degen_contract() -> str:
+    """⑦ 反退化载荷契约段（纯函数·供注卡块拼接）。"""
+    return DEGEN_PAYLOAD_CONTRACT
+
+
+def build_model_cards_clause(
+    cards: list[dict[str, str]], *, with_anti_degen: bool = True
+) -> str:
+    """把模型卡片拼成可注入 GENERATE/REGEN prompt 的「按模型卡片出变式」段（纯函数·可单测）。
+
+    cards = [{id,name,trigger_feature,action_conclusion}]（非空、已过滤 M00）。空 → 返回 ""（上层不注）。
+    🔴 卡片文本逐字取词库表（G3），不改写；附反退化/反表皮缩放约束（with_anti_degen）。
+    """
+    cards = [c for c in (cards or []) if isinstance(c, dict) and c.get("name")]
+    if not cards:
+        return ""
+    lines: list[str] = [
+        "🔴 解题模型卡片（这道母题命中以下解题模型，变式必须照模型卡片出——保住母题解法基因，「换皮不换骨」）："
+    ]
+    for c in cards:
+        trig = c.get("trigger_feature") or ""
+        act = c.get("action_conclusion") or ""
+        lines.append(f"- 模型「{c.get('name')}」：触发特征 = {trig}；动作 → 结论 = {act}")
+    clause = "\n".join(lines)
+    if with_anti_degen:
+        clause = clause + "\n\n" + ANTI_DEGEN_CLAUSE + "\n\n" + DEGEN_PAYLOAD_CONTRACT
+    return clause
+
+
+# ===========================================================================
+# 🔴 PRD-C-015 批3·W3' 模型守恒软警（纯代码集合判·零 LLM·不打回）
+# 变式 models ⊆ 母题 models ∪ {M00} ∪ 反查候选池 → 守恒；越界 → ⚠ + 待命名池（不打回、不阻断入库）。
+# 🔴 守恒集合按「确认集 ∪ 反查候选池」放宽（H2 处置：防 mini 欠选伴生模型致软警误报）。
+# ===========================================================================
+def model_conservation_warn(
+    variant_model_ids: list[str],
+    mother_model_ids: list[str],
+    *,
+    candidate_pool_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """W3' 守恒软警（纯函数·零 LLM·可单测）。返回 {warn:bool, out_of_set:[id...]}。
+
+    守恒集合 = 母题 models ∪ {M00} ∪ 反查候选池（H2 放宽，防欠选误报）。
+    变式 models ⊄ 守恒集合 → warn=True + out_of_set 列越界 id（上层落待命名池 + ⚠，**不打回**）。
+    🔴 变式无 models（未单独锚定，继承母题）→ 视同守恒（warn=False）；绝不因「没标」误报。
+    """
+    vids = [str(i).strip() for i in (variant_model_ids or []) if str(i).strip()]
+    if not vids:
+        return {"warn": False, "out_of_set": []}
+    allowed: set[str] = {M00_ID}
+    allowed.update(str(i).strip() for i in (mother_model_ids or []) if str(i).strip())
+    allowed.update(str(i).strip() for i in (candidate_pool_ids or []) if str(i).strip())
+    out_of_set = [i for i in vids if i not in allowed]
+    # 保序去重
+    seen: set[str] = set()
+    oos: list[str] = []
+    for i in out_of_set:
+        if i not in seen:
+            seen.add(i)
+            oos.append(i)
+    return {"warn": bool(oos), "out_of_set": oos}

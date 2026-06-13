@@ -54,6 +54,8 @@ from core import get_model, relay_pool, settings
 CONF_GATE = 0.75
 # 自愈上限（设计 §5：1 次防死循环）
 MAX_HEAL = 1
+# 🔴 PRD-C-015 批3·⑦ 反退化闸重生成上限（§1⑦：≤重生成上限，超限则弃该变式）。1 次防死循环。
+MAX_DEGEN_REGEN = 1
 
 
 def _regen_max_tokens() -> int:
@@ -1682,6 +1684,61 @@ def _conservation_clause(dna: dict | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 🔴 PRD-C-015 批3·W2' 难题注卡（模型卡片注入 GENERATE/REGEN prompt）：
+#   注卡条件矩阵（§3.2）：母题难度 ≥3（LLM rubric 档）且命中**非 M00** 模型 → 注卡；
+#   难度<3 或仅 M00 → 不注（返回 ""）。卡片文本逐字取词库表（G3）+ 反退化/反表皮缩放约束。
+# 🔴 注卡是 prompt 引导（生成侧），绝不混进 pass/fail 判决（铁律：判决只读 sympy）。
+#   反查库故障 → fetch_model_cards 抛异常被本函数兜成「不注卡」降级（不卡死出题，C-010 纪律）。
+# ---------------------------------------------------------------------------
+def _note_card_models(facts: dict) -> list[dict[str, str]]:
+    """从母题 DNA.models 取**非 M00**的模型 [{id,name}]（注卡候选）。纯函数。"""
+    dna = facts.get("dna") or {}
+    out: list[dict[str, str]] = []
+    for m in dna.get("models") or []:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        if mid and mid != model_anchor.M00_ID:
+            out.append({"id": mid, "name": str(m.get("name") or "").strip()})
+    return out
+
+
+def _should_note_card(facts: dict) -> bool:
+    """注卡条件（§3.2 矩阵）：母题难度 ≥ 阈值 且 命中非 M00 模型。纯函数·可单测。"""
+    mother_d = _to_int((facts.get("dna") or {}).get("difficulty")) or _to_int(
+        facts.get("mother_difficulty")
+    )
+    if mother_d is None or mother_d < model_anchor.NOTE_CARD_DIFFICULTY_MIN:
+        return False
+    return bool(_note_card_models(facts))
+
+
+def _model_cards_clause(facts: dict) -> str:
+    """🔴 W2' 注卡段（GENERATE/REGEN 共用单一事实源）。不满足注卡条件 / 取卡失败 → ""（不注）。
+
+    满足条件 → 反查词库表取命中模型整行 → build_model_cards_clause（卡片文本 + 反退化约束）。
+    🔴 取卡（反查库）故障 → 降级返回 ""（不注卡，照常出题，绝不卡死；G5/C-010 闸门必有降级路径）。
+    """
+    if not _should_note_card(facts):
+        return ""
+    note_models = _note_card_models(facts)
+    ids = [m["id"] for m in note_models]
+    try:
+        card_map = model_anchor.fetch_model_cards(ids)
+    except Exception:  # noqa: BLE001 — 反查库故障 → 不注卡降级（不卡死出题）
+        return ""
+    # 按 DNA.models 顺序取卡（保留锚定时的次序），缺卡的 id 跳过（不半截注入）。
+    cards = [card_map[i] for i in ids if i in card_map]
+    return model_anchor.build_model_cards_clause(cards, with_anti_degen=True)
+
+
+def _maybe_note_card_block(facts: dict) -> str:
+    """注卡段拼接器：有卡 → 前缀 "\\n\\n" 接进 prompt；无卡（不注） → ""（不留空行）。"""
+    clause = _model_cards_clause(facts)
+    return ("\n\n" + clause) if clause else ""
+
+
+# ---------------------------------------------------------------------------
 # 🔴 确定上下文硬约束块（整改1·2026-06-12，影响最大）：generate / regen / revise 所有
 # 产「题面 + 解析」的 prompt 统一注入此块。内容**全部来自 state 已锚定的确定事实**（考点 /
 # 年级学期进度 / 教材版本），不许 LLM 猜。实测痛点：老师明说「7 年级没学二元方程只能用一元
@@ -2151,6 +2208,9 @@ def _normalize_generated_item(it: dict[str, Any], facts: dict) -> dict[str, Any]
     }
     if isinstance(it.get("verify_payload"), dict):
         out["verify_payload"] = it["verify_payload"]
+    # 🔴 批3·⑦ 反退化载荷（最值/动点构型才有）随 item 流转——item 内部字段，不进帧/不入库。
+    if isinstance(it.get("degen_payload"), dict):
+        out["degen_payload"] = it["degen_payload"]
     return _sanitize_item(out)
 
 
@@ -2296,6 +2356,7 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         + _context_block(facts)  # 🔴 整改1：确定上下文硬约束（考点/进度/教材版本，压解题不越界）
         + "\n\n"
         + _conservation_clause(facts.get("dna"))  # 🔴 W2 守恒硬约束注入（T1，与上块正交并存）
+        + _maybe_note_card_block(facts)  # 🔴 批3·W2' 难题注卡（难度≥3+非M00 才注，含反退化约束）
         + recipe["spec"]
     )
 
@@ -2790,6 +2851,95 @@ async def _machine_verify(item: dict, solved_answer: Any) -> dict:
         return {"verdict": math_verify.DEGRADE, "detail": f"验算执行异常: {e}", "computed": None}
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-015 批3·⑦ 反退化代码闸（纯代数·零 LLM）：变式标答的最优解驻点落动点区间端点
+#   （退化构型，机制失效但答案碰巧对）→ 判退化废题 → 上层 REGEN（≤MAX_DEGEN_REGEN，超限弃）。
+#   判决只读 math_verify.check_endpoint_degeneracy（纯代数）返回值，**绝不采信 LLM 自评**（铁律）。
+#   闸必有降级路径：无 degen_payload / 抽不成 / sympy 算不了 → 视作「不可判·放行」（不卡死，不误杀）。
+# ---------------------------------------------------------------------------
+async def _degeneracy_verdict(item: dict) -> dict:
+    """跑反退化闸：返回 math_verify.check_endpoint_degeneracy 的结果。永不抛。
+
+    🔴 触发条件 = item 带 degen_payload（kind=endpoint_extremum，出题 LLM 对最值/动点构型同步产出）。
+    无 degen_payload / 非该 kind → degrade（= 不适用·放行，绝不误判退化）。
+    judge 只读代数返回值，零 LLM。sympy 偶有耗时 → 丢线程池 + 墙钟预算（同 _machine_verify）。
+    """
+    payload = item.get("degen_payload")
+    if not (isinstance(payload, dict) and payload.get("kind") == "endpoint_extremum"):
+        return {"verdict": math_verify.DEGRADE, "detail": "无反退化载荷（不适用·放行）", "computed": None}
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(math_verify.check_endpoint_degeneracy, payload),
+            timeout=VERIFY_TIMEOUT_S,
+        )
+    except TimeoutError:
+        return {"verdict": math_verify.DEGRADE, "detail": f"反退化判定超时（>{VERIFY_TIMEOUT_S}s），降级放行", "computed": None}
+    except Exception as e:  # noqa: BLE001 — check_endpoint_degeneracy 本身永不抛，此处纯保险
+        return {"verdict": math_verify.DEGRADE, "detail": f"反退化判定异常: {e}", "computed": None}
+
+
+async def _anti_degen_gate(
+    item: dict, facts: dict, idx: int, total: int
+) -> tuple[dict, bool]:
+    """⑦ 反退化闸（闸B 内·sympy 答案 PASS 之后跑）。返回 (item, dropped)。
+
+    退化（最优点落区间端点）→ REGEN ≤MAX_DEGEN_REGEN 次；重生稿须**非退化 + sympy 重 PASS**才采纳，
+    否则超限**弃该变式**（dropped=True，§1⑦「超限则弃」）。非退化 / 不可判（降级）→ 原样放行。
+    🔴 判决只读代数返回值；from_edit（老师点名）题不弃不换（老师意志优先，标 ⚠ 注记放行）。
+    🔴 预算耗尽 → 跳过 REGEN，标 ⚠ 放行（降级路径，不卡死）。
+    """
+    res = await _degeneracy_verdict(item)
+    if res.get("verdict") != math_verify.DEGENERATE:
+        return item, False  # 非退化 / 不可判（degrade）→ 放行（闸门降级路径）
+
+    # 已确认退化构型：老师点名编辑题不动（老师意志优先，仅标注交人审）。
+    if item.get("from_edit"):
+        _append_card_note(item, "⚠ 反退化闸：最优点落动点区间端点（退化构型），已保留老师原题交人审")
+        return item, False
+
+    attempt = 0
+    cur = item
+    while attempt < MAX_DEGEN_REGEN and not _budget_exhausted():
+        attempt += 1
+        _emit_stage("verify", "程序验算", "warn", f"第 {idx + 1} 道最优点退化到端点，回炉重生中")
+        feedback = (
+            f"程序(代数)判定该题为**退化构型**：{res.get('detail')}。"
+            "请重新出一道题面与标答自洽的等价变式，务必让最优解（最值取得点）落在**动点定义区间的内部驻点**，"
+            "严禁让最优点落在区间端点（如动点与定点重合 / 取临界值使解法机制失效）。"
+        )
+        draft = await _regen_once(cur, facts, feedback=feedback)
+        if not draft:
+            break
+        # 重生稿须：① 非退化 ② sympy 答案重 PASS（保证答案仍对）→ 才采纳。
+        d_res = await _degeneracy_verdict(draft)
+        if d_res.get("verdict") == math_verify.DEGENERATE:
+            cur = draft  # 仍退化 → 继续重生（受 MAX 上限约束）
+            res = d_res
+            continue
+        resolved = await _solve_one(draft.get("stem", ""))
+        if resolved.get("solution"):
+            draft["solution"] = resolved.get("solution")
+        r_res = await _machine_verify(draft, resolved.get("solved_answer"))
+        if r_res.get("verdict") == math_verify.PASS:
+            # 采纳非退化重生稿：保留闸A gene 印记，回写 sympy 验算 check。
+            draft["gene"] = item.get("gene") or {"gate": GENE_GATE_SKIPPED, "reason": "degen-regen"}
+            draft["check"] = {
+                "badge": "ok",
+                "solved_answer": resolved.get("solved_answer"),
+                "verify": VERIFY_SYMPY_PASS,
+                "verify_detail": r_res.get("detail"),
+                "computed": r_res.get("computed"),
+            }
+            _apply_visibility(draft)
+            return draft, False
+        cur = draft  # 重生稿非退化但答案没过 → 视同失败，继续（受 MAX 上限约束）
+
+    # 超限仍退化 / 重生失败 / 预算耗尽 → 弃该变式（§1⑦「超限则弃」）。
+    dropped = dict(cur)
+    dropped["_dropped"] = "1 道题为退化构型（最优点落动点区间端点，重生仍未脱退化），已剔除"
+    return dropped, True
+
+
 def _norm(s: Any) -> str:
     return re.sub(r"\s+", "", str(s or "")).strip().lower()
 
@@ -2914,6 +3064,8 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
                     # 🔴 W2 守恒硬约束注入（T1）：回炉重出仍守白名单/考察类型/最难步基因。
                     + "\n\n"
                     + _conservation_clause(facts.get("dna"))
+                    # 🔴 批3·W2' 注卡（回炉重出同样照模型卡片，难度≥3+非M00 才注，含反退化约束）。
+                    + _maybe_note_card_block(facts)
                 )
             ],
             # 🔴 整改4：回炉瘦身 max_tokens 上限压输出失控（出题主调用 generate/add 不动）。
@@ -2939,6 +3091,9 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
         # 4a：重生稿自带的验算载荷随新题走（旧题载荷绝不沿用——题面已换）
         if isinstance(regen.get("verify_payload"), dict):
             draft["verify_payload"] = regen["verify_payload"]
+        # 🔴 批3·⑦：重生稿自带的反退化载荷随新题走（旧题 degen 载荷绝不沿用，题面已换）。
+        if isinstance(regen.get("degen_payload"), dict):
+            draft["degen_payload"] = regen["degen_payload"]
         # 🔴 RC2：老师 note + 编辑轮印记跟草稿走，下一次 REGEN 仍能注回老师意志、仍只判不回炉
         for k in ("edit_note", "from_edit"):
             if item.get(k):
@@ -3035,6 +3190,11 @@ async def _check_one_item(
             "verify_detail": res.get("detail"),
             "computed": res.get("computed"),
         }
+        # 🔴 批3·⑦ 反退化闸：答案 sympy PASS ≠ 构型不退化（最优点落区间端点 = 答案碰巧对但机制失效）。
+        #   退化 → REGEN（≤MAX_DEGEN_REGEN，超限弃）；非退化/不可判 → 原样放行。判决只读代数零 LLM。
+        item, degen_dropped = await _anti_degen_gate(item, facts, idx, total)
+        if degen_dropped:
+            return None, str(item.get("_dropped") or "退化构型已剔除")
         _apply_visibility(item)
         return item, None
 
@@ -3244,6 +3404,43 @@ def _exam_type_conserved(item: dict, facts_i: dict) -> bool | None:
     return ve == me
 
 
+def _variant_model_ids(item: dict) -> list[str]:
+    """从变式 item 取其自身的 models id（W3' 守恒判用）。
+
+    变式当前主路径**继承母题 models**（_item_dna 回退）→ item 多数无独立 models。只有 item
+    被单独锚定 / edit-dna 改过 models（批4）时才带 item['models']。无 → []（不参与软警，不误报）。
+    """
+    out: list[str] = []
+    for m in item.get("models") or []:
+        if isinstance(m, dict):
+            mid = str(m.get("id") or "").strip()
+        else:
+            mid = str(m or "").strip()
+        if mid:
+            out.append(mid)
+    return out
+
+
+def _model_conservation_check(item: dict, facts_i: dict) -> dict[str, Any]:
+    """④ 🔴 批3·W3' 模型守恒软警（纯函数·零 LLM·**不打回**·可单测）。返回 {warn, out_of_set}。
+
+    守恒集合 = 母题 models ∪ {M00} ∪ 反查候选池（H2 放宽：候选池 = facts_i.dna.models 之外
+    DNA 携带的反查候选 model_pool，若有；防 mini 欠选伴生模型致误报）。变式无独立 models →
+    继承母题 → 视同守恒（warn=False）。判越界仅打 ⚠ 透传，绝不打回/剔题/回炉（铁律：软警不硬）。
+    """
+    dna = facts_i.get("dna") or {}
+    mother_ids = [
+        str(m.get("id") or "").strip()
+        for m in (dna.get("models") or [])
+        if isinstance(m, dict) and str(m.get("id") or "").strip()
+    ]
+    # 反查候选池（H2 放宽集）：锚定时若把候选池随 DNA 带（dna.model_pool），并入守恒集合。
+    pool = [str(x).strip() for x in (dna.get("model_pool") or []) if str(x).strip()]
+    return model_anchor.model_conservation_warn(
+        _variant_model_ids(item), mother_ids, candidate_pool_ids=pool
+    )
+
+
 def _qtype_conserved(item: dict, facts_i: dict) -> bool:
     """③ 题型守恒声明性校验（纯函数）：变式 qtype 过别名归一后与母题一致。
 
@@ -3300,12 +3497,23 @@ def gene_gate_check(item: dict, facts_i: dict) -> dict[str, Any]:
                 f"考察类型守恒破：变式「{item.get('exam_type')}」≠ 母题「{(facts_i.get('dna') or {}).get('exam_type')}」"
             )
 
+        # ④ 🔴 批3·W3' 模型守恒软警（纯代码集合判·零 LLM·**不打回**）：变式 models ⊄
+        #    母题 models ∪ {M00} ∪ 反查候选池 → 打 model_conservation flag + reason（仅 ⚠ 透传，
+        #    上层 _gene_one_item 据 flag 落待命名池）。变式无 models（继承母题）→ 不报（不误杀）。
+        cons = _model_conservation_check(item, facts_i)
+        if cons.get("warn"):
+            flags.append("model_conservation")
+            oos = "、".join(cons.get("out_of_set") or [])
+            reasons.append(f"解法模型守恒软警：变式用了母题外的解法模型「{oos}」（仅提示·不打回·待审）")
+
         if not flags:
             return {"gate": GENE_GATE_PASS, "flags": []}
         return {
             "gate": GENE_GATE_WARN,
             "flags": flags,
             "reason": "；".join(reasons) or None,
+            # 🔴 透传越界 id（上层落待命名池用；无越界 → 不带键，不污染干净 item.gene）。
+            **({"model_out_of_set": cons["out_of_set"]} if cons.get("warn") else {}),
         }
     except Exception:  # noqa: BLE001 — 闸A是增强不是关卡：三检异常一律降级放行（铁律④/G5）
         return {"gate": GENE_GATE_PASS, "flags": []}
@@ -3331,6 +3539,21 @@ async def _gene_one_item(item: dict, facts_i: dict, idx: int, total: int) -> dic
         (f"只重比第 {idx + 1} 题" if item.get("from_edit") else f"第 {idx + 1} 题比对中"),
     )
     item["gene"] = gene_gate_check(item, facts_i)
+    # 🔴 批3·W3' 越界落待命名池（含题目指针；软警不打回，仅记录可审，G4：写失败不静默）。
+    oos = (item.get("gene") or {}).get("model_out_of_set")
+    if oos:
+        dna_i = facts_i.get("dna") or {}
+        mother_ids = [
+            str(m.get("id") or "").strip()
+            for m in (dna_i.get("models") or [])
+            if isinstance(m, dict) and str(m.get("id") or "").strip()
+        ]
+        ref = str(item.get("stem") or "")[:60] or str(facts_i.get("mother_question_id") or "")
+        for name in oos:
+            try:
+                model_anchor.record_overflow_candidate(name, mother_ids, question_ref=ref)
+            except Exception:  # noqa: BLE001 — 待命名池落盘失败不拖垮出题（软警是增强不是关卡）
+                pass
     return item
 
 
