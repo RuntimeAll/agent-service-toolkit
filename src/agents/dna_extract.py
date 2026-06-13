@@ -49,6 +49,7 @@ DIFFICULTY_FALLBACK = 2  # 难度缺/非法 → 常规档兜底（NOT NULL 链�
 FLAG_MAIN_KP_OOB = "main_kp_oob"  # 主 kp 越界（锚定失败）→ 上层走 clarify
 FLAG_SECONDARY_KP_OOB = "secondary_kp_oob"  # 副 kp 越界（已丢弃该项）
 FLAG_EXAM_TYPE_OOB = "exam_type_oob"  # 考察类型出闭集（已置 None）
+FLAG_SKELETON_EMPTY = "skeleton_empty"  # 解法骨架为空（守恒基准维确定性异常·PRD-C-015 D-merge7）
 FLAG_QTYPE_OOB = "qtype_oob"  # 题型出闭集（已尽力归一/置 None）
 FLAG_DIFFICULTY_FALLBACK = "difficulty_fallback"  # 难度缺/非法 → 兜底 2
 FLAG_TAG_POOL_EMPTY = "tag_pool_empty"  # 复用池拉空（降级继续，T4）
@@ -266,8 +267,10 @@ def _validate(
         flags.append(FLAG_EXAM_TYPE_OOB)
         exam_type = None
 
-    # --- 骨架 ---
+    # --- 骨架（守恒基准维；空 = 确定性异常，PRD-C-015 D-merge7） ---
     skeleton = [str(x) for x in (raw.get("skeleton") or []) if str(x).strip()]
+    if not skeleton:
+        flags.append(FLAG_SKELETON_EMPTY)
 
     # --- 难点（克制；个数代码重算） ---
     hard_points = [str(x) for x in (raw.get("hard_points") or []) if str(x).strip()]
@@ -309,6 +312,11 @@ def _validate(
 
 def empty_dna(flags: list[str] | None = None) -> dict[str, Any]:
     """空 DNA 兜底（LLM 失败/解析失败时返回；锚定失败 → main_kp=None 触发上层 clarify）。"""
+    # 空 DNA 骨架必空 → 守恒维确定性异常 FLAG_SKELETON_EMPTY 随行（与 _validate 同口径，
+    # 不靠 LLM 自报，PRD-C-015 D-merge7）。
+    out_flags = list(flags or [])
+    if FLAG_SKELETON_EMPTY not in out_flags:
+        out_flags.append(FLAG_SKELETON_EMPTY)
     return {
         "main_kp": None,
         "secondary_kps": [],
@@ -321,7 +329,7 @@ def empty_dna(flags: list[str] | None = None) -> dict[str, Any]:
         "tag_reused_count": 0,
         "scene": "",
         "difficulty": DIFFICULTY_FALLBACK,
-        "flags": list(flags or []),
+        "flags": out_flags,
     }
 
 

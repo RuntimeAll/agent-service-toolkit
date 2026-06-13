@@ -210,6 +210,28 @@ class VariantState(MessagesState, total=False):
     #   指令原文）。不搞重型版本系统，setter 统一收口写入。
     facts_locked: bool
     facts_audit: list[dict[str, Any]]
+    # ===================================================================
+    # 🔴 PRD-C-015 批1·DNA 契约 v2 增量（在 C-014 v1 上加，不动既有字段；一次升 v2 无 v1.5）
+    # ===================================================================
+    # (a) 模型维（原双轴；批1 仅建字段占位，批2 才真填）：
+    #   mother_dna.dna.models = [{id,name}]（1~3 项，非空）由批2 model_anchor 写；
+    #   mother_dna.dna.model_overflow = [str]（池外名，⚠/待命名池用）。批1 不动 dna_extract 产物，
+    #   字段缺省即「未抽」（None/缺），下游容缺。
+    # (b) 母题守恒确认状态（块①·D-merge7 确定性异常门控·非置信非硬锁 + 缺口5 合并闸）：
+    #   mother_confirm = {
+    #     flags: [str],            # 确定性异常标记（FLAG_SECONDARY_KP_OOB/EXAM_TYPE_OOB/SKELETON_EMPTY），无逐维置信分
+    #     needs_confirm: bool,     # (flags 非空) ∨ (年级+主考点三锚没定死) → 弹合并确认面；否则直接放行
+    #     confirmed_dims: [str],   # 老师已过/改的守恒维（留痕用）
+    #     audit_ref: int | None,   # 指向 facts_audit 的索引（不另起审计表）
+    #   }
+    mother_confirm: dict[str, Any]
+    # (c) DNA 改→重生四分流·待重生态·防脏·快照（块③·批1 仅建字段，批4 才接真重生逻辑）：
+    #   - regen_class 是约定/枚举映射（哪维属哪类）= 模块级常量 REGEN_CLASS（前后端共用，不逐题落库）。
+    #   - items[i].dna_dirty: bool（重生维/骨架/models 改置位；纯元数据维改不置位）→ 致命①入库硬闸。
+    #   - items[i].regen_snapshot: 重生前快照（缺口12 撤销重生，批4 真用）。
+    #   - mother_dna.dirty: bool（母题守恒维改置位）。
+    #   - regen_dirty: 会话态，已改未重生的重生维列表（打角标；待重生集合=变式自身脏∪母题脏波及）。
+    regen_dirty: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +283,157 @@ def _fact_edit(
             "field": field,
             "old": old_value,
             "new": new_value,
+            "instruction": instruction or "",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    return True
+
+
+# ===========================================================================
+# 🔴 PRD-C-015 批1·DNA 契约 v2 地基：四分流枚举映射 + 守恒维确定性异常 + 合并确认闸
+#    + 守恒维事实源冻结 setter（_dna_fact_edit）
+# ===========================================================================
+# DNA 改→重生四分流（regen_class）：前后端共用常量、不逐题落库（§10.1(c)）。
+#   hard_anchor  【主考点/年级】→ 改 = 立即解冻重锚（不进 dirty，缺口7）
+#   soft_regen   【题型/难度/考察类型/场景】→ 改 = 标 dirty，点「重生」_regen_once 重出
+#   rewrite_solve【解法骨架/models】→ 改 = 重写解析过闸B，置 dirty 直到重写完（D-merge9）
+#   meta         【标签/副考点】→ 改 = 只标注即时生效，不进 dirty
+# 🔴 维名用 edit-dna 契约维 key（main_kp/grade/qtype/difficulty/exam_type/scene/skeleton/
+#    models/tags/secondary_kps）。批1 仅建映射；批4 据此驱动 dirty/重生。
+REGEN_CLASS: dict[str, str] = {
+    "main_kp": "hard_anchor",
+    "grade": "hard_anchor",
+    "qtype": "soft_regen",
+    "difficulty": "soft_regen",
+    "exam_type": "soft_regen",
+    "scene": "soft_regen",
+    "skeleton": "rewrite_solve",
+    "models": "rewrite_solve",
+    "tags": "meta",
+    "secondary_kps": "meta",
+}
+
+# 守恒基准维确定性异常 flag（D-merge7；与 dna_extract 同源常量，避免循环 import 各持一份引用）。
+FLAG_SECONDARY_KP_OOB = dna_extract.FLAG_SECONDARY_KP_OOB
+FLAG_EXAM_TYPE_OOB = dna_extract.FLAG_EXAM_TYPE_OOB
+FLAG_SKELETON_EMPTY = dna_extract.FLAG_SKELETON_EMPTY
+# 三个确定性异常 = 母题守恒维门控只看这三类（绝不引 LLM 自报置信，铁律「判决不信 LLM 自评」）。
+_MOTHER_CONFIRM_FLAGS: tuple[str, ...] = (
+    FLAG_SECONDARY_KP_OOB,
+    FLAG_EXAM_TYPE_OOB,
+    FLAG_SKELETON_EMPTY,
+)
+
+
+def mother_confirm_flags(dna: dict[str, Any] | None) -> list[str]:
+    """🔴 从母题 DNA 算守恒基准维的**确定性异常**（D-merge7，纯函数·零 LLM·可单测）。
+
+    只产三类，全部由代码确定性判出，**不读任何 LLM 自报置信分**：
+      - FLAG_SECONDARY_KP_OOB：副考点越界（dna_extract._validate 已在抽取时把越界副 kp 丢弃并打此 flag，
+        本函数据 DNA.flags 透出——副 kp 越界的事实只有抽取期才知道池，故采信抽取期 flag）。
+      - FLAG_EXAM_TYPE_OOB：考察类型出闭集（兼采信抽取期 flag + 当前值兜底重算：exam_type 非空且不在闭集）。
+      - FLAG_SKELETON_EMPTY：解法骨架为空（当前 DNA.skeleton 空即异常，确定性重算）。
+    返回去重列表（保持检测顺序）。dna 缺失/空 → 视同骨架为空（[FLAG_SKELETON_EMPTY]）。
+    """
+    dna = dna or {}
+    src_flags = set(dna.get("flags") or [])
+    out: list[str] = []
+
+    # 副考点越界：抽取期事实（_validate 丢弃越界副 kp 时打 flag），本函数透出。
+    if FLAG_SECONDARY_KP_OOB in src_flags:
+        out.append(FLAG_SECONDARY_KP_OOB)
+
+    # 考察类型出闭集：抽取期 flag 或 当前值确定性重算（非空且不在闭集 = 异常）。
+    exam_type = dna.get("exam_type")
+    if FLAG_EXAM_TYPE_OOB in src_flags or (
+        exam_type is not None and exam_type not in dna_extract.EXAM_TYPES
+    ):
+        out.append(FLAG_EXAM_TYPE_OOB)
+
+    # 解法骨架为空：当前 DNA 确定性重算（不信抽取期，因老师可能已补/清骨架）。
+    skeleton = [s for s in (dna.get("skeleton") or []) if str(s).strip()]
+    if not skeleton:
+        out.append(FLAG_SKELETON_EMPTY)
+
+    return out
+
+
+def build_mother_confirm(state: VariantState) -> dict[str, Any]:
+    """🔴 合并确认闸（缺口5 + D-merge7）：把【年级+主考点三锚置信门控（C-014 既有，不动）】
+    与【母题守恒维确定性异常】合并算成一份 mother_confirm 状态。
+
+    needs_confirm = (守恒维有确定性异常) ∨ (年级+主考点三锚没定死) —— 任一未达标 → 弹合并确认面
+    （一次外显三锚 + 守恒四维，不分两段问）；全达标无异常 → 直接放行出变式（非硬锁按钮，M2）。
+    🔴 年级+主考点的三锚置信门控沿用 C-014 既有 _pin_status（不并入 mother_confirm，§10.1(b)）。
+    """
+    dna = (state.get("mother_dna") or {}).get("dna") or {}
+    flags = mother_confirm_flags(dna)
+    pin = _pin_status(state)
+    needs_confirm = bool(flags) or not pin.get("pinned")
+    return {
+        "flags": flags,
+        "needs_confirm": needs_confirm,
+        # 现有确认维（批1 建字段，老师过/改时由 setter/编辑路径回填，批4/5 接 UI）
+        "confirmed_dims": list((state.get("mother_confirm") or {}).get("confirmed_dims") or []),
+        "audit_ref": (state.get("mother_confirm") or {}).get("audit_ref"),
+    }
+
+
+# 母题守恒基准维（4 维）→ 在 mother_dna.dna 里的键 + 人话名（facts_locked 扩维用，缺口6）。
+#   副考点/考察类型/难点 是标注/基准维（改不必重出母题题面）；解法骨架最难步是基因维（改=重写解析）。
+_DNA_CONSERVE_FIELDS: dict[str, str] = {
+    "secondary_kps": "副考点",
+    "exam_type": "考察类型",
+    "skeleton": "解法骨架",
+    "hard_points": "难点",
+}
+
+
+def _dna_fact_edit(
+    mother_dna: dict[str, Any],
+    field: Literal["secondary_kps", "exam_type", "skeleton", "hard_points"],
+    new_value: Any,
+    *,
+    source: Literal["teacher", "llm"],
+    locked: bool,
+    audit: list[dict[str, Any]],
+    instruction: str | None = None,
+) -> bool:
+    """🔴 缺口6·守恒维事实源冻结 setter：统一改 mother_dna.dna 的 4 个守恒维。返回是否实际写入。
+
+    与 _fact_edit（grade/kp）同语义、把冻结物理边界扩到 4 守恒维（§3.4「事实源冻结」的物理前提）：
+      - locked 后 source!="teacher"（LLM 来源）的回写 → **忽略 + warn + audit 留痕**（不静默）；
+      - 老师来源（source=="teacher"）→ 始终放行，记一条 audit（字段/旧值/新值/指令原文）。
+    🔴 只负责单向写守恒维 + 冻结拦截；不在此处置 dirty / 触发重生（那是批4 的活）。
+    """
+    if field not in _DNA_CONSERVE_FIELDS:
+        return False
+    dna = dict(mother_dna.get("dna") or {})
+    old_value = dna.get(field)
+    if locked and source != "teacher":
+        _facts_log.warning(
+            "facts_locked: 忽略 LLM 来源对守恒维 %s 的回写（new=%r）——事实源已冻结，只许老师指令改",
+            field, new_value,
+        )
+        # 冻结拦截也留 audit（区别于放行：ignored=True），便于审计「谁试图改而被挡」。
+        audit.append({
+            "field": field,
+            "old": old_value,
+            "new": new_value,
+            "source": "llm",
+            "ignored": True,
+            "instruction": instruction or "",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        return False
+    dna[field] = new_value
+    mother_dna["dna"] = dna
+    if source == "teacher":
+        audit.append({
+            "field": field,
+            "old": old_value,
+            "new": new_value,
+            "source": "teacher",
             "instruction": instruction or "",
             "ts": datetime.now(timezone.utc).isoformat(),
         })
@@ -1028,7 +1201,10 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         _emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
         # 次灯「解析配方」：锚定不可用也要给个终态，免得灯永远停在 running
         _emit_stage("knobs", "解析配方", "warn", "待老师确认母题后再定配方")
-        return {"analysis": analysis, "mother_confirmed": False, "messages": []}
+        # 锚定不可用 = 三锚没定死 → mother_confirm.needs_confirm 必 true（与正常路径同口径）。
+        early: VariantState = {"analysis": analysis, "mother_confirmed": False, "messages": []}
+        early["mother_confirm"] = build_mother_confirm({**state, **early})
+        return early
 
     # --- DNA 抽取（两步锚定第二步：LLM 池内选 id；禁造词由 dna_extract 校验闸把关） ---
     #     首锚主 kp 未知 → tag_pool 空（标签先靠 LLM 自拟），下面 T2 锚定后再注池重选。
@@ -1117,6 +1293,11 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         "facts_locked": bool(confirmed),
         "messages": [],
     }
+    # 🔴 PRD-C-015 批1·classify 注入点（缺口5 合并确认闸 + D-merge7 确定性异常门控）：
+    #   抽完母题完整 DNA 后，把「年级+主考点三锚置信门控（C-014）」与「守恒维确定性异常」合并算成
+    #   mother_confirm（needs_confirm = 有异常 ∨ 三锚没定死）。这是 §3.5 GateCheck→MergedConfirm/
+    #   EmitVariants 的算据；批4/5 接 UI 弹合并确认面 / 直接放行。批1 先把状态算齐写进契约 v2。
+    out["mother_confirm"] = build_mother_confirm({**state, **out})
     return out
 
 
@@ -4518,6 +4699,11 @@ def edit_dna_state(
     mother_dna = dict(state.get("mother_dna") or {})
     dna = dict(mother_dna.get("dna") or {})
     analysis = dict(state.get("analysis") or {})
+    # 🔴 PRD-C-015 批1·守恒维改走 facts_audit 留痕（缺口6）：edit_dna_state = 老师手动路径
+    #   （source=teacher，永远放行 + 留痕；冻结只挡 LLM 来源）。审计追加进既有 facts_audit。
+    audit = list(state.get("facts_audit") or [])
+    _audit_n0 = len(audit)
+    locked = bool(state.get("facts_locked"))
 
     if field == "main_kp":
         kp, err = _coerce_kp(value)
@@ -4546,8 +4732,11 @@ def edit_dna_state(
             sec.append(kp)
         if len(sec) > dna_extract.SECONDARY_KP_MAX:
             return {}, None, f"副知识点最多 {dna_extract.SECONDARY_KP_MAX} 个（收到 {len(sec)}）"
-        dna["secondary_kps"] = sec
-        mother_dna["dna"] = dna
+        # 守恒维 → 走冻结 setter（老师来源放行 + 留痕；缺口6）
+        _dna_fact_edit(
+            mother_dna, "secondary_kps", sec,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna",
+        )
         update["mother_dna"] = mother_dna
 
     elif field == "qtype":
@@ -4563,8 +4752,11 @@ def edit_dna_state(
         et = str(value or "").strip()
         if et not in dna_extract.EXAM_TYPES:
             return {}, None, f"非法考察类型「{value}」（合法：{'/'.join(dna_extract.EXAM_TYPES)}）"
-        dna["exam_type"] = et
-        mother_dna["dna"] = dna
+        # 守恒维 → 走冻结 setter（老师来源放行 + 留痕；缺口6）
+        _dna_fact_edit(
+            mother_dna, "exam_type", et,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna",
+        )
         update["mother_dna"] = mother_dna
 
     elif field == "difficulty":
@@ -4621,6 +4813,9 @@ def edit_dna_state(
     it["from_edit"] = True
     it["check"] = {"tier": TIER_MANUAL}
     update["items"] = new_items
+    # 🔴 批1·守恒维改追加了 facts_audit → 落回 update（缺口6 留痕）。
+    if len(audit) > _audit_n0:
+        update["facts_audit"] = audit
     return update, it, None
 
 
