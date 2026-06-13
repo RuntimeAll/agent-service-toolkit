@@ -519,6 +519,8 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
     assert art["header"] == {
         "recipe": "2 道", "kp": "一元一次方程", "grade": "七年级上学期",
         "mother_dirty": False, "regen_pending": [],
+        # 批5·合并确认面（G10/G11）：无 mother_confirm → None（向后兼容）
+        "mother_confirm": None,
     }
 
 
@@ -580,6 +582,8 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
     assert art["header"] == {
         "recipe": None, "kp": None, "grade": None,
         "mother_dirty": False, "regen_pending": [],
+        # 批5·合并确认面（G10/G11）：无 mother_confirm → None（向后兼容）
+        "mother_confirm": None,
     }
 
 

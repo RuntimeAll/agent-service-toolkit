@@ -306,6 +306,30 @@ def test_artifact_payload_dropped_item_carries_sentinel_and_stable_seq():
     assert "_seq" not in kept and "_seq" not in dropped
 
 
+def test_artifact_header_carries_mother_confirm():
+    # 🔴 批5·合并确认面（G10/G11）：state.mother_confirm 透传进 artifact header（与
+    #   mother_dirty/regen_pending 并列），FE pickMotherConfirm 解析弹面。needs_confirm
+    #   时 flags 非空 → header.mother_confirm 透传同一份 dict。
+    mc = {
+        "flags": ["FLAG_EXAM_TYPE_OOB"],
+        "needs_confirm": True,
+        "confirmed_dims": [],
+        "audit_ref": None,
+    }
+    state = {"items": [{"stem": "a"}], "mother_confirm": mc}
+    art = variant_mod._artifact_payload(state)
+    assert art["header"]["mother_confirm"] == mc
+    # needs_confirm 时 flags 必非空（合并确认面有内容可弹）
+    assert art["header"]["mother_confirm"]["needs_confirm"] is True
+    assert art["header"]["mother_confirm"]["flags"]
+
+
+def test_artifact_header_mother_confirm_absent_is_none():
+    # 缺省（无 mother_confirm）→ header 该键为 None，FE pickMotherConfirm 容缺向后兼容。
+    art = variant_mod._artifact_payload({"items": [{"stem": "a"}]})
+    assert art["header"]["mother_confirm"] is None
+
+
 # ---------------------------------------------------------------------------
 # P2 per-item concurrency: order preserved + Semaphore(3) cap
 # ---------------------------------------------------------------------------

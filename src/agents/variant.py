@@ -1064,6 +1064,10 @@ def _artifact_payload(
     #   FE 据 regen_pending 非空 → 「重生」按钮可点 + 入库按钮禁用（致命① dirty 拒入库视觉）。
     mother_dirty = bool((state.get("mother_dna") or {}).get("dirty"))
     regen_pending = dirty_item_indexes(items)
+    # 🔴 批5·合并确认面（G10/G11）数据源：透传 mother_confirm（flags/needs_confirm/
+    #   confirmed_dims/audit_ref），FE pickMotherConfirm 解析弹合并确认面。缺省 → None
+    #   （旧 FE 不读不坏，向后兼容）。
+    mother_confirm = state.get("mother_confirm") or None
     return {
         "items": out_items,
         "header": {
@@ -1073,6 +1077,8 @@ def _artifact_payload(
             # 批4·母题脏 + 待重生集合（FE 批5 用；旧 FE 不读 header 这俩键也不坏）
             "mother_dirty": mother_dirty,
             "regen_pending": regen_pending,
+            # 批5·合并确认面（G10/G11）：母题确认状态（needs_confirm 时 FE 弹面）
+            "mother_confirm": mother_confirm,
         },
     }
 
