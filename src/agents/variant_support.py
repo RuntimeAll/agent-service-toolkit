@@ -262,6 +262,15 @@ class RuoyiClient:
         """
         return await self.teacher_post("/teacher/question/create", body)
 
+    async def update_question(self, body: dict) -> Any:
+        """🔴 PRD-C-015 批4·缺口10·覆盖原行：重生后再入库 = update by id（不是新写一行）。
+
+        接口 /teacher/question/update（ruoyi-book）：按 body.id 覆盖原行的题面/答案/解析 +
+        重写 knowledges/free_tags/ai（先清后写，幂等）。owner 仍由后端 LoginHelper 校验
+        （只许改自己的题）。body.id 必填。
+        """
+        return await self.teacher_post("/teacher/question/update", body)
+
 
 # ---------------------------------------------------------------------------
 # 两步锚定·叶子池 + 标签复用池（PRD-C-014 B1·dna_extract 的生产数据源）
@@ -592,6 +601,20 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
     return bo
 
 
+def build_update_bo(item: dict[str, Any], facts: dict[str, Any], qid: Any) -> dict[str, Any]:
+    """🔴 PRD-C-015 批4·缺口10·覆盖原行 BO = build_create_bo + id（雪花大整数）。
+
+    BE /teacher/question/update 据 id 覆盖题面/答案/解析 + 重写 knowledges/free_tags/ai
+    （先清后写，幂等）。owner 由后端校验（只许改自己的题）。
+    """
+    bo = build_create_bo(item, facts)
+    try:
+        bo["id"] = int(qid)
+    except (TypeError, ValueError):
+        bo["id"] = qid
+    return bo
+
+
 def _extract_new_id(resp: Any) -> Any:
     """从 /teacher/question/create 回执宽容取雪花 id（裸 id / {id} / {questionId}）。"""
     if isinstance(resp, dict):
@@ -623,13 +646,29 @@ async def persist_items(
                 receipts.append({"ok": True, "id": mid, "role": "mother"})
             except Exception as e:  # noqa: BLE001 — 母题入库失败：变式仍照常落（血缘缺而已）
                 receipts.append({"ok": False, "error": f"母题入库失败：{e}", "role": "mother"})
-
-        # 1) 逐题入库变式（此时 facts.mother_question_id 已回填）
-        for item in items:
-            bo = build_create_bo(item, facts)
+        # 🔴 PRD-C-015 批4·缺口10·母题已入库 + 母题 DNA 改了（mother_dirty）→ update role=mother 行
+        #   同步守恒维（变式血缘基准一致）。仅当母题已有 id（在库）且本次标了脏才同步。
+        elif facts.get("mother_question_id") and facts.get("mother_dirty") and (facts.get("stem") or "").strip():
             try:
-                new_id = _extract_new_id(await client.create_question(bo))
-                receipts.append({"ok": True, "id": new_id, "role": "variant"})
+                mbo = build_mother_bo(facts)
+                mbo["id"] = int(facts["mother_question_id"]) if str(facts["mother_question_id"]).isdigit() \
+                    else facts["mother_question_id"]
+                await client.update_question(mbo)
+                receipts.append({"ok": True, "id": facts["mother_question_id"], "role": "mother", "updated": True})
+            except Exception as e:  # noqa: BLE001 — 母题同步失败：变式仍照常落
+                receipts.append({"ok": False, "error": f"母题同步失败：{e}", "role": "mother"})
+
+        # 1) 逐题入库变式（此时 facts.mother_question_id 已回填）。
+        #    🔴 缺口10·覆盖原行：item 带 _persist_id（已入库、重生后再入库）→ update by id；否则 create。
+        for item in items:
+            persist_id = item.get("_persist_id")
+            try:
+                if persist_id:
+                    new_id = _extract_new_id(await client.update_question(build_update_bo(item, facts, persist_id)))
+                    receipts.append({"ok": True, "id": new_id or persist_id, "role": "variant", "updated": True})
+                else:
+                    new_id = _extract_new_id(await client.create_question(build_create_bo(item, facts)))
+                    receipts.append({"ok": True, "id": new_id, "role": "variant"})
             except Exception as e:  # noqa: BLE001 — 单题失败如实记，不拖垮整组
                 receipts.append({"ok": False, "error": str(e), "role": "variant"})
     finally:

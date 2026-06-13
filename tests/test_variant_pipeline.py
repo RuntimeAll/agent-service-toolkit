@@ -280,10 +280,12 @@ def test_artifact_payload_never_leaks_internal_item_keys():
     assert "verify_payload" not in it and "_dropped" not in it
     assert "from_recipe" not in it and "expected_difficulty" not in it and "_seq" not in it
     # explicit whitelist: exactly the FE contract keys（含 P2b 稳定 merge 键 seq +
-    # PRD-C-014 B4 的 dna 面板嵌套对象），nothing internal
+    # PRD-C-014 B4 的 dna 面板嵌套对象 + PRD-C-015 批4 的重生态四键），nothing internal
     assert set(it) == {
         "index", "seq", "stem", "answer", "solution", "qtype", "difficulty",
         "level", "verify", "tier", "gene", "persisted", "dna",
+        # 🔴 PRD-C-015 批4·DNA 改→重生态（FE 批5 角标/重生·撤销按钮/dirty 入库拦截）
+        "dna_dirty", "dirty_dims", "mother_dirty_dims", "can_undo_regen",
     }
 
 

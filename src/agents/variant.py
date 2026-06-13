@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import copy
 import difflib
 import json
 import os
@@ -440,6 +441,123 @@ def _dna_fact_edit(
             "ts": datetime.now(timezone.utc).isoformat(),
         })
     return True
+
+
+# ===========================================================================
+# 🔴 PRD-C-015 批4·DNA 改→重生四分流状态机辅助（块③ R1/R2/R2b/R2c + 致命① + 缺口7/10/12）
+# ---------------------------------------------------------------------------
+# 四分流由 REGEN_CLASS 驱动（批1 已建映射）。本段是「改一个维 → 该做什么」的纯逻辑：
+#   - regen_class_of(field)：维 → 分流类。
+#   - mark_item_dirty / clear_item_dirty：item 级 dirty 角标增删（regen_dirty 是会话态待重生集合）。
+#   - mark_mother_dirty：母题守恒维改 → mother_dna.dirty=True + 下游变式标 dirty（D-merge8 回流）。
+#   - 重生入口 = regen_dirty_items（service.py /variant/regen 调）：对待重生集合一次性重出，
+#     保留手改 manual 维（D-merge8）；重生前存 regen_snapshot（缺口12 撤销）。
+#   - undo_regen_item（/variant/undo-regen）：item 回上一版快照。
+#   - has_dirty / persist_dirty_guard：致命① 入库防脏硬闸。
+# 🔴 判决只读 sympy（重生稿走 _check_one_item / _anti_degen_gate，批3 已接，自动复用）。
+# ===========================================================================
+
+# 软重生维（点「重生」按 _regen_once 重出整题）vs 重写解析维（只重写 solution，不重出题面）。
+_SOFT_REGEN_FIELDS: tuple[str, ...] = tuple(
+    k for k, v in REGEN_CLASS.items() if v == "soft_regen"
+)
+_REWRITE_SOLVE_FIELDS: tuple[str, ...] = tuple(
+    k for k, v in REGEN_CLASS.items() if v == "rewrite_solve"
+)
+
+
+def regen_class_of(field: str) -> str | None:
+    """维 → 四分流类（hard_anchor/soft_regen/rewrite_solve/meta）；未知维 → None。"""
+    return REGEN_CLASS.get(field)
+
+
+def _dirty_tag(field: str) -> str:
+    """item.dna_dirty 是 bool；regen_dirty（会话态待重生集合）按「idx:field」打标，
+    既记是哪道题脏、又记哪一维脏，FE 据此点角标。母题脏波及用「idx:mother:field」。
+    """
+    return field
+
+
+def mark_item_dirty(item: dict[str, Any], field: str) -> None:
+    """改了软重生维 / 重写解析维 → 置 item.dna_dirty=True 并记下脏维（dirty_dims，去重）。
+
+    🔴 元数据维（meta：tags/secondary_kps/hard_points）改不调本函数（不进 dirty，§3.2c）；
+       硬锚维（hard_anchor）改走解冻重锚路径，也不进 dirty（缺口7）。
+    """
+    item["dna_dirty"] = True
+    dims = list(item.get("dirty_dims") or [])
+    if field not in dims:
+        dims.append(field)
+    item["dirty_dims"] = dims
+
+
+def clear_item_dirty(item: dict[str, Any]) -> None:
+    """重生完成 → 清 item.dna_dirty + dirty_dims + 母题波及标记（mother_dirty_dims）。"""
+    item["dna_dirty"] = False
+    item.pop("dirty_dims", None)
+    item.pop("mother_dirty_dims", None)
+    item.pop("mother_baseline", None)
+
+
+def has_dirty(state: VariantState) -> bool:
+    """致命①：会话内是否存在 dna_dirty 的变式 或 mother_dna.dirty。"""
+    if (state.get("mother_dna") or {}).get("dirty"):
+        return True
+    return any(bool(it.get("dna_dirty")) for it in (state.get("items") or []))
+
+
+def dirty_item_indexes(items: list[dict[str, Any]]) -> list[int]:
+    """待重生集合（1-based 题号）= 所有 dna_dirty 的变式。"""
+    return [i + 1 for i, it in enumerate(items) if it.get("dna_dirty")]
+
+
+def persist_dirty_guard(state: VariantState) -> str | None:
+    """致命① 入库防脏硬闸：存在 dna_dirty 题 → 返回拒绝提示串；全 not dirty → None。
+
+    提示精确到「第 N 题」（N = 1-based 待重生题号；母题脏单列）。
+    """
+    items = state.get("items") or []
+    dirty_idx = dirty_item_indexes(items)
+    mother_dirty = bool((state.get("mother_dna") or {}).get("dirty"))
+    if not dirty_idx and not mother_dirty:
+        return None
+    parts: list[str] = []
+    if dirty_idx:
+        nums = "、".join(f"第 {n} 题" for n in dirty_idx)
+        parts.append(nums)
+    if mother_dirty:
+        parts.append("母题")
+    subjects = "、".join(parts)
+    return f"{subjects}改了还没重生，先点「重生」或「撤销重生」再入库。"
+
+
+# 守恒维改 → 下游变式要随基准变化的「母题基准维」集合（D-merge8 回流，重生时只补这些维）。
+# secondary_kps / exam_type 是守恒白名单/考察类型基准；skeleton 是基因基准；hard_points 是难点基准。
+_MOTHER_BASELINE_DIMS: tuple[str, ...] = ("secondary_kps", "exam_type", "skeleton", "hard_points")
+
+
+def mark_mother_dirty(state_mother_dna: dict[str, Any], items: list[dict[str, Any]], field: str) -> None:
+    """🔴 D-merge8·母题守恒维改 → 母题脏 + 下游变式标 dirty 不自动重出（并入待重生集合）。
+
+    - mother_dna.dirty=True（致命① 也拦母题入库 / 已入库 role=mother 行待同步）。
+    - 每道下游变式：置 dna_dirty + 记 mother_dirty_dims（哪些母题基准维波及本题）+ 存一份
+      mother_baseline 快照（重生时据它「只补母题基准变化部分、不冲掉 manual 精修」，见 regen_dirty_items）。
+    🔴 骨架（skeleton）改 = 基因变 → 走 rewrite_solve 语义（重生时变式 solution 跟新基因重写）；
+       但回流统一标 dirty，点「重生」时按维分别处置，本函数只标脏不动题面。
+    """
+    state_mother_dna["dirty"] = True
+    for it in items:
+        it["dna_dirty"] = True
+        mdims = list(it.get("mother_dirty_dims") or [])
+        if field not in mdims:
+            mdims.append(field)
+        it["mother_dirty_dims"] = mdims
+
+
+def snapshot_item(item: dict[str, Any]) -> dict[str, Any]:
+    """重生前快照（缺口12）：深拷一份 item（去掉旧 regen_snapshot 防快照套娃膨胀）。"""
+    snap = {k: v for k, v in item.items() if k != "regen_snapshot"}
+    return copy.deepcopy(snap)
 
 
 # ---------------------------------------------------------------------------
@@ -935,13 +1053,26 @@ def _artifact_payload(
         #   mergedItems 移除——不再靠「压缩 index 隐式挤掉」，避免后题 index 前移嫁接错卡。
         if it.get("_dropped"):
             cell["_dropped"] = True
+        # 🔴 PRD-C-015 批4·DNA 改→重生态透传给 FE（批5 渲染角标/重生·撤销按钮/dirty 入库拦截）：
+        #   dna_dirty=本题待重生；dirty_dims=哪些维脏（驱动逐维角标）；can_undo=有重生快照可撤销。
+        cell["dna_dirty"] = bool(it.get("dna_dirty"))
+        cell["dirty_dims"] = list(it.get("dirty_dims") or [])
+        cell["mother_dirty_dims"] = list(it.get("mother_dirty_dims") or [])
+        cell["can_undo_regen"] = isinstance(it.get("regen_snapshot"), dict)
         out_items.append(cell)
+    # 🔴 批4·组级重生态：mother_dirty（母题守恒维改）+ regen_pending（待重生集合 1-based 题号）。
+    #   FE 据 regen_pending 非空 → 「重生」按钮可点 + 入库按钮禁用（致命① dirty 拒入库视觉）。
+    mother_dirty = bool((state.get("mother_dna") or {}).get("dirty"))
+    regen_pending = dirty_item_indexes(items)
     return {
         "items": out_items,
         "header": {
             "recipe": knobs_desc(state.get("knobs")) or None,
             "kp": facts["kp_name"] if facts["kp_name"] != "未知考点" else None,
             "grade": facts["grade"] if facts["grade"] != "未知年级" else None,
+            # 批4·母题脏 + 待重生集合（FE 批5 用；旧 FE 不读 header 这俩键也不坏）
+            "mother_dirty": mother_dirty,
+            "regen_pending": regen_pending,
         },
     }
 
@@ -1567,6 +1698,8 @@ def _mother_facts(state: VariantState) -> dict:
         "subject_id": subject_l1,  # 科目锚 level1（学段学科册）
         "dim1_kp_id": anchored.get("code"),  # 主 kp 叶子 code（DNA 锚到的真知识点）
         "mother_question_id": mdna.get("mother_question_id"),
+        # 🔴 PRD-C-015 批4·缺口10：母题脏（守恒维改）→ persist_items 据此 update 已入库 role=mother 行。
+        "mother_dirty": bool(mdna.get("dirty")),
         # 🔴 图母题不在库 → 入库时先把母题(原题)也落库挂血缘，下面这几项给 build_mother_bo 用
         "mother_answer": mdna.get("answer"),
         "mother_solution": mdna.get("solution_skeleton") or mdna.get("answer"),
@@ -4674,9 +4807,19 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     if not items:
         return {"messages": [AIMessage(content="当前没有可入库的变式题。先贴图举一反三吧。")]}
 
-    # 🔴 入库簿记（PRD-C-011 G5）：persisted=true 的题跳过——入库后继续编辑再说「入库」、
-    # 或部分失败后重试「全部入库」时，只补未收录项，绝不把已落库的题重复 POST 落行。
-    pending_idx = [i for i, it in enumerate(items) if not it.get("persisted")]
+    # 🔴 PRD-C-015 批4·致命① 入库防脏硬闸（新不变量）：存在 dna_dirty 题 / 母题脏 → 拒绝入库。
+    #   与「凡进 items 必过 solve_explain」并列。提示精确到第 N 题（先点重生或撤销）。
+    dirty_msg = persist_dirty_guard(state)
+    if dirty_msg:
+        return {"messages": [AIMessage(content="⚠ 暂不能入库：" + dirty_msg)]}
+
+    # 🔴 入库簿记（PRD-C-011 G5 + 批4 缺口10）：防重判据从「persisted 跳过」改成
+    #   「persisted 且 not dirty 才跳过」。dirty 已被上面硬闸拦掉 → 此处 pending = 未入库的题；
+    #   重生后再入库走「覆盖原行 update by _persist_id」（persist_items 据 _persist_id 走 update）。
+    pending_idx = [
+        i for i, it in enumerate(items)
+        if not (it.get("persisted") and not it.get("dna_dirty"))
+    ]
     if not pending_idx:
         return {
             "messages": [
@@ -4767,8 +4910,16 @@ async def persist_one_to_bank(
         return {}, {}, f"index 越界（须 1..{len(items)}），收到 {index}"
 
     target = items[index - 1]
-    # item 级防重：已收录 → 直接回已有 id，不二次落行
-    if target.get("persisted"):
+    # 🔴 批4·致命① 入库防脏：本题脏（或母题脏波及本题）→ 拒绝单题入库。
+    if target.get("dna_dirty") or (state.get("mother_dna") or {}).get("dirty"):
+        return (
+            {},
+            {"ok": False, "error": f"第 {index} 题改了还没重生，先点「重生」或「撤销重生」再入库。"},
+            None,
+        )
+    # item 级防重（缺口10）：persisted 且 not dirty → 跳过（已收录、未改过）；
+    #   dirty 已被上面拦掉，故走到这里的 persisted 题就是干净的已收录题。
+    if target.get("persisted") and not target.get("dna_dirty"):
         return (
             {},
             {"ok": True, "id": target.get("_persist_id"), "role": "variant", "skipped": True},
@@ -4902,8 +5053,12 @@ async def reverify_item_state(
 
 # edit-dna 合法 field 白名单（与 FE 契约严格一致）。main_kp/secondary_kps 走母题级 +
 # 同步 analysis.kp（header kp + BO dim1）；grade 走 analysis.grade（header grade + BO subject_id）。
+# 🔴 PRD-C-015 批4·补齐 skeleton/hard_points/models（批1 依赖债：冻结 setter 早就位、
+#   但 edit-dna 入口此前不含此三维）。四分流由 REGEN_CLASS 驱动（hard_anchor/soft_regen/
+#   rewrite_solve/meta），edit_dna_state 据 regen_class_of(field) 置 dirty / 解冻重锚。
 _EDIT_DNA_FIELDS = {
     "main_kp", "secondary_kps", "qtype", "exam_type", "difficulty", "tags", "scene", "grade",
+    "skeleton", "hard_points", "models",
 }
 
 
@@ -5069,10 +5224,101 @@ def edit_dna_state(
         analysis["grade"] = g
         update["analysis"] = analysis
 
+    elif field == "skeleton":
+        # 🔴 批4·重写解析维（rewrite_solve，D-merge9）：解法骨架 = 母题级守恒基因。
+        #   走冻结 setter（守恒维 4/4 之一，缺口6）；落 mother_dna.dna.skeleton（list 或 str 均存）。
+        #   置 dirty 后点「重生」→ regen_dirty_items 对该题走重写解析（_rewrite_solve_once 过闸B）。
+        sk = value
+        if isinstance(sk, str):
+            sk = [s for s in sk.split("\n") if s.strip()] or [sk.strip()] if sk.strip() else []
+        elif isinstance(sk, list):
+            sk = [str(s).strip() for s in sk if str(s).strip()]
+        else:
+            return {}, None, "skeleton 必须是字符串或字符串数组"
+        _dna_fact_edit(
+            mother_dna, "skeleton", sk,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna",
+        )
+        # item 级骨架覆盖同步（_item_dna 优先读 item.skeleton，FE 面板即时反映）
+        it["skeleton"] = "\n".join(sk)
+        update["mother_dna"] = mother_dna
+
+    elif field == "hard_points":
+        # 🔴 批4·元数据维（meta）：难点是标注/基准属性，改不必重出题面、不进 dirty。
+        #   但仍是守恒 4 维之一 → 走冻结 setter 留痕（缺口6）。落 mother_dna.dna.hard_points。
+        hp = value
+        if isinstance(hp, str):
+            hp = [hp.strip()] if hp.strip() else []
+        elif isinstance(hp, list):
+            hp = [str(h).strip() for h in hp if str(h).strip()]
+        else:
+            return {}, None, "hard_points 必须是字符串或字符串数组"
+        _dna_fact_edit(
+            mother_dna, "hard_points", hp,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna",
+        )
+        it["hard_points"] = hp  # item 级覆盖（_item_dna 优先读 item）
+        update["mother_dna"] = mother_dna
+
+    elif field == "models":
+        # 🔴 批4·重写解析维（rewrite_solve，D-merge9：撤销「models=元数据维只标注」）：
+        #   改 models = 换解法 → 置 dirty，点「重生」→ 重写解析过闸B；批3 W3' 软警据新 models 自动重判。
+        #   value = [{id,name}] 或 ["M25",...]；归一成 [{id,name}]，落 item.models（题级覆盖，_item_dna 读）。
+        raw = value if isinstance(value, list) else [value]
+        models: list[dict[str, str]] = []
+        for m in raw:
+            if isinstance(m, dict):
+                mid = str(m.get("id") or "").strip()
+                nm = str(m.get("name") or "").strip()
+            else:
+                mid = str(m or "").strip()
+                nm = ""
+            if not mid and not nm:
+                continue
+            if any(x["id"] == mid and x["name"] == nm for x in models):
+                continue
+            models.append({"id": mid, "name": nm})
+        it["models"] = models  # 题级覆盖（_item_dna 优先读 item.models；母题守恒维不动）
+
+    # ===================================================================
+    # 🔴 PRD-C-015 批4·四分流路由（块③ R1 + D-merge7/8/9 + 缺口7/致命①）
+    #   据 regen_class_of(field) 决定：硬锚→解冻重锚立即 / 软重生维·重写解析维→标 dirty /
+    #   元数据维→只标注。本段在所有维写入之后统一处置 dirty / 解冻。
+    # ===================================================================
+    rclass = regen_class_of(field)
+
     # 标本题手动编辑 + check 置中性 manual（洗掉旧 verify 徽章，与 edit_item_state 同语义）
     it["manual_edited"] = True
     it["from_edit"] = True
     it["check"] = {"tier": TIER_MANUAL}
+
+    if rclass == "hard_anchor":
+        # 🔴 缺口7·硬锚【主考点/年级】改 = 解冻 + 重锚（立即，走既有 patch/classify 路径）：
+        #   清 items + mother_confirmed=False + facts_locked=False → after_patch/after_classify
+        #   触发重锚重造。不进 dirty 攒批（与软重生维分路）。
+        #   ⚠ 注意：硬锚立即重锚是「整组重出」语义，本道的 manual 改动已写进 analysis/dna 留痕，
+        #   classify 会按新锚重抽 → 此处不保留旧 items。
+        if len(audit) > _audit_n0:
+            update["facts_audit"] = audit
+        update["items"] = []
+        update["mother_confirmed"] = False
+        update["facts_locked"] = False
+        return update, it, None
+
+    if rclass in ("soft_regen", "rewrite_solve"):
+        # 软重生维【题型/难度/考察类型/场景】+ 重写解析维【骨架/models】改 → 标 dna_dirty（不立即重出）。
+        # 点「重生」→ regen_dirty_items 据 dirty_dims 分别走 _regen_once（soft）/ 重写解析（rewrite）。
+        mark_item_dirty(it, field)
+    # meta（tags/secondary_kps/hard_points）→ 不进 dirty（只标注即时生效，§3.2c）。
+
+    # 🔴 D-merge8·母题守恒维改（secondary_kps/exam_type/skeleton/hard_points 母题级）→ 母题脏 +
+    #   下游所有变式标 dirty 不自动重出（并入待重生集合）。注意 hard_points 虽是 meta（自身不脏），
+    #   但作为母题守恒基准维改了仍要波及下游（基准变了）；secondary_kps 同理（meta 但母题级守恒）。
+    if field in _DNA_CONSERVE_FIELDS and field != "main_kp":
+        mother_dna["dirty"] = True
+        mark_mother_dirty(mother_dna, new_items, field)
+        update["mother_dna"] = mother_dna
+
     update["items"] = new_items
     # 🔴 批1·守恒维改追加了 facts_audit → 落回 update（缺口6 留痕）。
     if len(audit) > _audit_n0:
@@ -5228,6 +5474,209 @@ async def revise_item(
     it["check"] = {"tier": TIER_MANUAL}
     update["items"] = new_items
     return update, {"ok": True}, None
+
+
+# ===========================================================================
+# 🔴 PRD-C-015 批4·手动重生 / 撤销重生（块③ R1/R2/R2b + D-merge6/8 + 缺口12）
+# ---------------------------------------------------------------------------
+# 老师改完软重生维 / 重写解析维（攒批标 dirty）→ 点「重生」按钮 → regen_dirty_items 对
+# **待重生集合**（所有 dna_dirty 题）一次性重出，保留手改 manual 维（D-merge8）→ 清 dirty。
+# 重生前每道题存 regen_snapshot（缺口12），「撤销重生」回上一版。
+# 🔴 判决只读 sympy：重生稿走 _check_one_item（闸B + 批3 反退化闸自动复用）。
+# ===========================================================================
+
+# 重写解析 prompt（rewrite_solve 维：骨架/models 改 → 按新解法重写 solution，不动题面/答案）。
+_REWRITE_SOLVE_PROMPT = (
+    """你是浙教版初中数学命题专家。老师改了这道题的**解法基准（解法骨架 / 解题模型）**，
+要求按新基准**重写解析（solution）**，但**题干、标准答案、题型一律不动**（只换"怎么解"的写法，
+不换"题目"和"答案"）。
+
+母题考点(硬守恒): {kp_name}
+年级(硬守恒): {grade}
+题干(不动): {stem}
+标准答案(不动): {answer}
+新解法骨架(老师定): {skeleton}
+新解题模型(老师定): {models}
+
+只输出一个 JSON（不要解释）：
+{{"solution": "按新解法骨架/模型重写的解析全文（要能推出上面那个标准答案）"}}
+🔴 重写后的解析必须仍然推得出题面给定的标准答案；不要改题目、不要改答案。"""
+)
+
+
+async def _rewrite_solve_once(item: dict, facts: dict) -> str | None:
+    """重写解析维（skeleton/models 改）：按新基准重写 solution（题面/答案不动）。返回新 solution 文本。
+
+    LLM 异常 / 解析不出 → None（上层降级保留原解析，G5）。判分不受影响（题面+答案没变，
+    闸B 重验仍验原答案对不对）。
+    """
+    dna = facts.get("dna") or {}
+    sk_raw = item.get("skeleton")
+    if sk_raw is None:
+        sk_raw = dna.get("skeleton")
+    if isinstance(sk_raw, list):
+        skeleton = "\n".join(str(s) for s in sk_raw if str(s).strip())
+    else:
+        skeleton = str(sk_raw or "")
+    models_raw = item.get("models") if item.get("models") is not None else dna.get("models")
+    models_txt = "、".join(
+        str(m.get("name") or m.get("id") or "")
+        for m in (models_raw or [])
+        if isinstance(m, dict)
+    ) or "（无指定模型）"
+    prompt = _REWRITE_SOLVE_PROMPT.format(
+        kp_name=facts["kp_name"],
+        grade=facts["grade"],
+        stem=str(item.get("stem") or ""),
+        answer=str(item.get("answer") or ""),
+        skeleton=skeleton or "（老师未填具体骨架步骤）",
+        models=models_txt,
+    )
+    prompt = prompt + "\n\n" + _context_block(facts)
+    try:
+        text = await _ainvoke_text(
+            [HumanMessage(content=prompt)], model=settings.variant_model("generate")
+        )
+    except Exception:  # noqa: BLE001 — 重写解析是增强，LLM 异常 → 降级保留原解析（G5）
+        return None
+    parsed = _parse_json(text)
+    if isinstance(parsed, dict) and str(parsed.get("solution") or "").strip():
+        return _sanitize_rich_text(str(parsed["solution"]))
+    return None
+
+
+def _merge_preserve_manual(
+    regen_item: dict[str, Any], old_item: dict[str, Any], mother_dirty_dims: list[str]
+) -> dict[str, Any]:
+    """🔴 D-merge8 核心·重生时保留手改、不被母题基准覆盖。
+
+    思路：重生稿（regen_item）= 按新母题基准 + 软重生维重出的题面/解析；老师此前对**本题**手改过
+    （manual_edited 的题级维：题型/难度/场景/题面/解析手输）要保住，重生只补「母题基准变化部分」。
+    实现 = 题级 manual 维以 old_item 为准覆盖回 regen_item（仅当老师确实手改过该题，manual_edited=True）：
+      - 老师没手改过本题（纯母题脏波及）→ 全量吃重生稿（按新基准重出，无手改要保）。
+      - 老师手改过本题 → 题级手改维（qtype/difficulty/level + 老师手输的 stem/answer/solution 若 manual）
+        保留 old，其余（受母题基准影响的解析/骨架口径）吃重生稿。
+    🔴 母题脏波及维（mother_dirty_dims，如 skeleton/exam_type）= 必须更新的母题基准 → 不在保留之列。
+    """
+    if not old_item.get("manual_edited"):
+        return regen_item  # 没手改 → 全量吃新基准重生稿
+    merged = dict(regen_item)
+    # 题级手改维：老师调过的题型/难度 = 本题专属意志，重生不冲（除非该维本身是母题脏波及维）。
+    for k in ("qtype", "difficulty", "level"):
+        if k not in mother_dirty_dims and old_item.get(k) is not None:
+            merged[k] = old_item[k]
+    # 保留手改印记（重生后仍是「手改过 + 已按新基准补」的题）。
+    merged["manual_edited"] = True
+    return merged
+
+
+async def regen_dirty_items(
+    state: VariantState, indexes: list[int] | None = None
+) -> tuple[VariantState, dict[str, Any], str | None]:
+    """🔴 手动「重生」入口（D-merge6/8 + 缺口12）：对待重生集合（dna_dirty 题）一次性重出。
+
+    - indexes=None → 全待重生集合（dirty_item_indexes）；给定 indexes → 只重生这些（仍须是 dirty 题）。
+    - 每道 dirty 题：① 存 regen_snapshot（缺口12 撤销用）② 按脏维分流重出：
+        · 含软重生维（题型/难度/考察类型/场景）→ _regen_once 重出整题 + _check_one_item 闸B（批3
+          反退化闸自动复用）；
+        · 仅重写解析维（骨架/models）脏 → _rewrite_solve_once 只重写解析 + _check_one_item 闸B 重验。
+      ③ 保留手改不被母题基准覆盖（_merge_preserve_manual，D-merge8）④ 清 dirty。
+    - 🔴 重生后该题 persisted 保留但因内容已变 → 入库走「覆盖原行 update by _persist_id」（缺口10，
+      persist_items 据 _persist_id 走 update_question；见 persist_to_bank/persist_items）。
+    返回 (update, result{regenerated:[idx], failed:[{idx,error}]}, error)。无 dirty → (空, {...}, None)。
+    """
+    items = list(state.get("items") or [])
+    facts = _mother_facts(state)
+    if not items:
+        return {}, {"regenerated": [], "failed": []}, None
+    targets = indexes if indexes else dirty_item_indexes(items)
+    # 过滤：只重生确实 dirty 的（防误触发非脏题重出）
+    targets = [n for n in targets if 1 <= n <= len(items) and items[n - 1].get("dna_dirty")]
+    if not targets:
+        return {}, {"regenerated": [], "failed": []}, None
+
+    new_items = [dict(it) for it in items]
+    regenerated: list[int] = []
+    failed: list[dict[str, Any]] = []
+
+    for n in targets:
+        old = new_items[n - 1]
+        snapshot = snapshot_item(old)
+        dirty_dims = list(old.get("dirty_dims") or [])
+        mother_dims = list(old.get("mother_dirty_dims") or [])
+        # 本题脏维涉及软重生维 → 整题重出；否则（仅 rewrite_solve 维脏）→ 只重写解析。
+        all_dims = set(dirty_dims) | set(mother_dims)
+        need_full_regen = any(d in _SOFT_REGEN_FIELDS for d in all_dims)
+
+        try:
+            if need_full_regen:
+                seed = dict(old)
+                seed["from_edit"] = True  # 闸B 见 from_edit：FAIL 不回炉换题，保留打 ⚠
+                draft = await _regen_once(seed, facts, feedback=None)
+                if not draft:
+                    failed.append({"index": n, "error": "重出失败（模型未返回有效题目），已保留原题"})
+                    continue
+                draft["from_edit"] = True
+                # 配方印记 + 入库簿记跟题走（重出仍占原槽位；_persist_id 留着 → 入库走覆盖）
+                for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id", "level"):
+                    if old.get(k) is not None:
+                        draft[k] = old[k]
+                draft.pop("check", None)
+                rechecked, _dropped = await _check_one_item(draft, facts, n - 1, len(new_items))
+                final = rechecked if rechecked is not None else draft
+                final = _merge_preserve_manual(final, old, mother_dims)
+                _format_item_stem(final)
+            else:
+                # 仅重写解析维（骨架/models）脏 → 题面/答案不动，只重写 solution + 闸B 重验。
+                new_solution = await _rewrite_solve_once(old, facts)
+                final = dict(old)
+                if new_solution:
+                    final["solution"] = new_solution
+                final["from_edit"] = True
+                final.pop("check", None)
+                rechecked, _dropped = await _check_one_item(final, facts, n - 1, len(new_items))
+                final = rechecked if rechecked is not None else final
+                _format_item_stem(final)
+        except Exception as e:  # noqa: BLE001 — 单题重生异常 → 记 failed，保留原题不丢（G5）
+            failed.append({"index": n, "error": f"重生异常，已保留原题：{e}"})
+            continue
+
+        # 重生成功：存快照（撤销用）+ 清 dirty + 标 manual（重生过的题）
+        final["regen_snapshot"] = snapshot
+        final["manual_edited"] = True
+        clear_item_dirty(final)
+        new_items[n - 1] = final
+        regenerated.append(n)
+
+    update: VariantState = {"items": new_items}
+    # 🔴 D-merge8·母题脏：全待重生集合都重生完（无指定 indexes 或 indexes 已覆盖所有 dirty）→ 清母题脏。
+    remaining_dirty = dirty_item_indexes(new_items)
+    if not remaining_dirty and (state.get("mother_dna") or {}).get("dirty"):
+        md = dict(state.get("mother_dna") or {})
+        md["dirty"] = False
+        update["mother_dna"] = md
+    return update, {"regenerated": regenerated, "failed": failed}, None
+
+
+def undo_regen_item(
+    state: VariantState, index: int
+) -> tuple[VariantState, dict[str, Any] | None, str | None]:
+    """🔴 撤销重生（缺口12）：第 index 道（1-based）回上一版重生前快照（regen_snapshot）。
+
+    无快照（没重生过）→ (空, None, 错误串)。回上版后清掉该快照（一次撤销一版，不串版本）。
+    返回 (update, restored_item, error)。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
+    cur = items[index - 1]
+    snap = cur.get("regen_snapshot")
+    if not isinstance(snap, dict):
+        return {}, None, f"第 {index} 题没有可撤销的重生记录（未重生过）。"
+    new_items = [dict(it) for it in items]
+    restored = copy.deepcopy(snap)
+    new_items[index - 1] = restored  # 整体回上版（含 dirty 状态、manual 印记，与重生前一致）
+    return {"items": new_items}, restored, None
 
 
 # --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------

@@ -507,11 +507,19 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
             "model_warn": False,
             "manual_edited": False,
         },
+        # 🔴 PRD-C-015 批4·重生态四键（裸 item 无脏 → 全 False/空）。
+        "dna_dirty": False,
+        "dirty_dims": [],
+        "mother_dirty_dims": [],
+        "can_undo_regen": False,
     }
     assert art["items"][1]["index"] == 2
     assert art["items"][1]["level"] == "hard"
-    # header：recipe 来自 knobs_desc，kp/grade 来自 analysis
-    assert art["header"] == {"recipe": "2 道", "kp": "一元一次方程", "grade": "七年级上学期"}
+    # header：recipe 来自 knobs_desc，kp/grade 来自 analysis（+ 批4 母题脏/待重生集合）
+    assert art["header"] == {
+        "recipe": "2 道", "kp": "一元一次方程", "grade": "七年级上学期",
+        "mother_dirty": False, "regen_pending": [],
+    }
 
 
 def test_artifact_verify_falls_back_to_review_for_proof_items(monkeypatch):
@@ -562,9 +570,17 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
             "model_warn": False,
             "manual_edited": False,
         },
+        # 🔴 PRD-C-015 批4·重生态四键（裸题无脏 → 全 False/空）。
+        "dna_dirty": False,
+        "dirty_dims": [],
+        "mother_dirty_dims": [],
+        "can_undo_regen": False,
     }
-    # 缺省哨兵值（未知考点/未知年级）→ None 化；空 knobs → recipe None
-    assert art["header"] == {"recipe": None, "kp": None, "grade": None}
+    # 缺省哨兵值（未知考点/未知年级）→ None 化；空 knobs → recipe None（+ 批4 母题脏/待重生集合）
+    assert art["header"] == {
+        "recipe": None, "kp": None, "grade": None,
+        "mother_dirty": False, "regen_pending": [],
+    }
 
 
 def test_persist_emits_artifact_with_per_item_persisted_flags(monkeypatch):

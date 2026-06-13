@@ -720,6 +720,72 @@ async def variant_revise(input: VariantReviseInput) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
+# ---------------------------------------------------------------------------
+# PRD-C-015 批4·DNA 改→重生两端点：regen（手动重生待重生集合）/ undo-regen（撤销重生）。
+# 同直连范式（aget_state → variant.py 纯逻辑 → aupdate_state(as_node) → _artifact_payload）。
+# 🔴 重生走有界 LLM（_regen_once/重写解析）+ 闸B sympy 重验（判决只读 verdict，铁律不破）；
+#    撤销重生零 LLM（回快照）。题组是会话态、重生不落库 → 无需 ruoyi_token。
+# ---------------------------------------------------------------------------
+class VariantRegenInput(BaseModel):
+    """手动「重生」请求：indexes=可选 1-based 题号子集（None/空=全待重生集合）。"""
+
+    thread_id: str
+    indexes: list[int] | None = None
+
+
+class VariantUndoRegenInput(BaseModel):
+    """「撤销重生」请求：index=1-based，回该题上一版重生前快照。"""
+
+    thread_id: str
+    index: int
+
+
+@router.post("/variant/regen")
+async def variant_regen(input: VariantRegenInput) -> dict[str, Any]:
+    """手动「重生」（D-merge6/8 + 缺口12）：对待重生集合（dna_dirty 题）一次性重出/重写解析。
+
+    软重生维脏→_regen_once 整题重出+闸B；仅重写解析维脏→只重写 solution+闸B 重验；保留手改
+    （manual 维不被母题基准覆盖）；重生前存快照（撤销用）；重生后清 dirty。无 dirty → 空操作。
+    返回 {ok, regenerated:[idx], failed:[{idx,error}], artifact}。
+    """
+    from agents.variant import _artifact_payload, regen_dirty_items
+
+    agent: AgentGraph = get_agent("variant")
+    cfg = RunnableConfig(configurable={"thread_id": input.thread_id})
+    try:
+        snapshot = await agent.aget_state(config=cfg)
+        values: dict[str, Any] = snapshot.values or {}
+        update, result, error = await regen_dirty_items(values, input.indexes)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        if update:
+            await agent.aupdate_state(cfg, update, as_node="exec_regenerate")
+        merged = {**values, **update}
+        return {
+            "ok": True,
+            "regenerated": result.get("regenerated") or [],
+            "failed": result.get("failed") or [],
+            "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"variant_regen error: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error")
+
+
+@router.post("/variant/undo-regen")
+async def variant_undo_regen(input: VariantUndoRegenInput) -> dict[str, Any]:
+    """「撤销重生」（缺口12，零 LLM）：第 index 道回上一版重生前快照。无快照 → 400。"""
+    from agents.variant import undo_regen_item
+
+    def _fn(values):
+        update, _item, error = undo_regen_item(values, input.index)
+        return update, error
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

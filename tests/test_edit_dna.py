@@ -90,10 +90,14 @@ def test_edit_dna_main_kp_updates_dna_and_analysis(monkeypatch):
     assert kp["value"] == "二元一次方程"
     assert kp["anchored"] == {"id": "30710202", "code": "30710202", "name": "二元一次方程"}
     assert kp["confidence"] == 1.0  # 老师手动锚定最高优先
-    # BO dim1 落到新 kp
+    # 🔴 PRD-C-015 批4·缺口7·硬锚【主考点】改 = 立即解冻重锚（走既有 patch 路径）：
+    #   清 items + mother_confirmed=False + facts_locked=False（不进 dirty 攒批）。
+    assert update["items"] == []
+    assert update["mother_confirmed"] is False
+    assert update["facts_locked"] is False
+    # BO dim1 落到新 kp（重锚后下一轮 classify→generate 据新 analysis.kp 出题）
     facts = _mother_facts({**state, **update})
-    bo = build_create_bo(update["items"][0], facts)
-    assert bo["dim1KpId"] == "30710202"
+    assert facts["dim1_kp_id"] == "30710202"
 
 
 def test_edit_dna_main_kp_accepts_bare_code(monkeypatch):
@@ -212,9 +216,12 @@ def test_edit_dna_grade_updates_header_and_subject_id(monkeypatch):
     assert g["value"] == "八年级上学期"
     assert g["confidence"] == 1.0  # 老师手动最高优先
     assert g["code"] == "3081"  # _grade_to_code 同步 → BO subjectId 源
+    # 🔴 PRD-C-015 批4·缺口7·硬锚【年级】改 = 立即解冻重锚（同 main_kp）：清 items + 解冻。
+    assert update["items"] == []
+    assert update["mother_confirmed"] is False
+    assert update["facts_locked"] is False
     facts = _mother_facts({**state, **update})
-    bo = build_create_bo(update["items"][0], facts)
-    assert bo["subjectId"] == "3081"
+    assert facts["subject_id"] == "3081"  # 重锚后据新年级 code → BO subjectId 源
 
 
 # ===========================================================================
