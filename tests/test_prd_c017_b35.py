@@ -141,6 +141,7 @@ def test_build_mother_card_all_fields_present():
     assert card is not None
     # —— 顶层 §10 ——
     assert card["stem"] == "解方程 $2x+3=7$"            # 🔴 stem 必带（入库靠它）
+    assert card["analysis"] == "移项得 $2x=4$"          # 🔴 opus 解析富文本（入库存它，非骨架顶替）
     assert "解一元一次方程" in card["solution_skeleton"]  # 解法骨架（【】标最难步）
     assert card["solved_answer"] == "$x=2$"             # opus 解答
     # —— dna 10 维 ——
@@ -174,6 +175,21 @@ def test_build_mother_card_none_when_no_mother_dna():
     """无 mother_dna（库内母题直进 generate）→ None（不发帧，FE 走 items[0] 兜底）。"""
     assert _build_mother_card({**_BASE, "mother_dna": {}}) is None
     assert _build_mother_card({"analysis": {}}) is None
+
+
+def test_build_mother_card_analysis_from_mother_dna():
+    """🔴 minor-1 修复：母题卡顶层 analysis = mdna.analysis（opus 解析富文本），
+    缺则 None（不报错）—— 入库存完整解析，非 solution_skeleton 骨架顶替。"""
+    # 有 analysis → 原样带出（取自 mother_dna.analysis）
+    card = _build_mother_card(_full_state())
+    assert card["analysis"] == "移项得 $2x=4$"
+    # analysis 与 solution_skeleton 是两个独立字段，不互相顶替
+    assert card["analysis"] != card["solution_skeleton"]
+    # 缺 analysis → None（不抛、不拿骨架顶）
+    st = _full_state()
+    st["mother_dna"].pop("analysis", None)
+    card2 = _build_mother_card(st)
+    assert card2["analysis"] is None
 
 
 def test_build_mother_card_need_anchor_review_propagates():

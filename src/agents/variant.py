@@ -1258,6 +1258,7 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
     return {
         # 顶层（FE pickMotherCard 直读）
         "stem": str(mdna.get("stem") or "") or None,  # 🔴 入库靠它，缺则入库被拦
+        "analysis": str(mdna.get("analysis") or "") or None,  # 🔴 opus 解析富文本（入库存它，非骨架顶替）
         "solution_skeleton": solution_skeleton,
         "solved_answer": str(mdna.get("solved_answer") or "") or None,
         "qtype": str(dna.get("qtype") or "") or None,
