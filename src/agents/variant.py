@@ -1184,6 +1184,135 @@ def _emit_artifact(
 
 
 # ---------------------------------------------------------------------------
+# 🔴 PRD-C-017 B3.5·母题卡专帧（mother_card「先出」）——契约 §10 / AC4 / G12。
+# 心智：classify(opus 解题打标) → generate(变式) **直连**，旧路母题 DNA 只能从变式
+#   items[0].dna（组级共享）外显，母题做不到真正「先出」，且母题题面/solved_answer/副考点 id/
+#   anchor 章 id/need_anchor_review 在 items 里缺失 → 母题入库被拦。本帧在 classify 末尾
+#   （opus 产出 mother_dna 之后、generate 之前）单发一帧，把母题卡全字段提前外显。
+#
+# 🔴 帧机制 = 复用 _emit_artifact 的 custom 帧 header 透传：放进 artifact.header.mother_card
+#   （与 mother_confirm 同载体），FE pickMotherCard 路①优先读 header.mother_card。
+# 🔴 时序「先出」= 在 classify return 前 emit；classify→generate(出 items) 是后续节点，
+#   故本帧必早于任何变式 item 帧。
+# 🔴 复用 classify 已产出的 mother_dna（含 opus dna/解答/锚定），绝不重调 opus。
+# ---------------------------------------------------------------------------
+def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
+    """组母题卡 payload（契约 §10）。纯函数·零 IO（可单测）。
+
+    数据源 = state.mother_dna（B1 classify 写入：stem/answer/analysis/solution_skeleton/
+    solved_answer + dna 契约 v1 + need_anchor_review）+ analysis（年级/锚定）+ confirmed_chapter_id。
+    无 mother_dna（库内母题直进 generate / 早退路径）→ 返回 None（调用方不发帧，FE 走 items[0] 兜底）。
+
+    🔴 dna 子对象键名对齐 FE pickDna：main_kp=考点名(str)、main_kp_id=叶子 id、
+       secondary_kps=[{id,name}]（FE strArr 取 name、顶层抠 id 作 secondaryKpIds）、
+       exam_type/skeleton/hard_points/tags/scene/models。母题骨架 list → 换行拼 str（与 _item_dna 同）。
+    """
+    mdna = state.get("mother_dna") or {}
+    if not mdna:
+        return None
+    dna = mdna.get("dna") or {}
+    if not isinstance(dna, dict):
+        dna = {}
+    analysis = state.get("analysis") or {}
+    grade_node = analysis.get("grade") or {}
+
+    main_kp_obj = dna.get("main_kp") or {}
+    if not isinstance(main_kp_obj, dict):
+        main_kp_obj = {}
+    main_kp_name = str(main_kp_obj.get("name") or "") or None
+    main_kp_id = str(main_kp_obj.get("id") or "") or None
+
+    secondary_kps = _norm_secondary_kps(dna.get("secondary_kps"))
+
+    # 母题骨架：dna.skeleton 是 list[str]（opus 步骤序列）→ FE 要 str，换行拼（与 _item_dna 同）。
+    skeleton_raw = dna.get("skeleton")
+    if isinstance(skeleton_raw, list):
+        skeleton = "\n".join(str(s) for s in skeleton_raw if str(s).strip())
+    else:
+        skeleton = str(skeleton_raw or "")
+    # 母题题面/解答优先取 opus 富文本骨架字段，其次 mother_dna.solution_skeleton。
+    solution_skeleton = mdna.get("solution_skeleton") or skeleton or None
+
+    models = [
+        {"id": str(m.get("id") or ""), "name": str(m.get("name") or "")}
+        for m in (dna.get("models") or [])
+        if isinstance(m, dict) and (m.get("id") or m.get("name"))
+    ]
+
+    difficulty = dna.get("difficulty")
+    if difficulty is None:
+        difficulty = mdna.get("difficulty")
+
+    # need_anchor_review：闸B 留空标记（mother_dna 或 dna 任一标了即为真）。
+    need_review = bool(mdna.get("need_anchor_review") or dna.get("need_anchor_review"))
+
+    # anchor 章 id：B2 确认章优先（confirmed_chapter_id），缺则年级册 code 前缀。
+    chapter_id = (
+        str(state.get("confirmed_chapter_id") or "").strip()
+        or str(grade_node.get("code") or "").strip()
+        or None
+    )
+    grade_book_id = str(grade_node.get("code") or "").strip() or None
+    confidence = grade_node.get("confidence")
+
+    return {
+        # 顶层（FE pickMotherCard 直读）
+        "stem": str(mdna.get("stem") or "") or None,  # 🔴 入库靠它，缺则入库被拦
+        "solution_skeleton": solution_skeleton,
+        "solved_answer": str(mdna.get("solved_answer") or "") or None,
+        "qtype": str(dna.get("qtype") or "") or None,
+        "difficulty": difficulty if isinstance(difficulty, int) else None,
+        "main_kp": main_kp_name,  # anchorKp（考点名）
+        "need_anchor_review": need_review,
+        # 10 维 DNA（FE pickDna 解析；键名对齐 _item_dna）
+        "dna": {
+            "main_kp": main_kp_name,
+            "main_kp_id": main_kp_id,
+            "secondary_kps": secondary_kps,  # [{id,name}]：FE 取 name + 顶层抠 id
+            "qtype": str(dna.get("qtype") or "") or None,
+            "exam_type": str(dna.get("exam_type") or "") or None,
+            "difficulty": difficulty if isinstance(difficulty, int) else None,
+            "scenario": str(dna.get("scene") or "") or None,
+            "hard_point_count": int(dna.get("hard_point_count") or len(dna.get("hard_points") or [])),
+            "breakthrough_points": [str(h) for h in (dna.get("hard_points") or []) if str(h).strip()],
+            "hard_points": [str(h) for h in (dna.get("hard_points") or []) if str(h).strip()],
+            "skeleton": skeleton or None,
+            "models": models,
+            "tags": [str(t) for t in (dna.get("tags") or []) if str(t).strip()],
+        },
+        # 锚定（FE anchor.chapter_id → anchorChapterId）
+        "anchor": {
+            "grade_book_id": grade_book_id,
+            "chapter_id": chapter_id,
+            "confidence": confidence if isinstance(confidence, (int, float)) else None,
+            "need_anchor_review": need_review,
+        },
+    }
+
+
+def _emit_mother_card(state: VariantState) -> None:
+    """发母题卡专帧（mother_card「先出」·AC4/G12）。机制 = custom 帧 header.mother_card 透传
+    （复用 _emit_artifact 的 header 载体，FE pickMotherCard 路①）。items 留空 → 本帧只携母题卡，
+    早于任何变式 item 帧。同 _emit_stage 双层静默吞：无 runtime context / 组卡为空 → no-op。"""
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001 — 无 runtime context（单测直调节点）→ 静默 no-op
+        return
+    try:
+        card = _build_mother_card(state)
+        if not card:
+            return  # 无 mother_dna（库内母题直进 generate）→ 不发，FE 走 items[0] 兜底
+        writer(
+            ChatMessage(
+                content=[{"artifact": {"items": [], "header": {"mother_card": card}}}],
+                role="custom",
+            )
+        )
+    except Exception:  # noqa: BLE001 — 发送失败绝不炸节点（母题卡是增强不是关卡）
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Router（入口分诊：登录? 有图? 在途母题? 库内母题跳 analyze/classify）
 # ---------------------------------------------------------------------------
 def route_entry(
@@ -1724,6 +1853,11 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     #   mother_confirm（needs_confirm = 有异常 ∨ 三锚没定死）。这是 §3.5 GateCheck→MergedConfirm/
     #   EmitVariants 的算据；批4/5 接 UI 弹合并确认面 / 直接放行。批1 先把状态算齐写进契约 v2。
     out["mother_confirm"] = build_mother_confirm({**state, **out})
+    # 🔴 PRD-C-017 B3.5·母题卡「先出」专帧（AC4/G12）：opus 已产出 mother_dna（含解答/10维DNA/锚定），
+    #   在 classify return 前（generate 出 items 之前）单发一帧 header.mother_card，让母题卡早于变式
+    #   渲染、且携全字段（stem/solved_answer/副考点 id/anchor 章 id/need_anchor_review）供入库。
+    #   复用 mother_dna（绝不重调 opus）；{**state,**out} 让组卡读到本轮最终 mother_dna/confirmed_chapter_id。
+    _emit_mother_card({**state, **out})
     return out
 
 
