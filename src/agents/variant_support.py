@@ -303,6 +303,41 @@ def _non_review_leaves(leaves: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(i, n) for i, n in leaves if not _is_review_book(i)]
 
 
+def _collect_nodes_by_id(tree: Any) -> dict[str, str]:
+    """递归把整棵树压成 {id: name}（含非叶子内部节点，给 M7 按 chapter_id 反查章名用）。纯函数。"""
+    out: dict[str, str] = {}
+
+    def walk(nodes: Any) -> None:
+        for n in nodes or []:
+            if not isinstance(n, dict):
+                continue
+            nid = str(n.get("id", "")).strip()
+            if nid:
+                out[nid] = str(n.get("name", "")).strip()
+            walk(n.get("children") or [])
+
+    walk(tree if isinstance(tree, list) else [])
+    return out
+
+
+async def chapter_name_for_id(chapter_id: Any, client: RuoyiClient) -> str | None:
+    """按 chapter_id（biz_subject 节点 id，通常是 level2 章 id）反查章名。
+
+    🔴 M7：聚合/复习章识别需要章**名**（_is_review_book 只判 4 位册前缀，拦不住册内聚合章）。
+    走既有 lazyTree HTTP 取树（不新写 pymysql），整树压平按 id 命中。拉不到/无命中 → None
+    （上层据此降级：拿不到章名就不当聚合章处置，宁可不排除也不误排）。
+    """
+    cid = str(chapter_id or "").strip()
+    if not cid:
+        return None
+    try:
+        tree = await client.lazy_tree({})
+    except Exception:  # noqa: BLE001 — 树拉不到 → None（上层降级）
+        return None
+    by_id = _collect_nodes_by_id(tree)
+    return by_id.get(cid)
+
+
 async def leaf_pool_for_grade(
     grade_code: str | None, client: RuoyiClient, *, include_review_books: bool = False
 ) -> list[tuple[str, str]]:

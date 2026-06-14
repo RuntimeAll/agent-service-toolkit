@@ -39,12 +39,20 @@ from langchain_core.runnables.config import ensure_config
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents import conv_trace, dna_extract, math_verify, model_anchor, mother_opus
+from agents import (
+    conv_trace,
+    dna_extract,
+    math_verify,
+    model_anchor,
+    mother_opus,
+    mother_precheck,
+)
 from agents.qtype_format import format_by_qtype
 from agents.variant_support import (
     RuoyiClient,
     _is_review_book,
     anchor_subject,
+    chapter_name_for_id,
     leaf_pool_for_grade,
     persist_items,
 )
@@ -179,6 +187,16 @@ class VariantState(MessagesState, total=False):
     analysis: dict[str, Any]
     mother_dna: dict[str, Any]
     mother_confirmed: bool
+    # 🔴 PRD-C-017 B2·母题 nano 前置判（年级册+章+带图）。analyze 后、classify 前由 mother_precheck
+    #   节点写。awaiting_mother_confirm=True = 已发 needConfirm 停下等老师确认（复用 clarify→END
+    #   chat-resume，不引 LangGraph interrupt）。下一轮老师确认（confirmed_chapter_id 经 config 回传）→
+    #   route 直奔 classify。mother_rejected=True = 带图打回（终止流程，不调 opus、不出变式）。
+    #   confirmed_chapter_id/confirmed_grade_book_id = 老师确认后的章/年级册 id（接 classify 闸B）。
+    mother_precheck: dict[str, Any] | None
+    awaiting_mother_confirm: bool
+    mother_rejected: bool
+    confirmed_chapter_id: str | None
+    confirmed_grade_book_id: str | None
     # items[{stem, answer, solution, qtype, difficulty, level, injected_kp?,
     #        check:{badge:ok|warn, solved_answer}  ← 闸B(solve_explain)填,
     #        gene:{gate:pass|warn|skipped, reason?} ← 闸A(gene_gate)填}]
@@ -956,6 +974,36 @@ def _emit_error(reason: str, message: str) -> None:
         pass
 
 
+def _emit_need_confirm(payload: dict[str, Any]) -> None:
+    """发 SSE needConfirm 事件（PRD-C-017 B2·决策表「母题每次必停弹窗」）。
+
+    payload 契约（FE pickNeedConfirm 解析弹窗）：
+      {grade_book:{id,name}, chapter:{id,name}, grade_candidates:[{id?,name}], chapter_candidates:[...]}。
+    🔴 无条件停（不是低置信才停）；候选为空也发（让老师手选）。
+    与 _emit_stage 同双层静默吞（无 runtime context / writer 抛 → no-op，不炸节点）。"""
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        writer(ChatMessage(content=[{"needConfirm": payload}], role="custom"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _emit_reject(reason: str, message: str) -> None:
+    """发 SSE reject 事件（PRD-C-017 B2·G13 带图打回）。含图题终止流程，不调 opus、不出变式。
+    契约 = ChatMessage(role="custom", content=[{"reject": {reason, message}}])，同双层静默吞。"""
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        writer(ChatMessage(content=[{"reject": {"reason": reason, "message": message}}], role="custom"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------------
 # artifact 快照帧（PRD-C-011 Bucket 3）：FE 题卡数据源 = 本帧，不 parse markdown。
 # 契约（BE/FE 严格一致）：ChatMessage(role="custom", content=[{"artifact": {
@@ -1140,7 +1188,7 @@ def _emit_artifact(
 # ---------------------------------------------------------------------------
 def route_entry(
     state: VariantState, config: RunnableConfig
-) -> Literal["analyze", "parse", "generate", "ask", "auth"]:
+) -> Literal["analyze", "parse", "generate", "ask", "auth", "classify"]:
     # 🔴 身份硬闸（用户拍板 2026-06-11）：每次对话绑死登录老师。token 缺失/解不出 userId
     # → 一步不走（不进任何 LLM 节点，conv_trace 也不会产生无主行；表级 NOT NULL 双保险）。
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
@@ -1150,6 +1198,14 @@ def route_entry(
     # 跨轮新图 = 视作新母题（设计 §6：重走 analyze，覆盖在途状态）
     if url:
         return "analyze"
+    # 🔴 PRD-C-017 B2·母题确认 resume（复用 chat-resume，不引 interrupt）：上一轮 mother_precheck
+    #   发了 needConfirm 停在等确认（awaiting_mother_confirm），本轮老师**经 config 回传确认章 id**
+    #   （confirmed_chapter_id）→ 直奔 classify（带确认章接闸B）。老师若改成纯文字纠正（没回 id）→
+    #   落下面 parse 分诊（既有在途母题 mother_correction → patch 重锚路径），不在此拦。
+    if state.get("awaiting_mother_confirm"):
+        cfg = (config or {}).get("configurable") or {}
+        if cfg.get("confirmed_chapter_id"):
+            return "classify"
     # 库内母题（已确认 DNA）、还没出题 → 直接造（跳 analyze/classify）
     if state.get("mother_confirmed") and state.get("mother_dna") and not state.get("items"):
         return "generate"
@@ -1307,7 +1363,85 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
         "mother_dna": mother_dna,
         "knobs": knobs,
         "shape_defects": [],
+        # 🔴 B2：新母题轮重置前置判态（旧母题的 needConfirm/reject/确认 id 绝不带进新图）
+        "mother_precheck": None,
+        "awaiting_mother_confirm": False,
+        "mother_rejected": False,
+        "confirmed_chapter_id": None,
+        "confirmed_grade_book_id": None,
         "messages": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-017 B2·母题 nano 前置判（analyze 后、classify 前）：
+#   ① 读母题原图判「年级册 + 章」（+ 候选）→ 发 needConfirm，**无条件停**等老师确认（复用
+#      clarify→END chat-resume，不引 LangGraph interrupt）。候选为空也发（让老师全手选）。
+#   ② 顺手判题面**是否含图形/图表/几何图**（拍照纯文本题不算）→ 含图 → 发 reject 终止流程
+#      （不发 needConfirm、不调 opus、不出变式）。false-positive 偏保守（拿不准当纯文本放行）。
+# ---------------------------------------------------------------------------
+async def mother_precheck_node(state: VariantState, config: RunnableConfig) -> VariantState:
+    """nano 前置判 年级册+章+带图。带图 → reject 终止；否则 → needConfirm 停等确认。"""
+    analysis = dict(state.get("analysis") or {})
+    image_url = state.get("image_url") or ""
+    grade_hint = (analysis.get("grade") or {}).get("value")
+
+    _emit_stage("classify", "锚定考点", "running", "判定年级与章…")
+    try:
+        pre = await mother_precheck.precheck_judge(
+            image_url=image_url,
+            invoke=_ainvoke_text,
+            model=settings.LLM_MODEL_LIGHT,  # gpt-5.4-nano（前置判轻活，复用 B0 探针 nano）
+            grade_text_hint=grade_hint,
+            parse_json=_parse_json,
+            max_tokens=settings.VARIANT_MAX_TOKENS,
+        )
+    except Exception as e:  # noqa: BLE001 — 前置判失败 → 不静默放行带图、不静默进 opus；
+        # 退化为「全手选」needConfirm（候选空 + has_figure=False 偏保守），让老师确认后再走 classify。
+        analysis["_precheck_error"] = str(e)
+        pre = {
+            "grade_book": grade_hint or "", "chapter": "",
+            "grade_candidates": [], "chapter_candidates": [],
+            "has_figure": False, "confidence": 0.0,
+        }
+
+    # --- ① 带图打回（G13）：含图 → reject 终止流程（不发 needConfirm、不调 opus、不出变式） ---
+    if pre.get("has_figure") is True:
+        _emit_stage("classify", "锚定考点", "warn", "题面含图形，举一反三暂不支持")
+        _emit_reject("with_figure", "举一反三暂不支持带图题")
+        return {
+            "analysis": analysis,
+            "mother_precheck": pre,
+            "mother_rejected": True,
+            "awaiting_mother_confirm": False,
+            "mother_confirmed": False,
+            "messages": [AIMessage(content="这道题题面含图形（几何图/函数图象/统计图等），举一反三暂不支持带图题，请换一道纯文字题。")],
+        }
+
+    # --- ② 必停确认（G1）：无条件发 needConfirm（候选空也发），停等老师确认（clarify→END resume） ---
+    payload = {
+        "grade_book": {"id": "", "name": pre.get("grade_book") or ""},
+        "chapter": {"id": "", "name": pre.get("chapter") or ""},
+        "grade_candidates": [{"id": "", "name": n} for n in (pre.get("grade_candidates") or [])],
+        "chapter_candidates": [{"id": "", "name": n} for n in (pre.get("chapter_candidates") or [])],
+        "confidence": pre.get("confidence"),
+    }
+    _emit_need_confirm(payload)
+    _emit_stage("classify", "锚定考点", "warn", "请确认年级与章后继续")
+    grade_line = pre.get("grade_book") or "（未判出，请手选）"
+    chapter_line = pre.get("chapter") or "（未判出，请手选）"
+    body = (
+        "我先判了一下母题的范围，**请确认年级册与章**再继续举一反三：\n\n"
+        f"- 年级册：**{grade_line}**\n- 章：**{chapter_line}**\n\n"
+        "确认无误请回复「确认」，需要修改请直接告诉我正确的年级/章。"
+    )
+    return {
+        "analysis": analysis,
+        "mother_precheck": pre,
+        "awaiting_mother_confirm": True,
+        "mother_rejected": False,
+        "mother_confirmed": False,
+        "messages": [AIMessage(content=body)],
     }
 
 
@@ -1387,13 +1521,33 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     #   → opus 是唯一安全网：走 mother_solve_label 档（启动期 fail-fast 已锁 opus）+ 低温 0.1 +
     #   response_format 硬锁 schema + 超时 ≤180s；超时/失败 → SSE error，绝不静默退 gpt-5.4。
     #
-    #   🔴 闸B 章范围参数化：chapter_id 暂用 classify 既有年级/章来源（B2 接「老师确认章」入参）。
-    #   现状代码只锚到年级（无 level2 章节确认），故 chapter_id = 年级册 4 位 code（grade_code）作前缀；
-    #   anchor_to_chapter 按此前缀做越界校验。B2 改成传老师确认章 id 即收窄到章。
-    chapter_id = grade_code  # B1：年级册前缀；B2 接老师确认章 id
+    #   🔴 PRD-C-017 B2·闸B 章范围参数化：老师确认章 id（confirmed_chapter_id，经 config/state 回传）
+    #   优先 → 收窄到章前缀；老师没给（旧线程/降级）→ 回退年级册 4 位 code（grade_code）作前缀。
+    #   anchor_to_chapter 按此前缀做越界校验，opus 选的叶子 id 必以确认章 id 为前缀，越界拒/降级标注。
+    confirmed_chapter_id = (
+        ((config or {}).get("configurable") or {}).get("confirmed_chapter_id")
+        or state.get("confirmed_chapter_id")
+    )
+    confirmed_chapter_id = str(confirmed_chapter_id).strip() if confirmed_chapter_id else None
+    chapter_id = confirmed_chapter_id or grade_code  # B2：确认章 id 优先；回退年级册前缀
+
+    # --- 🔴 M7（PRD-C-017 B2）·聚合/复习章排除：确认章若是册内 level2「中考一轮复习/期末专题/
+    #   专题」（跨章大杂烩，误锚=制造想消灭的跨章串题 L-03 critical）→ 不拿它当锚定范围（降回年级册
+    #   前缀），并标记。chapter_name_for_id 走既有 lazyTree 反查章名（拉不到 → 不当聚合章处置，
+    #   宁可不排除也不误排）。
     chapter_text = (analysis.get("chapter") or {}).get("value") if isinstance(
         analysis.get("chapter"), dict
     ) else None
+    if confirmed_chapter_id:
+        chap_name = await chapter_name_for_id(confirmed_chapter_id, client)
+        if chap_name:
+            chapter_text = chapter_text or chap_name
+        if mother_precheck.is_aggregation_chapter_name(chap_name):
+            # 聚合章 → 排除其作锚定范围（降回年级册前缀），标记 + 告知
+            analysis["_aggregation_chapter_excluded"] = chap_name or confirmed_chapter_id
+            chapter_id = grade_code  # 不以聚合章 id 为前缀锚（防跨章串题）
+            _emit_stage("classify", "锚定考点", "warn",
+                        f"「{chap_name}」是聚合/复习章，已按年级册范围锚定（防跨章串题）")
 
     image_url = state.get("image_url")
     opus_model = settings.variant_model("mother_solve_label")  # G3：母题必命中 opus（fail-fast 已锁）
@@ -1559,6 +1713,10 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         "mother_dna": mother_dna,
         "mother_confirmed": bool(confirmed),
         "facts_locked": bool(confirmed),
+        # 🔴 B2：进入 classify = 母题确认环节已过（resume 或首图无确认阻断）→ 清确认等待态，
+        #   留痕本次确认章 id（接闸B 用），防下一轮再被 route 当成在途确认。
+        "awaiting_mother_confirm": False,
+        "confirmed_chapter_id": confirmed_chapter_id,
         "messages": [],
     }
     # 🔴 PRD-C-015 批1·classify 注入点（缺口5 合并确认闸 + D-merge7 确定性异常门控）：
@@ -5814,6 +5972,7 @@ async def ask_for_image(state: VariantState, config: RunnableConfig) -> VariantS
 # ---------------------------------------------------------------------------
 graph = StateGraph(VariantState)
 graph.add_node("analyze", analyze)
+graph.add_node("mother_precheck", mother_precheck_node)  # B2·nano 前置判 年级章+带图（必停确认/打回）
 graph.add_node("classify", classify)
 graph.add_node("clarify", clarify)
 graph.add_node("generate", generate)
@@ -5840,6 +5999,8 @@ graph.set_conditional_entry_point(
         "analyze": "analyze",
         "generate": "generate",
         "parse": "parse_instruction",
+        # 🔴 B2·母题确认 resume（config 回传确认章 id）→ 直奔 classify（带确认章接闸B）
+        "classify": "classify",
         # 🔴 'ask' 必落真节点（ask_for_image），不能直连 END —— 否则首轮无节点产消息，回复为空
         "ask": "ask_for_image",
         # 🔴 身份硬闸：无登录态 → 提示重登（同上，必落真节点）
@@ -5849,15 +6010,21 @@ graph.set_conditional_entry_point(
 graph.add_edge("ask_for_image", END)
 graph.add_edge("require_login", END)
 
-# analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → classify
-def after_analyze(state: VariantState) -> Literal["classify", "done"]:
+# analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → mother_precheck（B2 前置判）
+def after_analyze(state: VariantState) -> Literal["mother_precheck", "done"]:
     # analyze 友好报错时会塞 messages（且未产 analysis）→ 结束本轮等待
     if not state.get("analysis"):
         return "done"
-    return "classify"
+    return "mother_precheck"
 
 
-graph.add_conditional_edges("analyze", after_analyze, {"classify": "classify", "done": END})
+graph.add_conditional_edges(
+    "analyze", after_analyze, {"mother_precheck": "mother_precheck", "done": END}
+)
+
+# mother_precheck（B2）：带图打回 → END（reject 已发）；否则发 needConfirm 停等确认 → END
+# （复用 clarify→END chat-resume，下一轮老师确认经 config 回传确认章 id → route 直奔 classify）。
+graph.add_edge("mother_precheck", END)
 graph.add_conditional_edges(
     "classify", gate_after_classify, {"generate": "generate", "clarify": "clarify"}
 )
