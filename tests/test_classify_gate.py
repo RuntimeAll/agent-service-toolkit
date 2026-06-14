@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """PRD-C-014 B1 · classify 两步锚定 + DNA 闸（mock LLM/IO，零网络）。
 
+🔴 PRD-C-017 B1 更新：classify 母题 DNA 来源从 nano dna_extract 改为 opus 合并解题打标
+（mother_opus.solve_and_label）。本测把 LLM 桩从 extract_dna 改为 solve_and_label（返回 opus
+JSON 文本），判据不变（锚到主 kp → generate；锚不到 → clarify；空池 → clarify 且不调 LLM）。
+
 🔴 核心判据（根治 C-013 凭 LLM 置信裸放行落 0）：
 - 池内锚到主 kp → anchored.code 有值 → mother_confirmed=True → gate_after_classify=generate；
-- 池内无匹配（main_kp=None）→ anchored 缺失 → mother_confirmed=False → clarify（不放行出题）；
+- 池内无匹配（main_kp 越界/留空）→ anchored 缺失 → mother_confirmed=False → clarify（不放行出题）；
 - 库/网络故障（叶子池拉空）→ 锚定不可用 → mother_confirmed=False → clarify，不 silent-fail
   误判为成功；
 - subjectId 科目锚 level1（年级册 code）；dim1KpId = 主 kp 叶子 code（DNA 锚定产物）；
@@ -12,12 +16,14 @@
 """
 
 import asyncio
+import json
 
 import agents.variant as variant_mod
 from agents.variant import classify, gate_after_classify
 from agents.variant_support import build_create_bo
 
 _BASE_STATE = {
+    "image_url": "https://x/q.png",
     "analysis": {
         "grade": {"value": "七年级上学期", "confidence": 0.9},
         "kp": {"value": "一元一次方程", "confidence": 0.4},  # 低置信，待锚
@@ -28,6 +34,36 @@ _BASE_STATE = {
 
 _POOL = [("3071001001001", "一元一次方程"), ("3071001001002", "合并同类项")]
 
+# opus 合并输出（锚到池内主 kp）— mother_opus.solve_and_label 的返回文本
+_GOOD_OPUS = {
+    "has_figure": False,
+    "richText": {"stem": "2x+3=7", "answer": "x=2", "solution": "移项得 2x=4，x=2"},
+    "solvedAnswer": "x=2",
+    "dna": {
+        "primaryKp": {"id": "3071001001001", "name": "一元一次方程"},
+        "secondaryKps": [{"id": "3071001001002", "name": "合并同类项"}],
+        "qtype": "解答", "assessmentType": "直接计算",
+        "solutionSkeleton": ["移项", "求解"],
+        "hardPointCount": 0, "breakthroughPoints": [],
+        "scenario": "纯代数", "difficulty": 2,
+        "tags": ["解方程", "移项变号"], "modelCandidates": [],
+    },
+}
+
+# opus 选了池外/不存在的 kp → 闸B 锚不到 → 留空 + need_anchor_review（宁空不凑）
+_FAIL_OPUS = {
+    "has_figure": False,
+    "richText": {"stem": "x", "answer": "a", "solution": "s"},
+    "solvedAnswer": "a",
+    "dna": {
+        "primaryKp": {"id": "9999999999999", "name": "不存在的考点"},
+        "secondaryKps": [], "qtype": "解答", "assessmentType": "直接计算",
+        "solutionSkeleton": ["步骤"], "hardPointCount": 0, "breakthroughPoints": [],
+        "scenario": "纯代数", "difficulty": 2, "tags": ["t"], "modelCandidates": [],
+    },
+}
+
+# 旧 _GOOD_DNA / _FAIL_DNA 形态（内部 DNA 契约 v1）仍被 BO 测复用
 _GOOD_DNA = {
     "main_kp": {"id": "3071001001001", "name": "一元一次方程"},
     "secondary_kps": [{"id": "3071001001002", "name": "合并同类项"}],
@@ -52,18 +88,19 @@ class _FakeClient:
         pass
 
 
-def _patch(monkeypatch, *, pool, dna):
+def _patch(monkeypatch, *, pool, opus):
     monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
     monkeypatch.setattr(variant_mod, "_emit_stage", lambda *a, **k: None)
+    monkeypatch.setattr(variant_mod, "_emit_error", lambda *a, **k: None)
 
     async def fake_leaf_pool(grade_code, client, **kw):
         return pool
 
-    async def fake_extract(**kw):
-        return dna
+    async def fake_solve(**kw):
+        return json.dumps(opus, ensure_ascii=False)
 
     monkeypatch.setattr(variant_mod, "leaf_pool_for_grade", fake_leaf_pool)
-    monkeypatch.setattr(variant_mod.dna_extract, "extract_dna", fake_extract)
+    monkeypatch.setattr(variant_mod.mother_opus, "solve_and_label", fake_solve)
 
     # 🔴 PRD-C-015 批2：classify 现会跑 model_anchor（连库反查 + LLM 确认）。单测桩成确定性 M00 兜底
     #   （零库零 LLM），避免连真库；models 维非空契约由 batch2 专测覆盖，这里只保 classify 主链不破。
@@ -78,20 +115,23 @@ def _patch(monkeypatch, *, pool, dna):
 # 锚定成功 → generate
 # ---------------------------------------------------------------------------
 def test_classify_anchors_then_generate(monkeypatch):
-    _patch(monkeypatch, pool=_POOL, dna=_GOOD_DNA)
+    _patch(monkeypatch, pool=_POOL, opus=_GOOD_OPUS)
     out = asyncio.run(classify(dict(_BASE_STATE), {}))
     assert out["mother_confirmed"] is True
     assert out["analysis"]["kp"]["anchored"]["code"] == "3071001001001"
     assert gate_after_classify(out) == "generate"
     # DNA 穿进 mother_dna.dna，供 _mother_facts → BO
     assert out["mother_dna"]["dna"]["main_kp"]["id"] == "3071001001001"
+    # 🔴 G4：opus 解答骨架进 mother_dna（solution_skeleton 来源 = opus 解答，非抄图）
+    assert out["mother_dna"]["mother_solve_source"] == "opus"
+    assert out["mother_dna"]["solution_skeleton"] == "移项\n求解"
 
 
 # ---------------------------------------------------------------------------
 # 🔴 池内无匹配 → clarify（不放行出题）
 # ---------------------------------------------------------------------------
 def test_classify_no_pool_match_goes_clarify(monkeypatch):
-    _patch(monkeypatch, pool=_POOL, dna=_FAIL_DNA)
+    _patch(monkeypatch, pool=_POOL, opus=_FAIL_OPUS)
     out = asyncio.run(classify(dict(_BASE_STATE), {}))
     assert out["mother_confirmed"] is False
     assert not (out["analysis"]["kp"].get("anchored"))  # 锚定缺失
@@ -102,18 +142,18 @@ def test_classify_no_pool_match_goes_clarify(monkeypatch):
 # 🔴 库/网络故障（空池）→ clarify，不 silent-fail 误判成功
 # ---------------------------------------------------------------------------
 def test_classify_empty_pool_degrades_to_clarify(monkeypatch):
-    _patch(monkeypatch, pool=[], dna=_GOOD_DNA)  # 空池：即便 DNA 桩好，也不该锚定
-    called = {"extract": False}
+    _patch(monkeypatch, pool=[], opus=_GOOD_OPUS)  # 空池：即便 opus 桩好，也不该锚定
+    called = {"solve": False}
 
-    async def fake_extract(**kw):
-        called["extract"] = True
-        return _GOOD_DNA
+    async def fake_solve(**kw):
+        called["solve"] = True
+        return "{}"
 
-    monkeypatch.setattr(variant_mod.dna_extract, "extract_dna", fake_extract)
+    monkeypatch.setattr(variant_mod.mother_opus, "solve_and_label", fake_solve)
     out = asyncio.run(classify(dict(_BASE_STATE), {}))
     assert out["mother_confirmed"] is False
     assert gate_after_classify(out) == "clarify"
-    assert called["extract"] is False  # 空池直接降级，连 LLM 都不调（不 silent-fail）
+    assert called["solve"] is False  # 空池直接降级，连 opus 都不调（不 silent-fail，省钱）
     assert "_anchor_error" in out["analysis"]
 
 
@@ -135,7 +175,7 @@ def test_classify_leaf_pool_fetch_raises_degrades_to_clarify(monkeypatch):
 # BO 对准新 8 表：新增键 + subjectId/dim1KpId 分级 + 删除三件套
 # ---------------------------------------------------------------------------
 def test_bo_carries_new_dna_keys_and_split_anchors(monkeypatch):
-    _patch(monkeypatch, pool=_POOL, dna=_GOOD_DNA)
+    _patch(monkeypatch, pool=_POOL, opus=_GOOD_OPUS)
     out = asyncio.run(classify(dict(_BASE_STATE), {}))
     facts = variant_mod._mother_facts(out)
     # subjectId = 科目锚 level1（年级册 3071），dim1KpId = 主 kp 叶子 code

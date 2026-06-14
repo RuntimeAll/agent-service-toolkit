@@ -206,29 +206,39 @@ def test_analyze_emits_warn_on_non_question_image(monkeypatch):
 
 
 def test_classify_emits_done_with_kp_and_grade(monkeypatch):
-    # B1 两步锚定：年级 → 叶子池（HTTP）→ dna_extract 池内选 id。
-    # 全部 IO/LLM 打桩：lazy_tree 返回该年级一棵带叶子的树；extract_dna 返回锚到主 kp 的 DNA。
+    # PRD-C-017 B1：classify 母题 DNA 来源 = opus 合并解题打标（mother_opus.solve_and_label）。
+    # 全部 IO/LLM 打桩：leaf_pool 返回该年级叶子；solve_and_label 返回锚到主 kp 的 opus JSON。
+    import json as _json
     calls = _record_stages(monkeypatch)
     monkeypatch.setattr(variant_mod, "anchor_subject", lambda coarse, *a, **k: [])
 
     async def fake_leaf_pool(grade_code, client, **kw):
         return [("3071001001001", "一元一次方程")]
 
-    async def fake_extract(**kw):
-        return {
-            "main_kp": {"id": "3071001001001", "name": "一元一次方程"},
-            "secondary_kps": [], "qtype": "解答", "exam_type": "直接计算",
-            "skeleton": ["移项", "合并"], "hard_points": [], "hard_point_count": 0,
-            "tags": ["解方程"], "tag_reused_count": 0, "scene": "纯代数",
-            "difficulty": 3, "flags": [],
-        }
+    async def fake_solve(**kw):
+        return _json.dumps({
+            "has_figure": False,
+            "richText": {"stem": "母题题干", "answer": "x=1", "analysis": "移项合并"},
+            "solvedAnswer": "x=1",
+            "dna": {
+                "primaryKp": {"id": "3071001001001", "name": "一元一次方程"},
+                "secondaryKps": [], "qtype": "解答", "assessmentType": "直接计算",
+                "solutionSkeleton": ["移项", "合并"], "hardPointCount": 0,
+                "breakthroughPoints": [], "scenario": "纯代数", "difficulty": 3,
+                "tags": ["解方程"], "modelCandidates": [],
+            },
+        }, ensure_ascii=False)
+
+    async def fake_anchor(dna, **kw):
+        return {"models": [dict(variant_mod.model_anchor.M00)], "model_overflow": [],
+                "model_warn": False, "model_flag": "m00_fallback"}
 
     monkeypatch.setattr(variant_mod, "leaf_pool_for_grade", fake_leaf_pool)
-    monkeypatch.setattr(variant_mod, "tag_pool_for_kp", lambda *a, **k: _async_empty())
-    monkeypatch.setattr(variant_mod.dna_extract, "extract_dna", fake_extract)
+    monkeypatch.setattr(variant_mod.mother_opus, "solve_and_label", fake_solve)
+    monkeypatch.setattr(variant_mod.model_anchor, "anchor_models", fake_anchor)
     monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
 
-    state = dict(_FACTS_STATE)
+    state = dict(_FACTS_STATE, image_url="https://x/q.png")
     out = asyncio.run(classify(state, {}))
     assert out["mother_confirmed"] is True
     # 🔴 改动2：首灯 running 已由 analyze 点亮 → classify 不重发 running（防绿→running 回闪），

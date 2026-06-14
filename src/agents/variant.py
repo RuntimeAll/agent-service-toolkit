@@ -39,7 +39,7 @@ from langchain_core.runnables.config import ensure_config
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, MessagesState, StateGraph
 
-from agents import conv_trace, dna_extract, math_verify, model_anchor
+from agents import conv_trace, dna_extract, math_verify, model_anchor, mother_opus
 from agents.qtype_format import format_by_qtype
 from agents.variant_support import (
     RuoyiClient,
@@ -47,7 +47,6 @@ from agents.variant_support import (
     anchor_subject,
     leaf_pool_for_grade,
     persist_items,
-    tag_pool_for_kp,
 )
 from core import get_model, relay_pool, settings
 
@@ -701,6 +700,8 @@ async def _ainvoke_text(
     model: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    response_format: dict[str, Any] | None = None,
+    timeout: float | None = None,
 ) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
@@ -714,6 +715,10 @@ async def _ainvoke_text(
     max_tokens：per-call max_tokens 覆盖（整改4·回炉瘦身）。None/≤0 → 默认 VARIANT_MAX_TOKENS。
     temperature：per-call 温度覆盖（PRD-C-017 M9）。仅 model 覆盖时生效；None=默认 0.5（旧行为）。
       母题 opus 解题+打标档传低温（0.1~0.2）稳 JSON/解题，B1 母题节点用。
+    response_format：per-call 结构化输出（PRD-C-017 B1·F3）。母题 opus 合并调用用它硬锁
+      10 维 json_schema（中转实测支持）；None=不约束（旧行为）。
+    timeout：per-call 超时上限（秒，PRD-C-017 B1·H4）。仅 model 覆盖时生效；None=不设。
+      母题 opus 读图慢，B1 传 ≤180s 防挂死（超时抛 → 上层 SSE error，绝不静默退 gpt-5.4）。
     """
     label = _trace_label(messages)
     tags = None if public_stream else ["skip_stream"]
@@ -732,7 +737,7 @@ async def _ainvoke_text(
         #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
         resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
             messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
-            temperature=temperature,
+            temperature=temperature, response_format=response_format, timeout=timeout,
         )
         text = _content_text(resp).strip()
         retried = False
@@ -740,7 +745,7 @@ async def _ainvoke_text(
             retried = True
             resp, relay, model_used, fb2 = await relay_pool.ainvoke_failover(
                 messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
-                temperature=temperature,
+                temperature=temperature, response_format=response_format, timeout=timeout,
             )
             fallback += fb2
             text = _content_text(resp).strip()
@@ -934,6 +939,20 @@ def _emit_stage(key: str, title: str, status: str, detail: str | None = None) ->
     try:
         writer(ChatMessage(content=[{"stage": stage}], role="custom"))
     except Exception:  # noqa: BLE001 — 发送失败绝不炸节点
+        pass
+
+
+def _emit_error(reason: str, message: str) -> None:
+    """发 SSE error 事件（PRD-C-017 §10 / G3 / H4）。母题 opus 失败/超时必走这里，
+    绝不静默退 gpt-5.4。契约 = ChatMessage(role="custom", content=[{"error": {reason, message}}])，
+    与 _emit_stage 同双层静默吞（无 runtime context / writer 抛 → no-op，不炸节点）。"""
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        writer(ChatMessage(content=[{"error": {"reason": reason, "message": message}}], role="custom"))
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -1362,36 +1381,103 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         early["mother_confirm"] = build_mother_confirm({**state, **early})
         return early
 
-    # --- DNA 抽取（两步锚定第二步：LLM 池内选 id；禁造词由 dna_extract 校验闸把关） ---
-    #     首锚主 kp 未知 → tag_pool 空（标签先靠 LLM 自拟），下面 T2 锚定后再注池重选。
-    dna = await dna_extract.extract_dna(
-        stem=mother_dna.get("stem") or "",
-        answer=mother_dna.get("answer") or "",
-        analyze=mother_dna.get("solution_skeleton") or "",
-        grade=(analysis.get("grade") or {}).get("value") or "",
+    # --- 🔴 PRD-C-017 B1：母题 opus 合并「解题 + 10 维 DNA 打标」（直读原图，一次调用） ---
+    #   取代旧「nano dna_extract 抄图打标」。opus 直读母题图、在确认年级/章范围叶子池内打细 kp，
+    #   一次输出 题面富文本(stem/answer/analysis) + 解答 + 10 维 DNA。母题侧零机器验证（决策表去 sympy）
+    #   → opus 是唯一安全网：走 mother_solve_label 档（启动期 fail-fast 已锁 opus）+ 低温 0.1 +
+    #   response_format 硬锁 schema + 超时 ≤180s；超时/失败 → SSE error，绝不静默退 gpt-5.4。
+    #
+    #   🔴 闸B 章范围参数化：chapter_id 暂用 classify 既有年级/章来源（B2 接「老师确认章」入参）。
+    #   现状代码只锚到年级（无 level2 章节确认），故 chapter_id = 年级册 4 位 code（grade_code）作前缀；
+    #   anchor_to_chapter 按此前缀做越界校验。B2 改成传老师确认章 id 即收窄到章。
+    chapter_id = grade_code  # B1：年级册前缀；B2 接老师确认章 id
+    chapter_text = (analysis.get("chapter") or {}).get("value") if isinstance(
+        analysis.get("chapter"), dict
+    ) else None
+
+    image_url = state.get("image_url")
+    opus_model = settings.variant_model("mother_solve_label")  # G3：母题必命中 opus（fail-fast 已锁）
+    prompt = mother_opus.build_mother_prompt(
+        grade_text=(analysis.get("grade") or {}).get("value") or grade_code or "",
+        chapter_text=chapter_text,
         leaf_pool=leaf_pool,
-        tag_pool=[],
-        invoke=_ainvoke_text,  # 🔴 Q1：经 _ainvoke_text → 锚定/DNA 抽取这一步落 trace（label=dna_extract）
-        model=settings.variant_model("dna"),  # 按环节分档（默认 nano；缺省回退 dna_extract 自身的 LLM_MODEL_LIGHT）
-        include_review_books=include_review_books,  # 批1 step5：复习册闸（二道保险，正常池已剔）
+        model_vocab=None,  # 模型词库快照（只读命名参考）；现阶段缺省，model_anchor 步另锚正式 M-id
     )
+    try:
+        opus_text = await mother_opus.solve_and_label(
+            image_url=image_url or "",
+            prompt=prompt,
+            invoke=_ainvoke_text,  # 落 trace/conv_trace + 走 relay 池（label=opus 母题解题打标）
+            model=opus_model,
+        )
+    except Exception as e:  # noqa: BLE001 — opus 超时/失败 → SSE error，绝不静默退 gpt-5.4（母题侧唯一安全网）
+        await client.aclose()
+        analysis["_mother_opus_error"] = str(e)
+        _emit_stage("classify", "锚定考点", "error", "母题解题打标失败（opus 超时/异常）")
+        _emit_stage("knobs", "解析配方", "warn", "母题未解出，请重试")
+        _emit_error("mother_opus_failed", f"母题解题打标失败（{str(e)[:80]}），请重试或换一张更清晰的图。")
+        early: VariantState = {
+            "analysis": analysis, "mother_confirmed": False, "messages": [
+                AIMessage(content="母题解题打标失败了（opus 调用超时或异常），请重试或换一张更清晰的题目图。")
+            ],
+        }
+        early["mother_confirm"] = build_mother_confirm({**state, **early})
+        return early
 
-    main_kp = dna.get("main_kp")
+    opus_data = _parse_json(opus_text)
+    if not isinstance(opus_data, dict):
+        await client.aclose()
+        analysis["_mother_opus_error"] = "opus 返回非 JSON"
+        _emit_stage("classify", "锚定考点", "error", "母题解题打标解析失败")
+        _emit_error("mother_opus_parse_fail", "母题解题打标结果解析失败，请重试。")
+        early2: VariantState = {
+            "analysis": analysis, "mother_confirmed": False, "messages": [
+                AIMessage(content="母题解题打标结果没解析出来，请重试。")
+            ],
+        }
+        early2["mother_confirm"] = build_mother_confirm({**state, **early2})
+        return early2
 
-    # --- 🔴 T2 标签复用池接线：锚到主 kp 后，按 kp 拉高频标签池，做一次窄调用重选 tags 维 ---
-    #     （+1 LLM 调用，仅成功锚定 + 池非空时；拉池失败/池空 → 0 额外调用、保留原 tags 降级）。
-    if main_kp and main_kp.get("id"):
-        try:
-            kp_tag_pool = await tag_pool_for_kp(main_kp["id"], client)
-        except Exception as e:  # noqa: BLE001 — 拉池故障 → 空池降级（不卡死出题）
-            kp_tag_pool = []
-            analysis.setdefault("_tag_pool_error", str(e))
-        if kp_tag_pool:
-            dna = await dna_extract.refine_tags_with_pool(
-                dna, stem=mother_dna.get("stem") or "", tag_pool=kp_tag_pool,
-                invoke=_ainvoke_text,  # 🔴 Q1：标签复用窄调同样落 trace（label=dna_tags）
-                model=settings.variant_model("dna"),  # 按环节分档（默认 nano）
-            )
+    # opus 富文本回填 mother_dna（题面/答案/解析 + 解答骨架进 _mother_facts 的来源·G4）
+    rich = opus_data.get("richText") or {}
+    if isinstance(rich, dict):
+        if rich.get("stem"):
+            mother_dna["stem"] = _sanitize_rich_text(rich.get("stem"))
+        if rich.get("answer"):
+            mother_dna["answer"] = _sanitize_rich_text(rich.get("answer"))
+        if rich.get("analysis"):
+            mother_dna["analysis"] = _sanitize_rich_text(rich.get("analysis"))
+    # 🔴 G4：opus 解答骨架 = 守恒基准。solution_skeleton 写 opus 骨架（变式守恒注入引用它），
+    #   solved_answer 单列。两者源 = opus 解答，**非 analyze 抄图骨架**。
+    dna = mother_opus.opus_to_dna(opus_data)
+    skeleton_lines = dna.get("skeleton") or []
+    if skeleton_lines:
+        mother_dna["solution_skeleton"] = "\n".join(str(s) for s in skeleton_lines)
+    solved = opus_data.get("solvedAnswer")
+    if solved:
+        mother_dna["solved_answer"] = _sanitize_rich_text(solved)
+    mother_dna["mother_solve_source"] = "opus"  # G4 断言锚点：骨架来源 = opus 解答
+
+    # --- 🔴 闸A 富文本机器验证（G10，非 LLM）：坏 LaTeX/缺表 → 标问题（不直接放行） ---
+    rt_check = mother_opus.validate_rich_text(
+        rich if isinstance(rich, dict) else {},
+        has_table=bool(opus_data.get("has_table")),
+    )
+    if not rt_check["ok"]:
+        analysis["_richtext_issues"] = rt_check["issues"]
+        mother_dna["need_richtext_review"] = True
+        _emit_stage("classify", "锚定考点", "warn",
+                    f"母题富文本机器检发现 {len(rt_check['issues'])} 处问题，待人工复核")
+
+    # --- 🔴 闸B 锚定·宁空不凑（G11）：opus 主考点锚到「确认章 id 前缀内的叶子」，锚不到留空 ---
+    dna = mother_opus.anchor_to_chapter(
+        dna, chapter_id=chapter_id, leaf_pool=leaf_pool,
+        include_review_books=include_review_books,
+    )
+    if dna.get("need_anchor_review"):
+        mother_dna["need_anchor_review"] = True
+
+    main_kp = dna.get("main_kp") if (dna.get("main_kp") or {}).get("id") else None
 
     await client.aclose()
 

@@ -100,17 +100,21 @@ def _chat(relay: Relay) -> ChatOpenAI:
     return c
 
 
-def _chat_override(relay: Relay, model: str, temperature: float = 0.5) -> ChatOpenAI:
+def _chat_override(
+    relay: Relay, model: str, temperature: float = 0.5, timeout: float | None = None
+) -> ChatOpenAI:
     """per-call 模型覆盖（S1.1）：同站点 base_url/api_key、只换 model 字段，按 (站名|model|温度)
     缓存独立实例（不污染整站缓存 _chat_cache）。轻活模型（nano）走这条不动主链路。
 
     🔴 PRD-C-017 M9：temperature 加 per-call 覆盖（默认 0.5 = 旧行为不变）。母题 opus 精确
     解题/结构化打标须低温（0.1~0.2），降 JSON 不稳 + 解题采样波动。缓存键带温度，避免
-    同 (站|model) 不同温度互相覆盖实例。"""
-    ck = f"{relay.name}|{model}|t={temperature}"
+    同 (站|model) 不同温度互相覆盖实例。
+    🔴 PRD-C-017 B1·H4：timeout（秒）per-call 覆盖。母题 opus 读图慢（纯文本 ~21s、带图
+    可达数百秒）须设上限（≤180s）防挂死；None = 不设（旧行为）。缓存键带 timeout。"""
+    ck = f"{relay.name}|{model}|t={temperature}|to={timeout}"
     c = _chat_cache.get(ck)
     if c is None:
-        c = ChatOpenAI(
+        kw: dict[str, Any] = dict(
             model=model,
             temperature=temperature,
             streaming=True,
@@ -118,6 +122,9 @@ def _chat_override(relay: Relay, model: str, temperature: float = 0.5) -> ChatOp
             openai_api_base=relay.base_url,
             openai_api_key=relay.api_key,
         )
+        if timeout is not None and timeout > 0:
+            kw["timeout"] = timeout
+        c = ChatOpenAI(**kw)
         _chat_cache[ck] = c
     return c
 
@@ -138,6 +145,8 @@ async def ainvoke_failover(
     on_delta: Callable[[str], None] | None = None,
     model: str | None = None,
     temperature: float | None = None,
+    response_format: dict[str, Any] | None = None,
+    timeout: float | None = None,
 ) -> tuple[Any, str, str, int]:
     """按主→备顺序调用，熔断转移。
 
@@ -156,6 +165,10 @@ async def ainvoke_failover(
     仍归因到实际成交站名 + 这个覆盖模型；None = 完全沿用各站配置 model（旧行为不变）。
     temperature：per-call 温度覆盖（PRD-C-017 M9）。仅在 model 覆盖时生效（走 _chat_override）；
     None = 默认 0.5（旧行为不变）。母题 opus 档传低温（0.1~0.2）稳 JSON/解题。
+    response_format：per-call 结构化输出（PRD-C-017 B1·F3）。给了就 bind 进请求（中转
+    OpenAI-compatible json_schema 实测支持）；母题 opus 合并调用用它硬锁 10 维 schema。
+    timeout：per-call 超时上限（秒，PRD-C-017 B1·H4）。仅在 model 覆盖时生效（重建 chat）；
+    None = 不设上限（旧行为）。母题 opus 读图慢，须设 ≤180s 防挂死。
     """
     relays = _relays()
     # 🔴 单站无备援时禁用熔断跳过：开闸 fail-fast 只降可用性（30s 内全灭且 last_exc=None
@@ -175,10 +188,17 @@ async def ainvoke_failover(
             chat = (
                 _chat(relay)
                 if model is None
-                else _chat_override(relay, model, 0.5 if temperature is None else temperature)
+                else _chat_override(
+                    relay, model,
+                    0.5 if temperature is None else temperature,
+                    timeout=timeout,
+                )
             )
             relay_model = relay.model if model is None else model
-            llm = chat.bind(max_tokens=max_tokens)
+            bind_kw: dict[str, Any] = {"max_tokens": max_tokens}
+            if response_format is not None:
+                bind_kw["response_format"] = response_format
+            llm = chat.bind(**bind_kw)
             if on_delta is None:
                 # cfg 为空不传（兼容测试桩的窄签名 ainvoke(messages)）
                 resp = await (llm.ainvoke(messages, config=cfg) if cfg else llm.ainvoke(messages))

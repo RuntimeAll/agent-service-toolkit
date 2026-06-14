@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import json
 
 import agents.variant as variant_mod
 from agents.variant import _fact_edit, classify, patch
@@ -66,14 +67,23 @@ def test_fact_edit_teacher_write_always_allowed_and_audited():
 # classify 置 facts_locked
 # ---------------------------------------------------------------------------
 _POOL = [("3071001001001", "一元一次方程")]
-_GOOD_DNA = {
-    "main_kp": {"id": "3071001001001", "name": "一元一次方程"}, "secondary_kps": [],
-    "qtype": "解答", "exam_type": "直接计算", "skeleton": ["移项"], "hard_points": [],
-    "hard_point_count": 0, "tags": ["解方程"], "tag_reused_count": 0, "scene": "纯代数",
-    "difficulty": 2, "flags": [],
+# opus 合并输出（PRD-C-017 B1）：锚到池内主 kp
+_GOOD_OPUS = {
+    "has_figure": False,
+    "richText": {"stem": "2x+3=7", "answer": "x=2", "analysis": "移项 x=2"},
+    "solvedAnswer": "x=2",
+    "dna": {
+        "primaryKp": {"id": "3071001001001", "name": "一元一次方程"},
+        "secondaryKps": [], "qtype": "解答", "assessmentType": "直接计算",
+        "solutionSkeleton": ["移项"], "hardPointCount": 0, "breakthroughPoints": [],
+        "scenario": "纯代数", "difficulty": 2, "tags": ["解方程"], "modelCandidates": [],
+    },
 }
-_FAIL_DNA = dict(_GOOD_DNA, main_kp=None, flags=[variant_mod.dna_extract.FLAG_MAIN_KP_OOB])
+# opus 选池外 kp → 闸B 锚不到 → 不定死
+_FAIL_OPUS = json.loads(json.dumps(_GOOD_OPUS))
+_FAIL_OPUS["dna"]["primaryKp"] = {"id": "9999999999999", "name": "越界"}
 _BASE = {
+    "image_url": "https://x/q.png",
     "analysis": {
         "grade": {"value": "七年级上学期", "confidence": 0.9},
         "kp": {"value": "一元一次方程", "confidence": 0.4},
@@ -91,29 +101,35 @@ class _FakeClient:
         pass
 
 
-def _patch(monkeypatch, *, pool, dna):
+def _patch(monkeypatch, *, pool, opus):
     monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
     monkeypatch.setattr(variant_mod, "_emit_stage", lambda *a, **k: None)
+    monkeypatch.setattr(variant_mod, "_emit_error", lambda *a, **k: None)
 
     async def fake_leaf_pool(gc, client, **kw):
         return pool
 
-    async def fake_extract(**kw):
-        return dna
+    async def fake_solve(**kw):
+        return json.dumps(opus, ensure_ascii=False)
+
+    async def fake_anchor(dna, **kw):
+        return {"models": [dict(variant_mod.model_anchor.M00)], "model_overflow": [],
+                "model_warn": False, "model_flag": "m00_fallback"}
 
     monkeypatch.setattr(variant_mod, "leaf_pool_for_grade", fake_leaf_pool)
-    monkeypatch.setattr(variant_mod.dna_extract, "extract_dna", fake_extract)
+    monkeypatch.setattr(variant_mod.mother_opus, "solve_and_label", fake_solve)
+    monkeypatch.setattr(variant_mod.model_anchor, "anchor_models", fake_anchor)
 
 
 def test_classify_locks_facts_when_pinned(monkeypatch):
-    _patch(monkeypatch, pool=_POOL, dna=_GOOD_DNA)
+    _patch(monkeypatch, pool=_POOL, opus=_GOOD_OPUS)
     out = asyncio.run(classify(dict(_BASE), {}))
     assert out["mother_confirmed"] is True
     assert out["facts_locked"] is True  # 定死 → 冻结
 
 
 def test_classify_no_lock_when_unpinned(monkeypatch):
-    _patch(monkeypatch, pool=_POOL, dna=_FAIL_DNA)
+    _patch(monkeypatch, pool=_POOL, opus=_FAIL_OPUS)
     out = asyncio.run(classify(dict(_BASE), {}))
     assert out["mother_confirmed"] is False
     assert out["facts_locked"] is False  # 没定死 → 不冻结（等老师纠正后重锚）

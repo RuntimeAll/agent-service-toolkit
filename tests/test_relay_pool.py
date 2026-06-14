@@ -86,7 +86,7 @@ def test_per_call_model_override_swaps_model_only(monkeypatch):
     monkeypatch.setattr(rp, "_relays", lambda: [relay])
     seen = []
 
-    def chat_override(r, m, temperature=0.5):
+    def chat_override(r, m, temperature=0.5, timeout=None):
         seen.append((r.name, r.base_url, m))
         return _FakeChat("RESP")
 
@@ -110,7 +110,7 @@ def test_per_call_temperature_override(monkeypatch):
     monkeypatch.setattr(rp, "_relays", lambda: [relay])
     seen_temp = []
 
-    def chat_override(r, m, temperature=0.5):
+    def chat_override(r, m, temperature=0.5, timeout=None):
         seen_temp.append(temperature)
         return _FakeChat("RESP")
 
@@ -122,6 +122,38 @@ def test_per_call_temperature_override(monkeypatch):
     # 不传温度 → 默认 0.5
     asyncio.run(ainvoke_failover([], max_tokens=10, model="claude-opus-4-8"))
     assert seen_temp == [0.1, 0.5]
+
+
+def test_response_format_and_timeout_threaded(monkeypatch):
+    """PRD-C-017 B1·F3/H4：response_format 经 chat.bind 进请求；timeout 经 _chat_override
+    传到重建 chat（母题 opus 合并调用硬锁 10 维 schema + ≤180s 防挂死）。"""
+    relay = Relay(name="main", base_url="http://x", api_key="k", model="m-main")
+    monkeypatch.setattr(rp, "_relays", lambda: [relay])
+    seen_timeout = []
+    bind_kw_seen = {}
+
+    class _Rec:
+        def bind(self, **kw):
+            bind_kw_seen.update(kw)
+            return self
+
+        async def ainvoke(self, _messages):
+            return "RESP"
+
+    def chat_override(r, m, temperature=0.5, timeout=None):
+        seen_timeout.append(timeout)
+        return _Rec()
+
+    monkeypatch.setattr(rp, "_chat_override", chat_override)
+    rp._breakers.clear()
+    rf = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
+    asyncio.run(ainvoke_failover(
+        [], max_tokens=10, model="claude-opus-4-8", temperature=0.1,
+        response_format=rf, timeout=180,
+    ))
+    assert seen_timeout == [180]
+    assert bind_kw_seen.get("response_format") == rf
+    assert bind_kw_seen.get("max_tokens") == 10
 
 
 def test_chat_override_caches_per_temperature(monkeypatch):
