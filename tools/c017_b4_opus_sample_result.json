@@ -1,0 +1,134 @@
+{
+  "model": "claude-opus-4-8",
+  "samples": [
+    {
+      "key": "1184_已知根x1求m",
+      "expected": "m=4（选 B）：x=1 代入得 1+3-m=0 → m=4",
+      "dur_s": 11.4,
+      "json_ok": true,
+      "has_figure": false,
+      "solvedAnswer": "m=4，选 B",
+      "dims_full": true,
+      "dims": {
+        "main_kp_name": "一元二次方程的根（解）的定义",
+        "qtype": "选择",
+        "exam_type": "概念辨析",
+        "difficulty": 1,
+        "hard_point_count": 0,
+        "scene": "纯代数",
+        "tags": [
+          "一元二次方程",
+          "方程的根",
+          "代入求参数",
+          "求m的值"
+        ],
+        "skeleton_lines": 2
+      }
+    },
+    {
+      "key": "1185_根迁移2022",
+      "expected": "x=2023：令 t=x-1，原式化为 a t²+b t+2=0，故 t=2022 → x=2023",
+      "dur_s": 13.3,
+      "json_ok": true,
+      "has_figure": false,
+      "solvedAnswer": "x=2023，选 D",
+      "dims_full": true,
+      "dims": {
+        "main_kp_name": "一元二次方程的根（整体换元思想）",
+        "qtype": "选择",
+        "exam_type": "探究归纳",
+        "difficulty": 3,
+        "hard_point_count": 1,
+        "scene": "纯代数",
+        "tags": [
+          "一元二次方程",
+          "方程的根",
+          "整体换元",
+          "结构对照"
+        ],
+        "skeleton_lines": 4
+      }
+    },
+    {
+      "key": "1177_求a范围解答",
+      "expected": "a≠3：整理为 (a-3)x²-ax+1=0，二次项系数 a-3≠0 → a≠3",
+      "dur_s": 8.8,
+      "json_ok": true,
+      "has_figure": false,
+      "solvedAnswer": "$a\\neq 3$",
+      "dims_full": true,
+      "dims": {
+        "main_kp_name": "一元二次方程的定义",
+        "qtype": "解答",
+        "exam_type": "概念辨析",
+        "difficulty": 2,
+        "hard_point_count": 0,
+        "scene": "纯代数",
+        "tags": [
+          "一元二次方程定义",
+          "二次项系数不为零",
+          "求参数取值范围",
+          "化为一般形式"
+        ],
+        "skeleton_lines": 2
+      }
+    },
+    {
+      "key": "1191_a+b+c=0填空",
+      "expected": "x=1：a+b+c=0 即 x=1 时方程成立 → x=1 是根",
+      "dur_s": 8.9,
+      "json_ok": true,
+      "has_figure": false,
+      "solvedAnswer": "x=1",
+      "dims_full": true,
+      "dims": {
+        "main_kp_name": "一元二次方程的根（解的检验与代入）",
+        "qtype": "填空",
+        "exam_type": "性质判定",
+        "difficulty": 2,
+        "hard_point_count": 0,
+        "scene": "纯代数",
+        "tags": [
+          "一元二次方程",
+          "方程的根",
+          "代入验根",
+          "系数关系"
+        ],
+        "skeleton_lines": 3
+      }
+    },
+    {
+      "key": "img3_韦达三次方程(B0复跑)",
+      "expected": "-1/6（B0 已实测正确，复跑核一致性）",
+      "dur_s": 21.6,
+      "json_ok": true,
+      "has_figure": false,
+      "solvedAnswer": "$-\\dfrac{1}{6}$",
+      "dims_full": true,
+      "dims": {
+        "main_kp_name": "一元三次方程根与系数的关系(韦达定理类比推广)",
+        "qtype": "填空",
+        "exam_type": "阅读理解迁移",
+        "difficulty": 3,
+        "hard_point_count": 1,
+        "scene": "小明类比韦达定理探究一元三次方程根与系数的关系",
+        "tags": [
+          "一元三次方程",
+          "根与系数关系",
+          "韦达定理类比",
+          "阅读理解迁移",
+          "整体代入求值"
+        ],
+        "skeleton_lines": 3
+      }
+    }
+  ],
+  "summary": {
+    "n_total": 5,
+    "n_json_ok": 5,
+    "n_dims_full": 5,
+    "dur_min_s": 8.8,
+    "dur_max_s": 21.6,
+    "dur_avg_s": 12.8
+  }
+}
