@@ -86,7 +86,7 @@ def test_per_call_model_override_swaps_model_only(monkeypatch):
     monkeypatch.setattr(rp, "_relays", lambda: [relay])
     seen = []
 
-    def chat_override(r, m):
+    def chat_override(r, m, temperature=0.5):
         seen.append((r.name, r.base_url, m))
         return _FakeChat("RESP")
 
@@ -101,3 +101,37 @@ def test_per_call_model_override_swaps_model_only(monkeypatch):
     assert resp == "RESP" and name == "main" and fallback == 0
     assert model == "gpt-5.4-nano"  # 归因到覆盖模型，不再是 relay.model
     assert seen == [("main", "http://x", "gpt-5.4-nano")]  # 站点不变，只换 model
+
+
+def test_per_call_temperature_override(monkeypatch):
+    """PRD-C-017 M9: per-call temperature 覆盖只在 model 覆盖时生效，传给 _chat_override；
+    不传 temperature 时默认 0.5（旧行为不变）。母题 opus 档用低温稳 JSON/解题。"""
+    relay = Relay(name="main", base_url="http://x", api_key="k", model="m-main")
+    monkeypatch.setattr(rp, "_relays", lambda: [relay])
+    seen_temp = []
+
+    def chat_override(r, m, temperature=0.5):
+        seen_temp.append(temperature)
+        return _FakeChat("RESP")
+
+    monkeypatch.setattr(rp, "_chat_override", chat_override)
+    rp._breakers.clear()
+
+    # 显式低温
+    asyncio.run(ainvoke_failover([], max_tokens=10, model="claude-opus-4-8", temperature=0.1))
+    # 不传温度 → 默认 0.5
+    asyncio.run(ainvoke_failover([], max_tokens=10, model="claude-opus-4-8"))
+    assert seen_temp == [0.1, 0.5]
+
+
+def test_chat_override_caches_per_temperature(monkeypatch):
+    """温度进缓存键：同 (站|model) 不同温度构出独立实例，不互相覆盖。"""
+    relay = Relay(name="main", base_url="http://x", api_key="k", model="m-main")
+    rp._chat_cache.clear()
+    c_low = rp._chat_override(relay, "claude-opus-4-8", 0.1)
+    c_hi = rp._chat_override(relay, "claude-opus-4-8", 0.5)
+    c_low2 = rp._chat_override(relay, "claude-opus-4-8", 0.1)
+    assert c_low is c_low2  # 同温度命中缓存
+    assert c_low is not c_hi  # 不同温度独立实例
+    assert c_low.temperature == 0.1 and c_hi.temperature == 0.5
+    rp._chat_cache.clear()

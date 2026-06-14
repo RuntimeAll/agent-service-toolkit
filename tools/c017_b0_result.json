@@ -1,0 +1,121 @@
+{
+  "opus_name": "claude-opus-4-8",
+  "nano_name": "gpt-5.4-nano",
+  "models": {
+    "sites": {
+      "aigeek": {
+        "base_url": "https://www.aigeek.life/v1",
+        "model_count": 440,
+        "opus_present": true,
+        "opus_like": [
+          "claude-opus-4-1-20250805",
+          "claude-opus-4-20250514",
+          "claude-opus-4-5-20251101",
+          "claude-opus-4-6",
+          "claude-opus-4-7",
+          "claude-opus-4-8"
+        ]
+      },
+      "lk888": {
+        "base_url": "https://api.lk888.ai/api/v1",
+        "model_count": 39,
+        "opus_present": true,
+        "opus_like": [
+          "claude-opus-4-5-20251101",
+          "claude-opus-4-6",
+          "claude-opus-4-7",
+          "claude-opus-4-8"
+        ]
+      }
+    },
+    "opus_available_on": [
+      "aigeek",
+      "lk888"
+    ]
+  },
+  "h1": {
+    "model": "claude-opus-4-8",
+    "site": "aigeek",
+    "temperature": 0.1,
+    "response_format": {
+      "supported": true,
+      "error": null
+    },
+    "images": [
+      {
+        "url": "8d-41d0-a46a-de19e17a5f70/list/16/question.png",
+        "dur_s": 159.1,
+        "prompt_tokens": 16639,
+        "completion_tokens": 931,
+        "json_complete": true,
+        "dims_missing": [],
+        "dims_full": true,
+        "has_figure": true,
+        "solvedAnswer": "(1) y=-x²+2x+3，顶点(1,4)；(2) P横坐标为2+√3、2-√3、1+√2、1-√2；(3) DQ=5√10/4。",
+        "primaryKp": "二次函数与几何综合",
+        "qtype": "解答",
+        "difficulty": 4,
+        "stem_head": "如图1，二次函数 $y=-x^2+bx+c$ 的图象与 $x$ 轴交于 $A,B$ 两点，与 $y$ 轴交于点 $C$，点 $B$ 的坐标为 $(3,0)$，点 $C$ 的坐标为 $(0,3)$，直线 $l$ 经过 $B,C$ 两点，点 $P$ 为直线 $l$ 上一动点。\n(1) 求该二次函数的表达式及其图象的顶点坐标",
+        "raw_head": null
+      },
+      {
+        "url": "d6-43ce-900f-c0d0e9cdd601/list/13/question.png",
+        "error": "Request timed out.",
+        "dur_s": 903.2
+      },
+      {
+        "url": "ca-4bdc-9aea-a90357910b48/list/27/question.png",
+        "dur_s": 21.0,
+        "prompt_tokens": 2143,
+        "completion_tokens": 1264,
+        "json_complete": true,
+        "dims_missing": [],
+        "dims_full": true,
+        "has_figure": true,
+        "solvedAnswer": "$-\\dfrac{1}{6}$",
+        "primaryKp": "三次方程根与系数关系",
+        "qtype": "填空",
+        "difficulty": 3,
+        "stem_head": "小明学习了韦达定理之后，发现若一元二次方程 $ax^2+bx+c=0\\,(a\\neq0)$ 有两个实数根 $x_1,x_2$，则方程可化为 $a(x-x_1)(x-x_2)=0$，将等式左边展开后可得 $ax^2-a(x_1+x_2)x+ax_1x_2=0$，与原方程系数比较，就不难得到根与系数的等量关系．\n\n小明接着",
+        "raw_head": null
+      }
+    ],
+    "dims_full_rate": "2/3"
+  },
+  "m6": {
+    "model": "gpt-5.4-nano",
+    "site": "aigeek",
+    "images": [
+      {
+        "url": "8d-41d0-a46a-de19e17a5f70/list/16/question.png",
+        "dur_s": 2.8,
+        "parsed_ok": true,
+        "grade_book": "九年级下册",
+        "chapter": "第22章 二次函数",
+        "has_figure": true,
+        "confidence": 0.9,
+        "raw_head": null
+      },
+      {
+        "url": "d6-43ce-900f-c0d0e9cdd601/list/13/question.png",
+        "dur_s": 4.1,
+        "parsed_ok": true,
+        "grade_book": "九年级下册",
+        "chapter": "第21章 圆",
+        "has_figure": true,
+        "confidence": 0.9,
+        "raw_head": null
+      },
+      {
+        "url": "ca-4bdc-9aea-a90357910b48/list/27/question.png",
+        "dur_s": 4.7,
+        "parsed_ok": true,
+        "grade_book": "九年级下册",
+        "chapter": "第2章 一元二次方程",
+        "has_figure": false,
+        "confidence": 0.42,
+        "raw_head": null
+      }
+    ]
+  }
+}

@@ -196,6 +196,11 @@ class Settings(BaseSettings):
     #   +「先解题再选」prompt（nano recall 仅 24% 欠选成性；gpt-5.4 主模型 31% 发散；mini recall 69%/
     #   头牌 9/9）。缺省（None）→ 回退 LLM_MODEL_LIGHT（nano）；.env 显式切 gpt-5.4-mini 生效（推荐配）。
     VARIANT_MODEL_MODEL_CONFIRM: str | None = None
+    # 🔴 PRD-C-017 F1 死键防护：母题解题+打标合并调用专用模型档（opus 4.8 经中转）。
+    #   variant_model("mother_solve_label") 必须命中此档（默认即 claude-opus-4-8），否则
+    #   死键返 None → _ainvoke_text(model=None) → relay 退站配 gpt-5.4，opus 静默不被调用，
+    #   整卡核心价值蒸发。本档**默认值就是 opus**（不靠 .env 才生效），.env 可覆盖核中转真名。
+    VARIANT_MODEL_MOTHER_SOLVE_LABEL: str = "claude-opus-4-8"
     RELAY_FAIL_THRESHOLD: int = 3  # 连续失败 N 次 → 熔断器 trip
     RELAY_COOLDOWN_S: float = 30.0  # 熔断冷却秒数（之后 half-open 探活）
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
@@ -307,7 +312,8 @@ class Settings(BaseSettings):
     def variant_model(self, env: str) -> str | None:
         """按环节解析变式管线该用哪个模型（per-call model 覆盖值）。
 
-        env ∈ {"analyze","dna","solve","generate"}。返回值传给 _ainvoke_text(model=...)：
+        env ∈ {"analyze","dna","solve","generate","model_confirm","mother_solve_label"}。
+        返回值传给 _ainvoke_text(model=...)：
         - 返回 str → 该次请求换这个 model（站点不变）；
         - 返回 None → 沿用 relay 配置 model（= COMPATIBLE_MODEL，深度思考档），旧行为。
 
@@ -333,6 +339,10 @@ class Settings(BaseSettings):
             "generate": self.VARIANT_MODEL_GENERATE,
             # 模型确认档（PRD-C-015 批2·H2）：候选池内确认解题模型。
             "model_confirm": self.VARIANT_MODEL_MODEL_CONFIRM,
+            # 🔴 PRD-C-017 F1：母题解题+打标合并调用档（opus 4.8）。override 这里读 .env 覆盖值；
+            #   注意此键的 setting 本身**有默认值 claude-opus-4-8**（非 None），故 override 永不为空，
+            #   下方 defaults 的同名项只作冗余护栏（理论上不会走到），双保险防死键退 gpt-5.4。
+            "mother_solve_label": self.VARIANT_MODEL_MOTHER_SOLVE_LABEL,
         }.get(env)
         if override:
             return override
@@ -344,6 +354,9 @@ class Settings(BaseSettings):
             "generate": None,
             # 缺省回退 nano（与 dna 同档）；.env 显式切 gpt-5.4-mini（H2 甜点档）覆盖。
             "model_confirm": self.LLM_MODEL_LIGHT,
+            # 🔴 PRD-C-017 F1 冗余护栏：母题档即使 override 被人误清空也绝不回退到 None/gpt-5.4。
+            #   母题侧零机器验证（06-15 去 sympy）→ opus 必须真被调用是唯一安全网，宁可硬钉死。
+            "mother_solve_label": "claude-opus-4-8",
         }
         return defaults.get(env)
 
@@ -357,3 +370,29 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# 🔴 PRD-C-017 F1·G3 反性自检（启动期 fail-fast）：母题解题+打标必须真命中 opus，
+#   否则 variant_model 死键会让它静默退 gpt-5.4(5/9)——母题侧零机器验证（06-15 去 sympy），
+#   这是本卡核心价值的唯一安全网。进程起不来好过母题悄悄用错模型解出歪基准、下游全错查不到根因。
+MOTHER_SOLVE_MODEL_EXPECTED = "claude-opus-4-8"
+
+
+def assert_mother_solve_hits_opus(s: "Settings") -> str:
+    """🔴 PRD-C-017 F1·G3 反性自检：母题解题+打标必须真命中 opus，否则 raise。
+
+    死键会让 variant_model 静默退 gpt-5.4(5/9)——母题侧零机器验证（06-15 去 sympy），
+    这是本卡核心价值的唯一安全网。进程起不来好过母题悄悄用错模型解出歪基准、下游全错查不到根因。
+    返回实际解析到的模型名（== MOTHER_SOLVE_MODEL_EXPECTED）。"""
+    resolved = s.variant_model("mother_solve_label")
+    if resolved != MOTHER_SOLVE_MODEL_EXPECTED:
+        raise ValueError(
+            f"PRD-C-017 F1 fail-fast: variant_model('mother_solve_label') = "
+            f"{resolved!r}，期望 {MOTHER_SOLVE_MODEL_EXPECTED!r}。"
+            "母题解题+打标必须命中 opus，死键退 gpt-5.4 会让放大器基准悄悄歪掉。"
+            "请检查 settings.variant_model override/defaults 表与 VARIANT_MODEL_MOTHER_SOLVE_LABEL。"
+        )
+    return resolved
+
+
+# 启动期触发（import settings 即跑）：母题档不命中 opus → 整进程起不来（设计如此）。
+assert_mother_solve_hits_opus(settings)

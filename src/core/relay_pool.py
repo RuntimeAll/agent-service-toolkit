@@ -100,15 +100,19 @@ def _chat(relay: Relay) -> ChatOpenAI:
     return c
 
 
-def _chat_override(relay: Relay, model: str) -> ChatOpenAI:
-    """per-call 模型覆盖（S1.1）：同站点 base_url/api_key、只换 model 字段，按 (站名|model)
-    缓存独立实例（不污染整站缓存 _chat_cache）。轻活模型（nano）走这条不动主链路。"""
-    ck = f"{relay.name}|{model}"
+def _chat_override(relay: Relay, model: str, temperature: float = 0.5) -> ChatOpenAI:
+    """per-call 模型覆盖（S1.1）：同站点 base_url/api_key、只换 model 字段，按 (站名|model|温度)
+    缓存独立实例（不污染整站缓存 _chat_cache）。轻活模型（nano）走这条不动主链路。
+
+    🔴 PRD-C-017 M9：temperature 加 per-call 覆盖（默认 0.5 = 旧行为不变）。母题 opus 精确
+    解题/结构化打标须低温（0.1~0.2），降 JSON 不稳 + 解题采样波动。缓存键带温度，避免
+    同 (站|model) 不同温度互相覆盖实例。"""
+    ck = f"{relay.name}|{model}|t={temperature}"
     c = _chat_cache.get(ck)
     if c is None:
         c = ChatOpenAI(
             model=model,
-            temperature=0.5,
+            temperature=temperature,
             streaming=True,
             stream_usage=True,
             openai_api_base=relay.base_url,
@@ -133,6 +137,7 @@ async def ainvoke_failover(
     tags: list[str] | None = None,
     on_delta: Callable[[str], None] | None = None,
     model: str | None = None,
+    temperature: float | None = None,
 ) -> tuple[Any, str, str, int]:
     """按主→备顺序调用，熔断转移。
 
@@ -149,6 +154,8 @@ async def ainvoke_failover(
     model：per-call 模型覆盖（S1.1，nano 降本前置）。给了就只换该次请求的 model 字段
     （站点 base_url/api_key 不变，绕过 _chat 缓存临时 bind 模型），返回的 relay_model
     仍归因到实际成交站名 + 这个覆盖模型；None = 完全沿用各站配置 model（旧行为不变）。
+    temperature：per-call 温度覆盖（PRD-C-017 M9）。仅在 model 覆盖时生效（走 _chat_override）；
+    None = 默认 0.5（旧行为不变）。母题 opus 档传低温（0.1~0.2）稳 JSON/解题。
     """
     relays = _relays()
     # 🔴 单站无备援时禁用熔断跳过：开闸 fail-fast 只降可用性（30s 内全灭且 last_exc=None
@@ -165,7 +172,11 @@ async def ainvoke_failover(
         try:
             # per-call 模型覆盖（S1.1）：换 model 字段须重建 ChatOpenAI（model 是构造期字段，
             # 非 per-call kwarg），缓存的整站实例不动；relay_model 归因到这个覆盖模型。
-            chat = _chat(relay) if model is None else _chat_override(relay, model)
+            chat = (
+                _chat(relay)
+                if model is None
+                else _chat_override(relay, model, 0.5 if temperature is None else temperature)
+            )
             relay_model = relay.model if model is None else model
             llm = chat.bind(max_tokens=max_tokens)
             if on_delta is None:

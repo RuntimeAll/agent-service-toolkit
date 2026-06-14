@@ -700,6 +700,7 @@ async def _ainvoke_text(
     on_delta: Any = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    temperature: float | None = None,
 ) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
@@ -711,6 +712,8 @@ async def _ainvoke_text(
     model：per-call 模型覆盖（S1.1）。给了就用它换该次请求的 model（站点不变），轻活
     调用点（nano 降本）传 settings.LLM_MODEL_LIGHT；None = 沿用 relay 配置 model（旧行为不变）。
     max_tokens：per-call max_tokens 覆盖（整改4·回炉瘦身）。None/≤0 → 默认 VARIANT_MAX_TOKENS。
+    temperature：per-call 温度覆盖（PRD-C-017 M9）。仅 model 覆盖时生效；None=默认 0.5（旧行为）。
+      母题 opus 解题+打标档传低温（0.1~0.2）稳 JSON/解题，B1 母题节点用。
     """
     label = _trace_label(messages)
     tags = None if public_stream else ["skip_stream"]
@@ -728,14 +731,16 @@ async def _ainvoke_text(
         # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数
         #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
         resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
-            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model
+            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
+            temperature=temperature,
         )
         text = _content_text(resp).strip()
         retried = False
         if not text and retry:
             retried = True
             resp, relay, model_used, fb2 = await relay_pool.ainvoke_failover(
-                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model
+                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
+                temperature=temperature,
             )
             fallback += fb2
             text = _content_text(resp).strip()

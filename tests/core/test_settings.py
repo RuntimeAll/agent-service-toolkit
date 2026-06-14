@@ -232,3 +232,55 @@ def test_settings_log_level_invalid():
     with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key", "LOG_LEVEL": "INVALID"}, clear=True):
         with pytest.raises(ValueError, match="validation error for Settings\nLOG_LEVEL\n"):
             Settings(_env_file=None)
+
+
+# === PRD-C-017 B0 · F1 死键防护 + M9 温度覆盖 ===
+
+
+def test_variant_model_mother_solve_label_hits_opus():
+    """🔴 F1·G3 反性自检：variant_model('mother_solve_label') 必须命中 opus，绝不返 None。
+
+    死键会让母题解题悄悄退 gpt-5.4(5/9)；母题侧零机器验证（06-15 去 sympy），这是唯一安全网。"""
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}, clear=True):
+        s = Settings(_env_file=None)
+        assert s.variant_model("mother_solve_label") == "claude-opus-4-8"
+
+
+def test_variant_model_mother_solve_label_env_override():
+    """.env 可覆盖母题档真名（换中转后核对真名用），但仍必须是显式值、不退 None。"""
+    with patch.dict(
+        os.environ,
+        {"OPENAI_API_KEY": "test_key", "VARIANT_MODEL_MOTHER_SOLVE_LABEL": "claude-opus-4-8-x"},
+        clear=True,
+    ):
+        s = Settings(_env_file=None)
+        assert s.variant_model("mother_solve_label") == "claude-opus-4-8-x"
+
+
+def test_variant_model_unknown_key_returns_none():
+    """护栏对照：未注册键仍返 None（证明 mother_solve_label 是被显式加进两张表、非偶然命中）。"""
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}, clear=True):
+        s = Settings(_env_file=None)
+        assert s.variant_model("not_a_real_label") is None
+
+
+def test_mother_solve_fail_fast_passes_for_default():
+    """启动期 fail-fast 断言：默认配置下母题档命中 opus，不抛（import settings 已证一次）。"""
+    from core.settings import assert_mother_solve_hits_opus
+
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}, clear=True):
+        s = Settings(_env_file=None)
+        assert assert_mother_solve_hits_opus(s) == "claude-opus-4-8"
+
+
+def test_mother_solve_fail_fast_raises_on_death_path():
+    """反性自检：构造死键情形（variant_model 退回 None）→ fail-fast 必须 raise，不静默退 gpt-5.4。"""
+    from core.settings import MOTHER_SOLVE_MODEL_EXPECTED, assert_mother_solve_hits_opus
+
+    class _DeadKey:
+        def variant_model(self, env):  # 模拟死键：母题档返 None（→ relay 退 gpt-5.4）
+            return None
+
+    with pytest.raises(ValueError, match="F1 fail-fast"):
+        assert_mother_solve_hits_opus(_DeadKey())  # type: ignore[arg-type]
+    assert MOTHER_SOLVE_MODEL_EXPECTED == "claude-opus-4-8"
