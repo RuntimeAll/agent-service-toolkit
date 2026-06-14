@@ -1615,8 +1615,32 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         _latest_human_text(state.get("messages", []))
     )
 
-    # --- 两步锚定第一步：定年级 code ---
-    grade_code = await _resolve_grade_code(analysis)
+    # --- 🔴 PRD-C-017 B4-fix·确认章驱动 grade_code（修 AC2 零作用 critical bug） ---
+    #   老师确认章 = 锚定事实源，压过 analyze 图读。纯文本母题题面常无年级标记 → analyze 瞎猜
+    #   grade（且人教/浙教版错位，如把浙教八下一元二次方程判成七上/九上）→ leaf_pool 用错册圈池 →
+    #   opus 找不到叶子 → 闸B 锚空 + grade_code 错 → pin 三锚全缺 → 卡 clarify、不出变式。
+    #   biz_subject id 编码：根=4 位（年级册 level1，如 3082=浙教八下），章=7 位（level2，如
+    #   3082002），叶子=完整 id（如 3082002001004）。确认章前 4 位 = 年级册 code。
+    #   确认章存在 → 用其前 4 位作 grade_code、并同步抬 analysis.grade.code/confidence（pin 闸
+    #   _pin_status 读 grade.code），让 leaf_pool 用对册圈池。无确认章（理论上 B2 必停确认后不该
+    #   出现，防御性）→ 回退原 analyze grade 行为（不回归 B1）。
+    confirmed_chapter_id = (
+        ((config or {}).get("configurable") or {}).get("confirmed_chapter_id")
+        or state.get("confirmed_chapter_id")
+    )
+    confirmed_chapter_id = str(confirmed_chapter_id).strip() if confirmed_chapter_id else None
+
+    # --- 两步锚定第一步：定年级 code（确认章前缀优先，老师背书压过 analyze 图读） ---
+    if confirmed_chapter_id and len(confirmed_chapter_id) >= 4:
+        grade_code = confirmed_chapter_id[:4]  # 确认章前 4 位 = 年级册 code
+        # 同步抬 analysis.grade.code/confidence —— pin 闸 _pin_status 读 grade.code，
+        #   且 leaf_pool_for_grade 用此 grade_code 圈本册叶子（不再信 analyze 误读的 grade）。
+        grade_node = dict(analysis.get("grade") or {})
+        grade_node["code"] = grade_code
+        grade_node["confidence"] = max(float(grade_node.get("confidence", 0) or 0), CONF_GATE)
+        analysis["grade"] = grade_node
+    else:
+        grade_code = await _resolve_grade_code(analysis)  # 旧路径兜底（无确认章的降级线程）
 
     # --- 第二步：拉年级叶子池（HTTP，故障 → 空池降级走 clarify） ---
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
@@ -1653,11 +1677,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     #   🔴 PRD-C-017 B2·闸B 章范围参数化：老师确认章 id（confirmed_chapter_id，经 config/state 回传）
     #   优先 → 收窄到章前缀；老师没给（旧线程/降级）→ 回退年级册 4 位 code（grade_code）作前缀。
     #   anchor_to_chapter 按此前缀做越界校验，opus 选的叶子 id 必以确认章 id 为前缀，越界拒/降级标注。
-    confirmed_chapter_id = (
-        ((config or {}).get("configurable") or {}).get("confirmed_chapter_id")
-        or state.get("confirmed_chapter_id")
-    )
-    confirmed_chapter_id = str(confirmed_chapter_id).strip() if confirmed_chapter_id else None
+    #   🔴 confirmed_chapter_id 已在 classify 开头（B4-fix）解析并用于驱动 grade_code，此处直接复用。
     chapter_id = confirmed_chapter_id or grade_code  # B2：确认章 id 优先；回退年级册前缀
 
     # --- 🔴 M7（PRD-C-017 B2）·聚合/复习章排除：确认章若是册内 level2「中考一轮复习/期末专题/
