@@ -3250,6 +3250,22 @@ verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**新题的�
 )
 
 
+# B5-fix4（PRD-C-017）：老师在变式卡显式把题型从 A 改成 B（edit-dna field=qtype）→ 该题
+# dirty_dims 含 "qtype"。REGEN_PROMPT 本质是「等价变式·换数字保型重出」，传进去的新 qtype
+# 只是弱信号被模型无视（沿用原题面结构 = 改了个寂寞）。检测到题型脏时，往 REGEN_PROMPT 拼
+# 这段强指令（压过"等价变式保型"框架），让模型真按新题型的标准结构（_QTYPE_CONTRACT）重构题面。
+# 🔴 只换题型一维：主考点/年级/难度/考察类型/骨架基因仍守恒（守恒注入不动）。
+def _qtype_change_clause(new_qtype: str) -> str:
+    return (
+        f"\n\n🔴🔴 老师显式要求改题型 → 必须把本题**重构**为【{new_qtype}】题型（这条优先级高于上面的"
+        f"「等价变式·换数字保型」框架）：按【{new_qtype}】题型的标准结构（见上方题型结构契约）**重组题面**，"
+        f"**不是**换数字保留原题型形态。例如：填空→解答：去掉 `____` 空位，改成「求…的值，写出完整解题过程」；"
+        f"选择→填空：去掉 ABCD 选项改成空位填值；选择/填空→解答：展开为带完整推导的解答。"
+        f"主考点/年级/难度/考察类型/解法骨架最难步仍守恒，**只换题型形态** + 配套调整 stem/answer/solution/"
+        f"qtype/verify_payload 的结构以匹配【{new_qtype}】。输出 JSON 的 qtype 字段**必须**= 「{new_qtype}」。"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 闸B·程序验算（PRD-C-010）：LLM 只负责"人话题 → 结构化载荷"的有界抽取，
 # pass/fail 判决只读 math_verify.verify()（纯 sympy，零 LLM）的 verdict。
@@ -3672,6 +3688,14 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
         stem = f"{stem}\n\n[老师要求·须保留] {edit_note}"
     if feedback:
         stem = f"{stem}\n\n[程序验算反馈] {feedback}"
+    # B5-fix4：老师显式改了题型（edit-dna field=qtype → dirty_dims 含 "qtype"）→ 注强指令，
+    # 让重生按新题型重构题面（压过"等价变式保型"框架）；没改题型则该串为空，保型路完全不变。
+    new_qtype = item.get("qtype") or facts["qtype"]
+    qtype_change_clause = (
+        _qtype_change_clause(new_qtype)
+        if "qtype" in (item.get("dirty_dims") or [])
+        else ""
+    )
     try:
         regen_text = await _ainvoke_text(
             [
@@ -3693,6 +3717,9 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
                     + _conservation_clause(facts.get("dna"))
                     # 🔴 批3·W2' 注卡（回炉重出同样照模型卡片，难度≥3+非M00 才注，含反退化约束）。
                     + _maybe_note_card_block(facts)
+                    # 🔴 B5-fix4·题型改造强指令（老师显式改题型才注，压过"等价变式保型"框架；
+                    #   未改题型时为空串，保型重出路完全不变）。放末尾 = 最末读到优先级最高。
+                    + qtype_change_clause
                 )
             ],
             # 🔴 整改4：回炉瘦身 max_tokens 上限压输出失控（出题主调用 generate/add 不动）。
