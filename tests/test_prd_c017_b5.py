@@ -221,6 +221,13 @@ def test_needconfirm_stage_is_await_not_warn(monkeypatch):
     assert all(s[2] != "warn" for s in classify_stages), "等确认不该发 warn"
     assert any(s[2] == STAGE_AWAIT for s in classify_stages)
     assert all("已中断" not in (s[3] or "") for s in classify_stages)
+    # 🔴 B5-fix3：解析配方灯（knobs）也必须在 needConfirm 暂停时发 await（中性），不是 warn、
+    #   不含「已中断」——否则 analyze 残留的 running 会被 FE settleStages 渲成 warn+「已中断」误告警。
+    knobs_stages = [s for s in stages if s[0] == "knobs"]
+    assert knobs_stages, "needConfirm 暂停应补发解析配方阶段灯（与锚定考点 await 配对）"
+    assert all(s[2] != "warn" for s in knobs_stages), "等确认不该让解析配方发 warn"
+    assert any(s[2] == STAGE_AWAIT for s in knobs_stages), "解析配方应发 await 中性态"
+    assert all("已中断" not in (s[3] or "") for s in knobs_stages)
 
 
 def test_with_figure_reject_keeps_warn(monkeypatch):

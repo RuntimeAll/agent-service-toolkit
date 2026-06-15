@@ -1594,6 +1594,11 @@ async def mother_precheck_node(state: VariantState, config: RunnableConfig) -> V
     # 🔴 B5 问题1·阶段灯中性态：等老师确认年级章是**正常暂停**不是告警 → 发 STAGE_AWAIT（"await"），
     #   不发 warn、不发"已中断"（带图打回那个 warn 在上面保留，那是真要拦）。
     _emit_stage("classify", "锚定考点", STAGE_AWAIT, "请确认年级与章后继续")
+    # 🔴 B5-fix3 问题1 收尾：「解析配方」灯在 analyze 发了 running 后、流程在此 needConfirm 处停下
+    #   等老师确认（route END），**从未拿到终态**——FE settleStages 把残留 running 渲成 warn+「已中断」
+    #   误告警。这里与「锚定考点」await 配对补发 knobs 中性 await，让正常暂停两灯齐齐中性、消除误告警。
+    #   （真配方在老师确认章后由 classify 发 done/warn 终态。）
+    _emit_stage("knobs", "解析配方", STAGE_AWAIT, "待确认年级章后定配方")
     grade_line = pre.get("grade_book") or "（未判出，请手选）"
     chapter_line = pre.get("chapter") or "（未判出，请手选）"
     body = (
