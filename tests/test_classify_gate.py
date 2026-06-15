@@ -119,7 +119,9 @@ def test_classify_anchors_then_generate(monkeypatch):
     out = asyncio.run(classify(dict(_BASE_STATE), {}))
     assert out["mother_confirmed"] is True
     assert out["analysis"]["kp"]["anchored"]["code"] == "3071001001001"
-    assert gate_after_classify(out) == "generate"
+    # 🔴 PRD-C-017 B5·母题卡硬停闸：定死后不再直通 generate，改走 await_review（母题卡先出后
+    #   必停，等老师点「开始举一反三」经 route_entry resume 才 generate）。
+    assert gate_after_classify(out) == "await_review"
     # DNA 穿进 mother_dna.dna，供 _mother_facts → BO
     assert out["mother_dna"]["dna"]["main_kp"]["id"] == "3071001001001"
     # 🔴 G4：opus 解答骨架进 mother_dna（solution_skeleton 来源 = opus 解答，非抄图）

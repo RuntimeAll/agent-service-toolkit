@@ -175,6 +175,11 @@ GENE_GATE_PASS = "pass"  # 纯代码三检全过（合格平行题）
 GENE_GATE_WARN = "warn"  # 三检任一命中 → 真值 + flags 留档；外显层按 4d 矩阵裁决
 GENE_GATE_SKIPPED = "skipped"  # 历史值（judge 退役后纯代码不再产生 skipped；保留供旧线程兼容）
 
+# 🔴 PRD-C-017 B5·阶段灯中性态（status 枚举新增）：正常暂停（等老师确认年级章 / 等老师点
+#   「开始举一反三」）不是告警，发 "await"（FE 配中性色 + "待确认/待开始"文案），不发 warn、
+#   不发"已中断"。带图打回(reject) 那个 warn 保留（真要拦）。FE 需对 "await" 配色。
+STAGE_AWAIT = "await"
+
 
 # ---------------------------------------------------------------------------
 # State（设计 prompt 指定结构）
@@ -197,6 +202,11 @@ class VariantState(MessagesState, total=False):
     mother_rejected: bool
     confirmed_chapter_id: str | None
     confirmed_grade_book_id: str | None
+    # 🔴 PRD-C-017 B5·母题卡硬停闸：classify 解出 mother_dna + 发母题卡帧后，置 True 并 END
+    #   （不自动流向 generate）。下一轮老师点「开始举一反三」→ FE 经 config.configurable 回传
+    #   start_variants=True → route_entry 见信号 + 已有 mother_dna（checkpointer 持久 thread state）
+    #   → 直奔 generate（不重跑 classify、不重调 opus，复用 state.mother_dna）。
+    awaiting_mother_review: bool
     # items[{stem, answer, solution, qtype, difficulty, level, injected_kp?,
     #        check:{badge:ok|warn, solved_answer}  ← 闸B(solve_explain)填,
     #        gene:{gate:pass|warn|skipped, reason?} ← 闸A(gene_gate)填}]
@@ -1240,8 +1250,17 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
     ]
 
     difficulty = dna.get("difficulty")
-    if difficulty is None:
-        difficulty = mdna.get("difficulty")
+    if not isinstance(difficulty, int):
+        md = mdna.get("difficulty")
+        difficulty = md if isinstance(md, int) else None
+
+    # 🔴 PRD-C-017 B5 问题3·答案核齐根因修：opus 把标准答案放 richText.answer（→ mdna.answer），
+    #   solvedAnswer（→ mdna.solved_answer）是它的"解出值"草稿、常为空或更简略。旧版母题卡只外显
+    #   solved_answer 顶层 → opus solvedAnswer 留空时母题卡"答案为空"（真机症状）。修法：① 顶层新增
+    #   `answer`（标准答案，FE 优先映射它）；② solved_answer 兜底回退 answer（两者择有值者），保证
+    #   "答案"区永不空（只要 opus 给了 richText.answer 或 solvedAnswer 任一）。
+    std_answer = str(mdna.get("answer") or "") or None
+    solved_answer = str(mdna.get("solved_answer") or "") or None
 
     # need_anchor_review：闸B 留空标记（mother_dna 或 dna 任一标了即为真）。
     need_review = bool(mdna.get("need_anchor_review") or dna.get("need_anchor_review"))
@@ -1260,7 +1279,9 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         "stem": str(mdna.get("stem") or "") or None,  # 🔴 入库靠它，缺则入库被拦
         "analysis": str(mdna.get("analysis") or "") or None,  # 🔴 opus 解析富文本（入库存它，非骨架顶替）
         "solution_skeleton": solution_skeleton,
-        "solved_answer": str(mdna.get("solved_answer") or "") or None,
+        # 🔴 B5 问题3：answer=标准答案（FE 优先映射）；solved_answer 兜底回退 answer（永不空）。
+        "answer": std_answer,
+        "solved_answer": solved_answer or std_answer,
         "qtype": str(dna.get("qtype") or "") or None,
         "difficulty": difficulty if isinstance(difficulty, int) else None,
         "main_kp": main_kp_name,  # anchorKp（考点名）
@@ -1336,6 +1357,19 @@ def route_entry(
         cfg = (config or {}).get("configurable") or {}
         if cfg.get("confirmed_chapter_id"):
             return "classify"
+    # 🔴 PRD-C-017 B5·母题卡硬停闸 resume（复用 chat-resume，不引 interrupt）：上一轮 classify
+    #   解出 mother_dna + 发母题卡帧后停在 awaiting_mother_review 等老师点「开始举一反三」。本轮
+    #   老师点了 → FE 经 config 回传 start_variants=True → 已有 mother_dna（checkpointer 持久 thread
+    #   state）→ **直奔 generate**（不重跑 classify、不重调 opus，复用 state.mother_dna）。
+    #   🔴 即使老师改了母题 DNA 再点开始（既有 dirty/patch 逻辑会清 items + mother_confirmed=False
+    #   走 classify 重锚），此处只在「已有 mother_dna 且未出题」时直奔 generate，不破 B3.6 edit→regen。
+    if state.get("awaiting_mother_review") and not state.get("items"):
+        cfg = (config or {}).get("configurable") or {}
+        if cfg.get("start_variants") and state.get("mother_dna"):
+            return "generate"
+        # 🔴 停在 review 但老师没点开始（发了别的话/改 DNA）→ 落 parse 分诊（既有母题纠正/
+        #   答疑路径），**绝不**掉进下面「mother_confirmed → 自动 generate」把硬停闸架空。
+        return "parse"
     # 库内母题（已确认 DNA）、还没出题 → 直接造（跳 analyze/classify）
     if state.get("mother_confirmed") and state.get("mother_dna") and not state.get("items"):
         return "generate"
@@ -1557,7 +1591,9 @@ async def mother_precheck_node(state: VariantState, config: RunnableConfig) -> V
         "confidence": pre.get("confidence"),
     }
     _emit_need_confirm(payload)
-    _emit_stage("classify", "锚定考点", "warn", "请确认年级与章后继续")
+    # 🔴 B5 问题1·阶段灯中性态：等老师确认年级章是**正常暂停**不是告警 → 发 STAGE_AWAIT（"await"），
+    #   不发 warn、不发"已中断"（带图打回那个 warn 在上面保留，那是真要拦）。
+    _emit_stage("classify", "锚定考点", STAGE_AWAIT, "请确认年级与章后继续")
     grade_line = pre.get("grade_book") or "（未判出，请手选）"
     chapter_line = pre.get("chapter") or "（未判出，请手选）"
     body = (
@@ -1647,6 +1683,23 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
     leaf_pool: list[tuple[str, str]] = []
     client = RuoyiClient(token=token)
+
+    # --- 🔴 PRD-C-017 B5 问题2附带·确认后年级**人话名**同步 ---
+    #   B4-fix 已让 grade.code 吃确认章前 4 位，但 grade.value（阶段灯/气泡显示的年级册名）仍是
+    #   analyze 误读值（如确认八上却显示「七年级上学期」）。这里按确认章前 4 位 = 年级册 level1
+    #   节点 id，走 lazyTree 反查册名（chapter_name_for_id 整树压平命中），同步成老师确认的年级册名。
+    #   FE 回传了 grade_book_name（config.configurable）则优先用它（免一次树查）。拉不到 → 不改
+    #   （宁可留旧值也不抹空，不破现有显示）。仅在确认章驱动 grade_code 时同步（无确认章不动）。
+    if confirmed_chapter_id and len(confirmed_chapter_id) >= 4:
+        cfg_conf = (config or {}).get("configurable") or {}
+        gb_name = str(cfg_conf.get("grade_book_name") or "").strip() or None
+        if not gb_name:
+            gb_name = await chapter_name_for_id(grade_code, client)
+        if gb_name:
+            grade_node = dict(analysis.get("grade") or {})
+            grade_node["value"] = gb_name  # 人话名同步成老师确认的年级册（阶段灯/气泡显示用它）
+            analysis["grade"] = grade_node
+
     try:
         leaf_pool = await leaf_pool_for_grade(
             grade_code, client, include_review_books=include_review_books
@@ -1922,16 +1975,42 @@ def _pin_status(state: VariantState) -> dict[str, Any]:
     }
 
 
-def gate_after_classify(state: VariantState) -> Literal["generate", "clarify"]:
-    """🔴 定死闸（批2）：定死（年级册 code + main_kp 锚真叶子 + 置信达标）→ 直通 generate；
-    没定死（缺任一）→ 一律停 clarify 确认态（不进 generate），从机制上绝迹缺锚出题。
+def gate_after_classify(state: VariantState) -> Literal["await_review", "clarify"]:
+    """🔴 定死闸（批2）+ 母题卡硬停闸（B5）：定死（年级册 code + main_kp 锚真叶子 + 置信达标）
+    → **不再直通 generate**，改走 await_review（置 awaiting_mother_review + END，母题卡已先出，
+    等老师点「开始举一反三」再经 route_entry resume 直奔 generate）；没定死（缺任一）→ 一律停
+    clarify 确认态。从机制上①绝迹缺锚出题；②母题卡先出后必停、不自动造变式（B5 AC）。
+
+    🔴 B5 前本闸 pinned → "generate" 直连，变式立刻自动生成。现在 pinned → "await_review"
+    硬停，让老师 review 母题卡后主动触发。resume 路径（start_variants）绕开 classify/本闸
+    （route_entry 直接 → generate），故本闸的 "generate" 出口已退役（只剩 await_review/clarify）。
 
     mother_confirmed 由 classify 按同口径（_conf_ok + anchored）置位，这里用 _pin_status
     再加「年级册 code + 非复习册」收口（mother_confirmed=True 但年级 code 缺/是复习册的边角
     路径也会被本闸拦住，不直通）。"""
     if state.get("mother_confirmed") and _pin_status(state)["pinned"]:
-        return "generate"
+        return "await_review"
     return "clarify"
+
+
+async def await_mother_review(state: VariantState, config: RunnableConfig) -> VariantState:
+    """🔴 PRD-C-017 B5·母题卡硬停闸：classify 已解出 mother_dna + 发了母题卡专帧（_emit_mother_card），
+    本节点置 awaiting_mother_review=True 并 END，**不流向 generate**——母题卡先出后流程停下，等老师
+    点「开始举一反三」（FE 经 config 回传 start_variants=True）下一轮经 route_entry resume 直奔 generate。
+
+    🔴 阶段灯中性态（B5 问题1）：发 STAGE_AWAIT（"await"，非 warn / 非"已中断"），文案「母题已就绪，
+       点『开始举一反三』生成变式」。这是正常暂停不是告警。
+    🔴 不重调任何 LLM（母题卡已在 classify 备齐）；checkpointer 跨本次暂停持久 mother_dna（thread state）。
+    """
+    _emit_stage("classify", "锚定考点", STAGE_AWAIT, "母题已就绪，待老师确认后开始举一反三")
+    return {
+        "awaiting_mother_review": True,
+        # 留痕：母题确认环节已过（route 不再当成在途确认）；review 是新的暂停态。
+        "awaiting_mother_confirm": False,
+        "messages": [
+            AIMessage(content="母题已解析并打标完成（见上方母题卡），确认无误请点「开始举一反三」生成变式；如需修改母题，直接告诉我。")
+        ],
+    }
 
 
 async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
@@ -6129,6 +6208,7 @@ graph = StateGraph(VariantState)
 graph.add_node("analyze", analyze)
 graph.add_node("mother_precheck", mother_precheck_node)  # B2·nano 前置判 年级章+带图（必停确认/打回）
 graph.add_node("classify", classify)
+graph.add_node("await_review", await_mother_review)  # B5·母题卡硬停闸（置 awaiting_mother_review + END）
 graph.add_node("clarify", clarify)
 graph.add_node("generate", generate)
 graph.add_node("gene_gate", gene_gate)  # 闸A·基因闸（新变式 → 平行度比对 → 闸B）
@@ -6180,9 +6260,12 @@ graph.add_conditional_edges(
 # mother_precheck（B2）：带图打回 → END（reject 已发）；否则发 needConfirm 停等确认 → END
 # （复用 clarify→END chat-resume，下一轮老师确认经 config 回传确认章 id → route 直奔 classify）。
 graph.add_edge("mother_precheck", END)
+# 🔴 B5·classify 不再直连 generate：定死 → await_review（母题卡硬停闸，置 awaiting_mother_review
+#   + END，等老师点「开始举一反三」经 route_entry resume → generate）；没定死 → clarify。
 graph.add_conditional_edges(
-    "classify", gate_after_classify, {"generate": "generate", "clarify": "clarify"}
+    "classify", gate_after_classify, {"await_review": "await_review", "clarify": "clarify"}
 )
+graph.add_edge("await_review", END)
 graph.add_edge("clarify", END)
 
 

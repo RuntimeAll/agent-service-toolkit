@@ -4,7 +4,7 @@
 「定死」三件同时满足：年级 4 位教材册 code + main_kp 锚真叶子（非复习册） + 置信达 CONF_GATE。
 覆盖：
 - _pin_status 判定（齐全=pinned / 缺年级 / 缺 kp / 复习册前缀不算定死 / 低置信）；
-- gate_after_classify：定死直通 generate；没定死一律 clarify；
+- gate_after_classify：定死 → await_review（B5 母题卡硬停闸，不再直通 generate）；没定死一律 clarify；
 - generate 入口防御：facts 缺年级或主考点 → 拒造回确认态；
 - 编辑轮（exec_* 经 gene_gate，不过 generate 入口）不被定死闸拦。
 """
@@ -84,8 +84,9 @@ def test_pin_status_low_confidence():
 # ---------------------------------------------------------------------------
 # gate_after_classify
 # ---------------------------------------------------------------------------
-def test_gate_pinned_goes_generate():
-    assert gate_after_classify(_pinned_state()) == "generate"
+def test_gate_pinned_goes_await_review():
+    # 🔴 PRD-C-017 B5·母题卡硬停闸：定死后不再直通 generate，改走 await_review（母题卡先出后必停）。
+    assert gate_after_classify(_pinned_state()) == "await_review"
 
 
 def test_gate_unpinned_goes_clarify():
