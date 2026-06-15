@@ -3266,6 +3266,22 @@ def _qtype_change_clause(new_qtype: str) -> str:
     )
 
 
+# B5-fix5（PRD-C-017）：老师在变式卡显式把场景从 A 改成 B（edit-dna field=scene）→ 落
+# mother_dna.dna.scene（场景是组级共享维，对全组生效）。REGEN_PROMPT 本质是「等价变式·换数字
+# 保型重出」，守恒段④只说「场景可换同类」= 让模型随机换/沿用原场景，老师指定的新场景从不传达
+# 给模型（= 改了个寂寞，与 qtype 同构坑）。检测到场景脏时往 REGEN_PROMPT 拼这段强指令（压过
+# 「等价变式保型 + 守恒段④随机换场景」），让模型真把题面改写到老师指定的场景下。
+# 🔴 只换场景表皮一维：考点/年级/题型/难度/考察类型/解法骨架最难步仍守恒（守恒注入不动）。
+def _scene_change_clause(new_scene: str) -> str:
+    return (
+        f"\n\n🔴🔴 老师显式指定了新场景【{new_scene}】 → 必须把本题的**题面叙述改写到这个场景下**"
+        f"（这条优先级高于上面的「等价变式·换数字保型」框架与守恒段「场景可换同类」——**不是**随机换场景、"
+        f"**不是**保留原场景）：把题干的背景/角色/情境替换成【{new_scene}】，并配套调整 stem 的叙述措辞，"
+        f"让整道题读起来就发生在【{new_scene}】里。主考点/年级/题型/难度/考察类型/解法骨架最难步仍守恒，"
+        f"**只换场景表皮**（数值与考查结构不变）。输出 JSON 若含 scene/场景字段则**必须**= 「{new_scene}」。"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 闸B·程序验算（PRD-C-010）：LLM 只负责"人话题 → 结构化载荷"的有界抽取，
 # pass/fail 判决只读 math_verify.verify()（纯 sympy，零 LLM）的 verdict。
@@ -3696,6 +3712,15 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
         if "qtype" in (item.get("dirty_dims") or [])
         else ""
     )
+    # B5-fix5：老师显式改了场景（edit-dna field=scene → dirty_dims 含 "scene"，落
+    # mother_dna.dna.scene = 组级共享，全组重生都带新场景）→ 注强指令，让重生把题面
+    # 改写到指定场景（压过"等价变式保型 + 守恒段随机换场景"）；没改场景则该串为空，保型路完全不变。
+    new_scene = (facts.get("dna") or {}).get("scene")
+    scene_change_clause = (
+        _scene_change_clause(new_scene)
+        if "scene" in (item.get("dirty_dims") or []) and str(new_scene or "").strip()
+        else ""
+    )
     try:
         regen_text = await _ainvoke_text(
             [
@@ -3720,6 +3745,9 @@ async def _regen_once(item: dict, facts: dict, feedback: str | None = None) -> d
                     # 🔴 B5-fix4·题型改造强指令（老师显式改题型才注，压过"等价变式保型"框架；
                     #   未改题型时为空串，保型重出路完全不变）。放末尾 = 最末读到优先级最高。
                     + qtype_change_clause
+                    # 🔴 B5-fix5·场景改写强指令（老师显式改场景才注，压过"等价变式保型 + 守恒段
+                    #   随机换场景"；未改场景时为空串，保型/随机换场景路完全不变）。与 qtype 并列同注。
+                    + scene_change_clause
                 )
             ],
             # 🔴 整改4：回炉瘦身 max_tokens 上限压输出失控（出题主调用 generate/add 不动）。
