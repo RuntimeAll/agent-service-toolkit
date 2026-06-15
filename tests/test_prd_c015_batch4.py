@@ -239,18 +239,50 @@ def test_meta_tags_edit_not_dirty(monkeypatch):
     assert not update["items"][0].get("dna_dirty")
 
 
-def test_meta_hard_points_edit_not_self_dirty_but_propagates_mother(monkeypatch):
+def test_meta_hard_points_edit_is_pure_annotation_no_regen(monkeypatch):
+    """🔴 PRD-C-017 B5-fix6·hard_points 改为「纯标注」语义（对齐 UI「只标注」维）：
+    只更新值 + 留痕，**不置 mother_dirty、不标下游变式 dirty、不触发任何重生波及**
+    （消除全组空转：重生 prompt 全程不读 hard_points，旧逻辑波及全组 = 结果等价的空转）。"""
     _no_llm(monkeypatch)
     state = _state([{"stem": "q1"}, {"stem": "q2"}])
     update, _i, err = edit_dna_state(state, 1, "hard_points", ["新难点"])
     assert err is None
-    # hard_points 是元数据维（自身不因 rewrite/soft 置 dirty），但作为母题守恒基准维改 → 波及下游。
+    # 值即时更新（母题 DNA + item 级覆盖，母题卡/变式卡显示新难点）
     assert update["mother_dna"]["dna"]["hard_points"] == ["新难点"]
-    # 守恒维 4/4 之一 → facts_audit 留痕（冻结 setter）
+    assert update["items"][0]["hard_points"] == ["新难点"]
+    # 仍走冻结 setter → facts_audit 留痕（缺口6，标注也审计）
     assert any(a["field"] == "hard_points" for a in update["facts_audit"])
-    # 母题脏 + 下游变式标 dirty（D-merge8 回流）
-    assert update["mother_dna"]["dirty"] is True
-    assert all(it["dna_dirty"] for it in update["items"])
+    # 🔴 核心断言：不触发任何重生波及——母题不脏、所有下游变式不脏、无 mother_dirty_dims
+    assert not update["mother_dna"].get("dirty")
+    for it in update["items"]:
+        assert not it.get("dna_dirty")
+        assert not it.get("mother_dirty_dims")
+    # 待重生集合为空 = 不会空转一次 LLM
+    assert dirty_item_indexes(update["items"]) == []
+
+
+def test_other_conserve_dims_still_propagate_after_hard_points_fix(monkeypatch):
+    """🔴 B5-fix6 回归护栏：摘除 hard_points 波及不得误伤其它母题守恒维——
+    scene（soft_regen 题级）+ exam_type / skeleton（母题守恒）改仍按现状触发 dirty 波及。"""
+    _no_llm(monkeypatch)
+    # exam_type（母题守恒维）→ 母题脏 + 下游全标 dirty
+    s1 = _state([{"stem": "v1"}, {"stem": "v2"}])
+    u1, _i, e1 = edit_dna_state(s1, 1, "exam_type", "证明推理")
+    assert e1 is None
+    assert u1["mother_dna"]["dirty"] is True
+    assert all(it["dna_dirty"] for it in u1["items"])
+    assert all("exam_type" in (it.get("mother_dirty_dims") or []) for it in u1["items"])
+    # skeleton（母题守恒/重写解析维）→ 母题脏 + 下游全标 dirty
+    s2 = _state([{"stem": "v1"}, {"stem": "v2"}])
+    u2, _i, e2 = edit_dna_state(s2, 1, "skeleton", ["新骨架步"])
+    assert e2 is None
+    assert u2["mother_dna"]["dirty"] is True
+    assert all(it["dna_dirty"] for it in u2["items"])
+    # scene（soft_regen，题级）→ 本题标 dirty（非母题波及，但仍是「会重生」维，未被误摘）
+    s3 = _state([{"stem": "v1"}])
+    u3, _i, e3 = edit_dna_state(s3, 1, "scene", "杭州西湖")
+    assert e3 is None
+    assert u3["items"][0]["dna_dirty"] is True
 
 
 # ===========================================================================

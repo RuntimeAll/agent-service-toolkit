@@ -411,6 +411,8 @@ def build_mother_confirm(state: VariantState) -> dict[str, Any]:
 
 # 母题守恒基准维（4 维）→ 在 mother_dna.dna 里的键 + 人话名（facts_locked 扩维用，缺口6）。
 #   副考点/考察类型/难点 是标注/基准维（改不必重出母题题面）；解法骨架最难步是基因维（改=重写解析）。
+# 🔴 PRD-C-017 B5-fix6·此集合只管「冻结 setter + 留痕」（_dna_fact_edit 据它放行写入）；
+#   「改了是否波及下游 dirty」另由 _MOTHER_DIRTY_PROP_FIELDS 决定（hard_points 在此但不波及）。
 _DNA_CONSERVE_FIELDS: dict[str, str] = {
     "secondary_kps": "副考点",
     "exam_type": "考察类型",
@@ -559,8 +561,17 @@ def persist_dirty_guard(state: VariantState) -> str | None:
 
 
 # 守恒维改 → 下游变式要随基准变化的「母题基准维」集合（D-merge8 回流，重生时只补这些维）。
-# secondary_kps / exam_type 是守恒白名单/考察类型基准；skeleton 是基因基准；hard_points 是难点基准。
-_MOTHER_BASELINE_DIMS: tuple[str, ...] = ("secondary_kps", "exam_type", "skeleton", "hard_points")
+# secondary_kps / exam_type 是守恒白名单/考察类型基准；skeleton 是基因基准。
+# 🔴 PRD-C-017 B5-fix6·hard_points 已剔除：难点是「只标注」维（meta），重生 prompt 不读它，
+#   作为母题基准波及下游 = 空转重出（结果等价）。保留在 _DNA_CONSERVE_FIELDS（冻结 setter 留痕）
+#   但不在波及/基准集合里。
+_MOTHER_BASELINE_DIMS: tuple[str, ...] = ("secondary_kps", "exam_type", "skeleton")
+
+# 🔴 PRD-C-017 B5-fix6·母题守恒维「真正会波及下游 dirty」的集合 = 守恒维 − main_kp（硬锚走解冻重锚）
+#   − hard_points（纯标注，不波及）。edit_dna_state 据此置 mother_dirty + 标下游变式 dirty。
+_MOTHER_DIRTY_PROP_FIELDS: tuple[str, ...] = tuple(
+    f for f in _DNA_CONSERVE_FIELDS if f not in ("main_kp", "hard_points")
+)
 
 
 def mark_mother_dirty(state_mother_dna: dict[str, Any], items: list[dict[str, Any]], field: str) -> None:
@@ -5793,8 +5804,10 @@ def edit_dna_state(
         update["mother_dna"] = mother_dna
 
     elif field == "hard_points":
-        # 🔴 批4·元数据维（meta）：难点是标注/基准属性，改不必重出题面、不进 dirty。
-        #   但仍是守恒 4 维之一 → 走冻结 setter 留痕（缺口6）。落 mother_dna.dna.hard_points。
+        # 🔴 批4·元数据维（meta）：难点是标注属性，改不必重出题面、不进 dirty。
+        # 🔴 PRD-C-017 B5-fix6·「纯标注」语义：只更新值（走冻结 setter 留痕，缺口6，落
+        #   mother_dna.dna.hard_points + item 级覆盖），**不波及下游、不置 mother_dirty、不触发重出**
+        #   （见下方四分流路由：hard_points 不在 _MOTHER_DIRTY_PROP_FIELDS，与 tags 同档）。
         hp = value
         if isinstance(hp, str):
             hp = [hp.strip()] if hp.strip() else []
@@ -5860,10 +5873,13 @@ def edit_dna_state(
         mark_item_dirty(it, field)
     # meta（tags/secondary_kps/hard_points）→ 不进 dirty（只标注即时生效，§3.2c）。
 
-    # 🔴 D-merge8·母题守恒维改（secondary_kps/exam_type/skeleton/hard_points 母题级）→ 母题脏 +
-    #   下游所有变式标 dirty 不自动重出（并入待重生集合）。注意 hard_points 虽是 meta（自身不脏），
-    #   但作为母题守恒基准维改了仍要波及下游（基准变了）；secondary_kps 同理（meta 但母题级守恒）。
-    if field in _DNA_CONSERVE_FIELDS and field != "main_kp":
+    # 🔴 D-merge8·母题守恒维改（secondary_kps/exam_type/skeleton 母题级）→ 母题脏 +
+    #   下游所有变式标 dirty 不自动重出（并入待重生集合）；secondary_kps 同理（meta 但母题级守恒）。
+    # 🔴 PRD-C-017 B5-fix6·hard_points 改为「纯标注」语义（对齐 UI「只标注」维）：虽走冻结 setter
+    #   留痕（_dna_fact_edit，缺口6），但**不波及下游、不置 mother_dirty、不触发重出**——重生 prompt
+    #   全程不读 hard_points，旧逻辑把它当母题守恒基准维波及全组 = 空转一次 LLM（结果等价）。故从
+    #   波及集合（_MOTHER_DIRTY_PROP_FIELDS）剔除；与 tags 这种纯 meta 标注同档，只更新值即时生效。
+    if field in _MOTHER_DIRTY_PROP_FIELDS:
         mother_dna["dirty"] = True
         mark_mother_dirty(mother_dna, new_items, field)
         update["mother_dna"] = mother_dna
