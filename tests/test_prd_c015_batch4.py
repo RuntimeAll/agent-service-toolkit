@@ -444,6 +444,85 @@ def test_regen_failure_keeps_original(monkeypatch):
 
 
 # ===========================================================================
+# 6b) B5-fix·「重生这道」语义：显式 indexes = 强制整题重出（不管脏不脏）；
+#     None 路 = 仍只重生 dirty 集合（原行为不变）。
+# ===========================================================================
+
+
+def test_regen_explicit_index_non_dirty_force_full_regen(monkeypatch):
+    # ① 显式 index 指向「没改过」的非 dirty 题 → 强制整题重出（走 _regen_once，给一道全新变式）。
+    regen_called = {"n": 0}
+
+    async def fake_regen(item, facts, feedback=None):
+        regen_called["n"] += 1
+        return {"stem": "强制重出题面", "answer": "x=2", "solution": "新解析",
+                "qtype": item.get("qtype"), "difficulty": item.get("difficulty")}
+
+    async def boom_rewrite(*a, **k):
+        raise AssertionError("force 整题重出不该走 _rewrite_solve_once（只重写解析）")
+
+    async def fake_check(item, facts, idx, total):
+        return dict(item), None
+
+    monkeypatch.setattr(variant_mod, "_regen_once", fake_regen)
+    monkeypatch.setattr(variant_mod, "_rewrite_solve_once", boom_rewrite)
+    monkeypatch.setattr(variant_mod, "_check_one_item", fake_check)
+
+    # 第2道非 dirty、dirty_dims 空 —— 若按脏维分流会错走 rewrite_solve；force 必须整题重出。
+    items = [
+        {"stem": "原1", "dna_dirty": False},
+        {"stem": "原2", "qtype": "解答", "difficulty": 3, "dna_dirty": False},
+    ]
+    state = _state(items)
+    update, result, err = asyncio.run(regen_dirty_items(state, [2]))
+    assert err is None
+    assert result["regenerated"] == [2]
+    assert regen_called["n"] == 1  # 真走了 _regen_once
+    new2 = update["items"][1]
+    assert new2["stem"] == "强制重出题面"  # 整题真重出
+    assert new2["dna_dirty"] is False
+    assert isinstance(new2["regen_snapshot"], dict)
+    assert new2["regen_snapshot"]["stem"] == "原2"  # 快照 = 重生前（撤销用）
+    # 第1道（未指定）不动
+    assert update["items"][0]["stem"] == "原1"
+
+
+def test_regen_indexes_none_non_dirty_stays_noop(monkeypatch):
+    # ② indexes=None（自动重生待重生集合那条路）+ 非 dirty → 仍空（原行为不变）。
+    _no_llm(monkeypatch)  # 不该调任何 LLM
+    items = [{"stem": "a", "dna_dirty": False}, {"stem": "b", "dna_dirty": False}]
+    state = _state(items)
+    update, result, err = asyncio.run(regen_dirty_items(state, None))
+    assert err is None
+    assert result["regenerated"] == [] and result["failed"] == []
+
+
+def test_regen_explicit_index_dirty_soft_dim_same_as_before(monkeypatch):
+    # ③ 显式 index 指向改过软重生维（qtype）的 dirty 题 → 行为同前（整题重出 + 保留快照）。
+    async def fake_regen(item, facts, feedback=None):
+        return {"stem": "重出后题面", "answer": "x=2", "solution": "新解析",
+                "qtype": item.get("qtype"), "difficulty": item.get("difficulty")}
+
+    async def fake_check(item, facts, idx, total):
+        return dict(item), None
+
+    monkeypatch.setattr(variant_mod, "_regen_once", fake_regen)
+    monkeypatch.setattr(variant_mod, "_check_one_item", fake_check)
+
+    items = [
+        {"stem": "原1", "qtype": "解答", "difficulty": 3, "dna_dirty": True, "dirty_dims": ["qtype"]},
+    ]
+    state = _state(items)
+    update, result, err = asyncio.run(regen_dirty_items(state, [1]))
+    assert err is None
+    assert result["regenerated"] == [1]
+    new1 = update["items"][0]
+    assert new1["stem"] == "重出后题面"
+    assert new1["dna_dirty"] is False
+    assert new1["regen_snapshot"]["stem"] == "原1"
+
+
+# ===========================================================================
 # 7) 撤销重生（缺口12·G20）
 # ===========================================================================
 

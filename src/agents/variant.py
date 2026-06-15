@@ -6064,8 +6064,12 @@ async def regen_dirty_items(
 ) -> tuple[VariantState, dict[str, Any], str | None]:
     """🔴 手动「重生」入口（D-merge6/8 + 缺口12）：对待重生集合（dna_dirty 题）一次性重出。
 
-    - indexes=None → 全待重生集合（dirty_item_indexes）；给定 indexes → 只重生这些（仍须是 dirty 题）。
-    - 每道 dirty 题：① 存 regen_snapshot（缺口12 撤销用）② 按脏维分流重出：
+    - indexes=None（母题改→自动重生待重生集合那条路）→ 全待重生集合（dirty_item_indexes），
+      只重生 dirty 题，按脏维分流（保持原行为）。
+    - 显式给定 indexes（来自 FE「重生这道」按钮，B5-fix）→ **一键重生这些题的语义**：
+      不管改没改一律强制整题重出（force full regen），即使非 dirty（非 dirty 题 dirty_dims 空、
+      不能错走「只重写解析」，必须走 _regen_once 给一道全新变式）。dirty 题仍按脏维分流不变。
+    - 每道目标题：① 存 regen_snapshot（缺口12 撤销用）② 重出：
         · 含软重生维（题型/难度/考察类型/场景）→ _regen_once 重出整题 + _check_one_item 闸B（批3
           反退化闸自动复用）；
         · 仅重写解析维（骨架/models）脏 → _rewrite_solve_once 只重写解析 + _check_one_item 闸B 重验。
@@ -6078,9 +6082,13 @@ async def regen_dirty_items(
     facts = _mother_facts(state)
     if not items:
         return {}, {"regenerated": [], "failed": []}, None
-    targets = indexes if indexes else dirty_item_indexes(items)
-    # 过滤：只重生确实 dirty 的（防误触发非脏题重出）
-    targets = [n for n in targets if 1 <= n <= len(items) and items[n - 1].get("dna_dirty")]
+    # B5-fix：区分两种入口 —— 显式 indexes = force（一键重生这道，不管脏不脏）；
+    # None = 自动重生 dirty 集合（母题改那条路），仍只重生确实 dirty 的（防误触发非脏题重出）。
+    force = bool(indexes)
+    if force:
+        targets = [n for n in indexes if 1 <= n <= len(items)]
+    else:
+        targets = [n for n in dirty_item_indexes(items) if items[n - 1].get("dna_dirty")]
     if not targets:
         return {}, {"regenerated": [], "failed": []}, None
 
@@ -6093,9 +6101,12 @@ async def regen_dirty_items(
         snapshot = snapshot_item(old)
         dirty_dims = list(old.get("dirty_dims") or [])
         mother_dims = list(old.get("mother_dirty_dims") or [])
-        # 本题脏维涉及软重生维 → 整题重出；否则（仅 rewrite_solve 维脏）→ 只重写解析。
+        # B5-fix：force（显式「重生这道」）→ 无条件整题重出（非 dirty 题 dirty_dims 空，
+        #   不能错走「只重写解析」，老师要的是一道全新变式）。
+        # None 路（自动重生 dirty 集合）→ 本题脏维涉及软重生维 → 整题重出；否则（仅 rewrite_solve
+        #   维脏）→ 只重写解析（保持原行为）。
         all_dims = set(dirty_dims) | set(mother_dims)
-        need_full_regen = any(d in _SOFT_REGEN_FIELDS for d in all_dims)
+        need_full_regen = force or any(d in _SOFT_REGEN_FIELDS for d in all_dims)
 
         try:
             if need_full_regen:
