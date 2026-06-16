@@ -644,6 +644,10 @@ _LLM_TRACE_SEQ = 0  # 进程内自增序号（同一进程内调用顺序）
 
 # prompt 内容前缀 → 标签（哪个 prompt）。新增/造同含「基于母题 DNA」，先判 add 再判 generate。
 _TRACE_MARKERS: list[tuple[str, str]] = [
+    # 🔴 PRD-C-100 B1b：塌缩入口 opus 一把（按顺序判章+解题+打标）+ 母题池注入重锚（classify），
+    #   须排在 analyze/generate 泛 marker 前，独立标 label（G1：该轮无 analyze 行；G6：opus 调用点可查）。
+    ("按顺序做三件事", "mother_entry"),
+    ("先真正把题解出来", "mother_solve"),
     ("看这张题目图", "analyze"),
     ("出题配方", "knobs"),
     ("数学验算载荷抽取器", "extract"),

@@ -49,6 +49,14 @@ _breakers: dict[str, _Breaker] = {}
 _chat_cache: dict[str, ChatOpenAI] = {}
 _prices_cache: dict[str, dict[str, float]] | None = None
 
+# 🔴 PRD-C-100 B1b·内建默认价表（¥/1k token，in=prompt, out=completion）：opus 母题主链/造图翻命令
+#   必须有价才能算 cost_yuan（口径对，G6）。RELAY_PRICES(.env) **覆盖** 本默认（D5 单价配置化，
+#   促销价可能涨 → 改 .env 不改码）。默认只是兜底防 cost=None，不是事实源。
+#   claude-opus-4-8：限时价 输入¥7/M=0.007/1k、输出¥35/M=0.035/1k（D5）。
+_DEFAULT_PRICES: dict[str, dict[str, float]] = {
+    "claude-opus-4-8": {"in": 0.007, "out": 0.035},
+}
+
 
 def _relays() -> list[Relay]:
     """解析中转站列表。RELAY_POOL(JSON 有序) 优先；否则从 COMPATIBLE_* 派生单站。"""
@@ -255,14 +263,15 @@ def _prices() -> dict[str, dict[str, float]]:
     global _prices_cache
     if _prices_cache is not None:
         return _prices_cache
-    out: dict[str, dict[str, float]] = {}
+    # 内建默认价（opus 等）打底，RELAY_PRICES(.env) 覆盖（D5 配置化，促销价改 .env 不改码）。
+    out: dict[str, dict[str, float]] = {k: dict(v) for k, v in _DEFAULT_PRICES.items()}
     raw = (settings.RELAY_PRICES or "").strip()
     if raw:
         try:
             for model, p in json.loads(raw).items():
                 out[str(model)] = {"in": float(p.get("in", 0)), "out": float(p.get("out", 0))}
         except Exception:
-            out = {}
+            pass  # 配置坏 → 保留默认（不清空，opus 仍有价兜底）
     _prices_cache = out
     return out
 
