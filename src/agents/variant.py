@@ -47,6 +47,9 @@ from agents import (
     mother_opus,
     mother_precheck,
 )
+# 🔴 PRD-C-100 B1a 塌缩入口节点（懒导入 variant 防循环：variant_entry 模块体不 import variant，
+#   仅其节点函数运行期反向用 variant 机具）。此处 import 仅取节点函数挂图，不触发循环。
+from agents.variant_entry import mother_opus_entry
 from agents.qtype_format import format_by_qtype
 from agents.variant_support import (
     RuoyiClient,
@@ -262,6 +265,14 @@ class VariantState(MessagesState, total=False):
     #   - mother_dna.dirty: bool（母题守恒维改置位）。
     #   - regen_dirty: 会话态，已改未重生的重生维列表（打角标；待重生集合=变式自身脏∪母题脏波及）。
     regen_dirty: list[str]
+    # 🔴 PRD-C-100 B1a 塌缩入口（mother_opus_entry）增量：
+    #   mother_has_figure：opus 一把判定题面是否含图（带图不再 reject，给 B3 切图管线判定钩子）。
+    #   entry_decision：D1 条件 confirm 判据快照（needs_confirm/reason/候选/置信）。
+    #   _entry_finalized：本轮入口是否走到 finalize（高置信路径）= after_mother_entry 路由信号
+    #     （错误早退显式置 False，避免 checkpointer 跨轮 stale True 误路由到 await_review）。
+    mother_has_figure: bool
+    entry_decision: dict[str, Any]
+    _entry_finalized: bool
 
 
 # ---------------------------------------------------------------------------
@@ -1350,16 +1361,17 @@ def _emit_mother_card(state: VariantState) -> None:
 # ---------------------------------------------------------------------------
 def route_entry(
     state: VariantState, config: RunnableConfig
-) -> Literal["analyze", "parse", "generate", "ask", "auth", "classify"]:
+) -> Literal["mother_opus_entry", "parse", "generate", "ask", "auth", "classify"]:
     # 🔴 身份硬闸（用户拍板 2026-06-11）：每次对话绑死登录老师。token 缺失/解不出 userId
     # → 一步不走（不进任何 LLM 节点，conv_trace 也不会产生无主行；表级 NOT NULL 双保险）。
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
     if conv_trace.teacher_id_from_token(token) is None:
         return "auth"
     url = _extract_image_url(_latest_human_text(state.get("messages", [])))
-    # 跨轮新图 = 视作新母题（设计 §6：重走 analyze，覆盖在途状态）
+    # 🔴 PRD-C-100 B1a：跨轮新图 = 新母题 → 走塌缩入口 mother_opus_entry（opus 一把判章+解题+打标），
+    #   替代旧 analyze→mother_precheck→classify 三节点链（控制流重写）。
     if url:
-        return "analyze"
+        return "mother_opus_entry"
     # 🔴 PRD-C-017 B2·母题确认 resume（复用 chat-resume，不引 interrupt）：上一轮 mother_precheck
     #   发了 needConfirm 停在等确认（awaiting_mother_confirm），本轮老师**经 config 回传确认章 id**
     #   （confirmed_chapter_id）→ 直奔 classify（带确认章接闸B）。老师若改成纯文字纠正（没回 id）→
@@ -6298,8 +6310,12 @@ async def ask_for_image(state: VariantState, config: RunnableConfig) -> VariantS
 # 图（StateGraph）
 # ---------------------------------------------------------------------------
 graph = StateGraph(VariantState)
-graph.add_node("analyze", analyze)
-graph.add_node("mother_precheck", mother_precheck_node)  # B2·nano 前置判 年级章+带图（必停确认/打回）
+# 🔴 PRD-C-100 B1a 塌缩入口：mother_opus_entry 替代 analyze+mother_precheck（新图入口）。
+#   analyze/mother_precheck 节点保留（不删函数）但已从新图主路径退役（route_entry 不再路由到它们）；
+#   classify 保留 = 低置信确认 resume 的「+1 次 opus 池注入重锚」路径（D3）。
+graph.add_node("mother_opus_entry", mother_opus_entry)
+graph.add_node("analyze", analyze)  # 退役（保留防引用；route_entry 不再进）
+graph.add_node("mother_precheck", mother_precheck_node)  # 退役（同上）
 graph.add_node("classify", classify)
 graph.add_node("await_review", await_mother_review)  # B5·母题卡硬停闸（置 awaiting_mother_review + END）
 graph.add_node("clarify", clarify)
@@ -6324,7 +6340,9 @@ graph.add_node("require_login", require_login)
 graph.set_conditional_entry_point(
     route_entry,
     {
-        "analyze": "analyze",
+        # 🔴 PRD-C-100 B1a：新图入口 → 塌缩节点（替 analyze）
+        "mother_opus_entry": "mother_opus_entry",
+        "analyze": "analyze",  # 退役映射保留（防御）
         "generate": "generate",
         "parse": "parse_instruction",
         # 🔴 B2·母题确认 resume（config 回传确认章 id）→ 直奔 classify（带确认章接闸B）
@@ -6337,6 +6355,25 @@ graph.set_conditional_entry_point(
 )
 graph.add_edge("ask_for_image", END)
 graph.add_edge("require_login", END)
+
+# 🔴 PRD-C-100 B1a·塌缩入口出口路由：
+#   低置信弹窗（awaiting_mother_confirm）→ END 等确认（下一轮 route_entry 见 confirmed_chapter_id
+#     → classify 池注入重锚 +1 次 opus，D3）；错误早退（_entry_finalized=False）→ END（消息已发）；
+#   高置信 finalize → 复用 gate_after_classify（定死闸）→ await_review 硬停 / clarify。
+def after_mother_entry(state: VariantState) -> Literal["await_review", "clarify", "done"]:
+    if state.get("awaiting_mother_confirm"):
+        return "done"
+    if not state.get("_entry_finalized"):
+        return "done"
+    return gate_after_classify(state)
+
+
+graph.add_conditional_edges(
+    "mother_opus_entry",
+    after_mother_entry,
+    {"await_review": "await_review", "clarify": "clarify", "done": END},
+)
+
 
 # analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → mother_precheck（B2 前置判）
 def after_analyze(state: VariantState) -> Literal["mother_precheck", "done"]:

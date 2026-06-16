@@ -79,12 +79,13 @@ class TestRouteEntry17Fix:
         assert route_entry(state, _cfg()) == "parse"
 
     def test_url_always_wins(self):
+        # 🔴 PRD-C-100 B1a：新图入口由 analyze 改走塌缩节点 mother_opus_entry（opus 一把判章+解题+打标）。
         state = _state(
             text="https://oss.example.com/q.png 出5道",
             mother_dna={"stem": "old"},
             items=[{"stem": "q"}],
         )
-        assert route_entry(state, _cfg()) == "analyze"
+        assert route_entry(state, _cfg()) == "mother_opus_entry"
 
     def test_empty_state_asks_for_image(self):
         assert route_entry(_state(), _cfg()) == "ask"
