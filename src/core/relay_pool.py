@@ -151,6 +151,7 @@ async def ainvoke_failover(
     max_tokens: int,
     tags: list[str] | None = None,
     on_delta: Callable[[str], None] | None = None,
+    on_reasoning: Callable[[str], None] | None = None,
     model: str | None = None,
     temperature: float | None = None,
     response_format: dict[str, Any] | None = None,
@@ -207,21 +208,34 @@ async def ainvoke_failover(
             if response_format is not None:
                 bind_kw["response_format"] = response_format
             llm = chat.bind(**bind_kw)
-            if on_delta is None:
+            if on_delta is None and on_reasoning is None:
                 # cfg 为空不传（兼容测试桩的窄签名 ainvoke(messages)）
                 resp = await (llm.ainvoke(messages, config=cfg) if cfg else llm.ainvoke(messages))
             else:
+                # 🔴 PRD-C-100 D18 思考流式：on_reasoning 给了走 astream，逐 chunk 捞 content +
+                #   reasoning_content（additional_kwargs）；reasoning 累计回调（可折叠「思考中」块）。
+                #   思考型模型先吐 reasoning 再吐 content；只把 content 当正文，reasoning 单独转发。
                 resp = None
                 acc = ""
+                racc = ""
                 async for chunk in llm.astream(messages, config=cfg):
                     resp = chunk if resp is None else resp + chunk
                     try:
                         c = chunk.content
-                        if isinstance(c, str) and c:
+                        if isinstance(c, str) and c and on_delta is not None:
                             acc += c
                             on_delta(acc)
                     except Exception:  # noqa: BLE001 — 进度回调绝不炸主流程
                         pass
+                    if on_reasoning is not None:
+                        try:
+                            ak = getattr(chunk, "additional_kwargs", None) or {}
+                            rc = ak.get("reasoning_content")
+                            if isinstance(rc, str) and rc:
+                                racc += rc
+                                on_reasoning(racc)
+                        except Exception:  # noqa: BLE001
+                            pass
                 if resp is None:
                     raise RuntimeError("empty stream")
             br.fails = 0

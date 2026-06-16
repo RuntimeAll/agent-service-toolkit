@@ -281,6 +281,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
             response_format=RESPONSE_FORMAT_ENTRY,
             timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
+            on_reasoning=V._emit_reasoning,  # D18 思考流式（reasoning 可折叠块；aigeek 当前未吐=dormant）
         )
     except Exception as e:  # noqa: BLE001 — opus 失败 → SSE error，绝不静默退 gpt-5.4（母题唯一安全网）
         V._emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")

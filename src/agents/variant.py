@@ -753,6 +753,7 @@ async def _ainvoke_text(
     *,
     public_stream: bool = False,
     on_delta: Any = None,
+    on_reasoning: Any = None,
     model: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
@@ -792,7 +793,8 @@ async def _ainvoke_text(
         # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数
         #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
         resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
-            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
+            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta,
+            on_reasoning=on_reasoning, model=model,
             temperature=temperature, response_format=response_format, timeout=timeout,
         )
         text = _content_text(resp).strip()
@@ -1038,6 +1040,24 @@ def _emit_reject(reason: str, message: str) -> None:
         return
     try:
         writer(ChatMessage(content=[{"reject": {"reason": reason, "message": message}}], role="custom"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _emit_reasoning(text: str) -> None:
+    """🔴 PRD-C-100 D18 思考流式：opus reasoning 流式吐前端可折叠「思考中」块（透明、零额外成本）。
+    契约 = ChatMessage(role="custom", content=[{"reasoning": {"text": <累计 reasoning>}}])，同双层静默吞。
+    🔴 旧前端无该事件 → 静默丢弃（向后兼容，AC13）；reasoning 纯展示，不混入 intent/outline 正文，
+       pass/fail 判决永不采信 reasoning（铁律不破）。注：opus 经 aigeek 当前未吐 reasoning（B0 实测），
+       本管线 ready-but-dormant——上游若开 extended-thinking 则自动流式（无需再改码）。"""
+    if not text:
+        return
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        writer(ChatMessage(content=[{"reasoning": {"text": text}}], role="custom"))
     except Exception:  # noqa: BLE001
         pass
 
