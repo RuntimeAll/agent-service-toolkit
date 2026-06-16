@@ -67,6 +67,12 @@ async def compose_variant_figure(
     🔴 correction_prompt 非空 = 图片重生（老师修正提示词，单图重造，人在回路 D12）。
     🔴 任何失败 → needs_figure=True（降级，不抛、不掐流程 G11）。
     """
+    # 🔴 B5 预算护栏（G7）：当日花费超阈值 → 造图降级（needs_figure，不调翻命令，题照常交付）。
+    from agents import cost_guard
+    if cost_guard.is_budget_exceeded():
+        return {"item_id": item_id, "ok": False, "needs_figure": True,
+                "reason": "今日 AI 额度已用尽，配图暂缓（可明日重试或手动配图）", "commands": [], "warnings": []}
+
     user_segs = [f"【变式题面】\n{stem}"]
     if answer:
         user_segs.append(f"【标准答案/解答】\n{answer}")

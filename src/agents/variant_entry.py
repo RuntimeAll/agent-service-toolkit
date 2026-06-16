@@ -243,6 +243,18 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         return {"_entry_finalized": False,
                 "messages": [AIMessage(content="请先贴一张题目图的 OSS URL，我才能开始举一反三。")]}
 
+    # 🔴 B5 单一全局日预算护栏（G7）：当日花费超阈值 → 拦截母题 opus 一把（不调，不静默烧钱）。
+    from agents import cost_guard
+    if cost_guard.is_budget_exceeded():
+        st = cost_guard.budget_status()
+        V._emit_stage("classify", "锚定考点", "warn", "今日 AI 额度已用尽")
+        V._emit_error("budget_exceeded",
+                      f"今日 AI 额度已用尽（已用 ¥{st['spend']:.2f}/¥{st['limit']:.2f}），请稍后或明日再试。")
+        return {
+            "_entry_finalized": False, "image_url": url,
+            "messages": [AIMessage(content="今日 AI 额度已用尽，举一反三暂停以控成本，请稍后或明日再试。")],
+        }
+
     V._emit_stage("classify", "锚定考点", "running", "opus 读图判章 + 解题打标…")
 
     user_text = V._strip_urls(V._latest_human_text(state.get("messages", [])))
