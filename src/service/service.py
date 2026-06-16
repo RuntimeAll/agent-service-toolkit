@@ -455,6 +455,67 @@ async def variant_persist(input: VariantPersistInput) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
+class VariantFigureInput(BaseModel):
+    """PRD-C-100 B3 带图管线 · service 层后处理（D14：不进 StateGraph）。
+    mode=crop_mother（母题切图，需 image_url）/ compose_variant（变式造图，需 stem；带
+    correction_prompt = 图片重生）。"""
+
+    mode: str
+    thread_id: str
+    ruoyi_token: str
+    image_url: str | None = None
+    stem: str | None = None
+    answer: str | None = None
+    correction_prompt: str | None = None
+    item_id: str | None = None
+
+
+@router.post("/variant/compose-figure")
+async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
+    """PRD-C-100 B3：带图管线后处理端点（不进变式 StateGraph，四节点字节不动 D14）。
+      - mode=crop_mother：figure-crop 检测+裁母题图 → PNG base64（母题图直贴）。
+      - mode=compose_variant：opus 翻 GeoGebra 命令一轮直出 → mathfig 渲染 → PNG base64
+        （correction_prompt 非空 = 图片重生，人在回路 D12）。
+    🔴 OSS 不在此（人在回路省 spam）：入库时 FE 传 OSS（uploadMotherImage 既有）→ A-015 image 块。
+    🔴 失败 → ok=False + needs_figure=True（降级，200 不 500，前端按 needs_figure ⚠ 外显 G11）。
+    """
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.figure import compose
+    from agents.variant import _ainvoke_text, _parse_json
+
+    if conv_trace.teacher_id_from_token(input.ruoyi_token) is None:
+        raise HTTPException(status_code=401, detail="登录态缺失或已过期，请重新登录")
+    # 设 config contextvar，让 compose 内 _ainvoke_text 的 ensure_config() 拿到 thread_id/teacher_id
+    # （落 conv_trace label=figure_geogebra，造图翻命令 opus 调用不漏计 G6）。
+    cfg: dict[str, Any] = {
+        "configurable": {"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
+    }
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        if input.mode == "crop_mother":
+            if not input.image_url:
+                raise HTTPException(status_code=400, detail="crop_mother 需 image_url")
+            return await compose.crop_mother_figure(input.image_url)
+        if input.mode == "compose_variant":
+            if not input.stem:
+                raise HTTPException(status_code=400, detail="compose_variant 需 stem")
+            return await compose.compose_variant_figure(
+                stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
+                parse_json=_parse_json, correction_prompt=input.correction_prompt,
+                item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
+            )
+        raise HTTPException(status_code=400, detail=f"未知 mode: {input.mode}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"variant_compose_figure error: {e}")
+        # 降级：不 500，返回 needs_figure（G11 不卡流程）
+        return {"ok": False, "needs_figure": True, "reason": f"造图异常: {str(e)[:80]}"}
+    finally:
+        var_child_runnable_config.reset(ctok)
+
+
 class VariantPersistOneInput(BaseModel):
     """单题入库直连请求（PRD-C-014 B2·T5·B3 前置）：index=1-based。"""
 

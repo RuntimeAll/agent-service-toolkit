@@ -648,6 +648,8 @@ _TRACE_MARKERS: list[tuple[str, str]] = [
     #   须排在 analyze/generate 泛 marker 前，独立标 label（G1：该轮无 analyze 行；G6：opus 调用点可查）。
     ("按顺序做三件事", "mother_entry"),
     ("先真正把题解出来", "mother_solve"),
+    # 🔴 PRD-C-100 B3：变式造图 opus 翻 GeoGebra 命令（G6：造图翻命令调用不漏计，含计费）。
+    ("数学配图助手", "figure_geogebra"),
     ("看这张题目图", "analyze"),
     ("出题配方", "knobs"),
     ("数学验算载荷抽取器", "extract"),

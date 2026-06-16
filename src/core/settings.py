@@ -164,6 +164,10 @@ class Settings(BaseSettings):
     #   母题节点 = 宽护栏防失控不截断（D6，非省钱杠杆）；定 12288 ≈ 2.4× 实测峰值，留思考型偶发头。
     #   .env MOTHER_OPUS_MAX_TOKENS 可覆盖（生产期按真实分布调）。
     MOTHER_OPUS_MAX_TOKENS: int = 12288
+    # 🔴 PRD-C-100 B3·造图翻命令模型（§10 契约「opus 翻 GeoGebra 命令」）：默认 opus（命令质量稳，
+    #   且当前促销价 opus 0.007/0.035 比 gpt-5.4 0.0108/0.0648 还便宜）。成本敏感期可经 .env 切
+    #   VARIANT_MODEL_FIGURE=gpt-5.4-mini。造图翻命令走 relay_pool 落 conv_trace(label=figure_geogebra)。
+    VARIANT_MODEL_FIGURE: str = "claude-opus-4-8"
     # 闸B 回炉（REGEN）瘦身 max_tokens 上限（整改4·2026-06-12）：回炉只带单题题面+错因+确定
     # 上下文块，比首稿出题（一次出 N 道）小得多 → 单独压一个上限防输出失控（ct 9k-11k）。
     # 出题主调用（generate/add）仍走 VARIANT_MAX_TOKENS，不动。≤0 视为回退 VARIANT_MAX_TOKENS。
