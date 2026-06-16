@@ -29,16 +29,37 @@ PRECHECK_TEMPERATURE = 0.2
 
 # 复用 B0 探针 NANO_CHAPTER_PROMPT（tools/c017_b0_probe.py）的判章 + 判带图 prompt。
 # 加候选输出（grade_candidates/chapter_candidates）给老师手选；候选可空。
-NANO_PRECHECK_PROMPT = """你是浙教版初中数学题库管理员。看这张题目图，判断它属于哪个**年级册 + 章**，给出候选，并判题面**是否含图形**。
+#
+# 🔴 接地（2026-06-16）：旧 prompt「开放生成」让 nano 凭记忆自由写年级册名 / 章名，且默认按
+#   人教版章序判 → 与库内**浙教版** biz_subject 命名口径对不上（老师上传后弹窗预填从不准）。
+#   现把真实闭集喂进去让 nano「从给定列表里选」：
+#   ① 年级册闭集 = biz_subject level1 的 6 个**教材册**（七上/七下/八上/八下/九上/九下，
+#      实查 id 3071/3072/3081/3082/3091/3092）。复习/专题册（中考一轮复习 3010 / 数学解题技巧
+#      与专题 3100 / 新题抢先 3120）**不作母题年级册**——母题是某一具体章的题。
+#   ② 章口径 = 浙教版，章名用**中文数字**「第二章一元二次方程」（库内真实写法），不是阿拉伯
+#      数字 + 空格「第2章 一元二次方程」。库内章名空格不统一（有的带空格、有的不带），nano
+#      照常识写即可，下游按名匹配容差。
+#   ❗章树本身（册→章 全列表 + id）本轮未注入（节点在 classify 前、无 ruoyi_token、注入需新加
+#     一次重 lazyTree 往返，超出 prompt 基础修复范围）→ chapter 仍由 nano 凭浙教版常识写、老师
+#     确认；真正锚 subject_id 仍在 classify 用确认章 id 完成。详见模块末注 + 交付报告。
+GRADE_BOOK_CLOSED_SET = "七年级上册、七年级下册、八年级上册、八年级下册、九年级上册、九年级下册"
+
+NANO_PRECHECK_PROMPT = """你是**浙教版**初中数学题库管理员。看这张题目图，判断它属于哪个**年级册 + 章**，给出候选，并判题面**是否含图形**。
+
+🔴 年级册**必须从下面 6 个里选一个**（这是题库 biz_subject 的真实命名，"册"是教材分册、不是"初一/七年级上学期"这类口径），拿不准就留空串、别自造：
+{grade_book_set}
+（中考一轮复习 / 专题 / 新题抢先等复习专题册**不算**母题年级册——母题是某一具体章的题。）
+
+🔴 章按**浙教版**章序判（题面常无版本标记，别按人教版章序，否则与题库浙教版章对不上）。章名用**中文数字**写，如「第二章一元二次方程」「第三章圆的基本性质」，**不要**写成阿拉伯数字「第2章」。
 
 {grade_hint}
 
 只输出一个 JSON（不要解释、不要 markdown fence）：
 {{
-  "grade_book": "最可能的年级册(如:八年级下册)；拿不准留空串",
-  "chapter": "最可能的章名(如:第2章 一元二次方程)；拿不准留空串",
-  "grade_candidates": ["其它可能的年级册，0~3 个；没有就空数组"],
-  "chapter_candidates": ["其它可能的章名，0~3 个；没有就空数组"],
+  "grade_book": "从上面 6 个里选最可能的一个(如:八年级下册)；拿不准留空串",
+  "chapter": "最可能的章名(浙教版·中文数字，如:第二章一元二次方程)；拿不准留空串",
+  "grade_candidates": ["其它可能的年级册(仍须是上面 6 个之一)，0~3 个；没有就空数组"],
+  "chapter_candidates": ["其它可能的章名(浙教版·中文数字)，0~3 个；没有就空数组"],
   "has_figure": true/false,
   "confidence": 0.0~1.0
 }}
@@ -47,12 +68,17 @@ NANO_PRECHECK_PROMPT = """你是浙教版初中数学题库管理员。看这张
 
 
 def build_precheck_prompt(grade_text_hint: str | None = None) -> str:
-    """组 nano 前置判 prompt。grade_text_hint = analyze 已读出的年级粗值（只作参考，不锁死）。"""
+    """组 nano 前置判 prompt。grade_text_hint = analyze 已读出的年级粗值（只作参考，不锁死）。
+
+    🔴 注入 6 教材册闭集 + 浙教版/中文数字章口径（接地，见 NANO_PRECHECK_PROMPT 注）。
+    """
     if grade_text_hint:
-        hint = f"（参考：上游读图初判像「{grade_text_hint}」，仅供参考，以你看图为准。）"
+        hint = f"（参考：上游读图初判像「{grade_text_hint}」，仅供参考，以你看图为准——且年级册仍须落在上面 6 个里。）"
     else:
         hint = ""
-    return NANO_PRECHECK_PROMPT.format(grade_hint=hint)
+    return NANO_PRECHECK_PROMPT.format(
+        grade_book_set=GRADE_BOOK_CLOSED_SET, grade_hint=hint
+    )
 
 
 async def precheck_judge(

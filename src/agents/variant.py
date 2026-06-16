@@ -1401,15 +1401,21 @@ ANALYZE_PROMPT = """你是浙教版初中数学命题专家。看这张题目图
 {utterance}
 （仅作语境参考——出题配方由独立纯文本抽取器另行解析，这里**不要**抽 knobs。）
 
+🔴 接地（grade/qtype 从闭集选，别自由造，否则与题库口径对不上、弹窗预填错）：
+- grade.value **只能从这 6 个浙教版教材册里选一个**（"册"是教材分册，不是"初一/7年级/上学期"这类口径）：
+  七年级上册、七年级下册、八年级上册、八年级下册、九年级上册、九年级下册。
+  题面无年级线索、判不出 → 留空串 ""（confidence 给低），别硬猜杂口径。
+- qtype.value **只能从这 3 类里选**：选择 / 填空 / 解答（计算题/证明题归入"解答"）。
+
 只输出一个 JSON（不要解释），结构：
 {{
   "is_question_image": true/false,   // 非题目图(风景/截图/空白)填 false
   "images_count": 1,                  // 检测到几张图
   "questions_in_image": 1,            // 这张图里有几道题
-  "grade": {{"value": "七年级上学期", "confidence": 0.0~1.0}},
+  "grade": {{"value": "七年级上册", "confidence": 0.0~1.0}},  // 6 册之一或留空 ""
   "subject": "数学",
   "kp": {{"value": "核心考点粗描述(如:一元二次方程求根)", "confidence": 0.0~1.0}},
-  "qtype": {{"value": "选择/填空/解答", "confidence": 0.0~1.0}},
+  "qtype": {{"value": "选择/填空/解答 三选一", "confidence": 0.0~1.0}},
   "stem": "题干(Markdown+LaTeX)",
   "answer": "标准答案(图里没有就先解母题得出)",
   "difficulty": 1~5,
