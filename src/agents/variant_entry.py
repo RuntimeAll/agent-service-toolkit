@@ -247,8 +247,17 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
 
     user_text = V._strip_urls(V._latest_human_text(state.get("messages", [])))
     # B2 缓存接缝：稳定 system 前缀 ‖ 变量 user 后缀（题图+query+teacher记忆后置）。
-    #   teacher_memory 槽 B4 记忆层接（此处 None，结构先就位 = 多用户接缝）。
-    teacher_memory = state.get("_teacher_memory_block")  # B4 注入；现 None
+    # 🔴 B4 记忆注入（走 RuoYi HTTP，只取 enabled，停用不注入 G14/G9）；放变量后缀（多用户接缝，
+    #    不进缓存稳定前缀）；best-effort（记忆故障绝不卡 mother 主流程）。
+    token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
+    teacher_memory: str | None = None
+    try:
+        from agents import teacher_memory as TM
+        _mem_client = V.RuoyiClient(token=token)
+        teacher_memory = await TM.fetch_memory_block(_mem_client)
+        await _mem_client.aclose()
+    except Exception:  # noqa: BLE001 — 记忆拉取失败 → 不注入，继续
+        teacher_memory = None
     messages = build_entry_messages(
         image_url=url, utterance=user_text or None, teacher_memory=teacher_memory,
     )

@@ -271,6 +271,67 @@ class RuoyiClient:
         """
         return await self.teacher_post("/teacher/question/update", body)
 
+    # === PRD-C-100 B4 记忆层 + 经验层（走 HTTP，不直连 MySQL；端点并行建，调不通即降级）===
+    async def _teacher_get(self, path: str, params: dict | None = None) -> Any:
+        """GET /teacher/** 解 envelope（code==1 取 response）。失败抛 RuoyiError（调用方降级）。"""
+        await self._ensure_token()
+        resp = await self._client.get(path, params=params or {}, headers=self._headers())
+        if resp.status_code == 401:
+            if self._forwarded:
+                raise RuoyiError(f"{path} 401：登录老师 token 失效")
+            self._token = None
+            await self.login()
+            resp = await self._client.get(path, params=params or {}, headers=self._headers())
+        data = resp.json()
+        if data.get("code") != 1:
+            raise RuoyiError(f"{path} 非 code==1: {data.get('message') or data.get('msg')}")
+        return data.get("response")
+
+    async def list_ai_memory(self, *, enabled_only: bool = False, mem_type: str | None = None) -> list[dict]:
+        """拉该登录老师的全局 AI 记忆。enabled_only=True 给 build prompt 注入（停用不注入）。
+        端点未上线/故障 → 返回 []（降级，绝不卡 mother 流程）。"""
+        params: dict[str, Any] = {}
+        if enabled_only:
+            params["enabledOnly"] = "true"
+        if mem_type:
+            params["memType"] = mem_type
+        try:
+            rows = await self._teacher_get("/teacher/ai-memory/list", params)
+        except Exception:  # noqa: BLE001
+            return []
+        return [r for r in (rows or []) if isinstance(r, dict)]
+
+    async def add_ai_memory(
+        self, *, mem_type: str, mem_key: str, mem_value: str,
+        source: str = "自动", confidence: float | None = None, remark: str | None = None,
+    ) -> Any:
+        """写一条全局记忆（自动写：confirm改章/改DNA/入库 确定性规则）。best-effort，失败返 None。"""
+        body = {"memType": mem_type, "memKey": mem_key, "memValue": mem_value, "source": source}
+        if confidence is not None:
+            body["confidence"] = confidence
+        if remark:
+            body["remark"] = remark
+        try:
+            return await self.teacher_post("/teacher/ai-memory", body)
+        except Exception:  # noqa: BLE001 — 记忆写失败绝不拖垮主流程
+            return None
+
+    async def write_dna_edit_log(
+        self, *, edit_kind: str, target_id: str | None = None, dim: str | None = None,
+        before: str | None = None, after: str | None = None,
+        correction_prompt: str | None = None, committed: bool = False,
+    ) -> Any:
+        """经验层留痕（只写不读，本轮不消费）：DNA 维编辑 / 图修正。best-effort，失败返 None。"""
+        body: dict[str, Any] = {"editKind": edit_kind, "committed": bool(committed)}
+        for k, v in (("targetId", target_id), ("dim", dim), ("before", before),
+                     ("after", after), ("correctionPrompt", correction_prompt)):
+            if v is not None:
+                body[k] = v
+        try:
+            return await self.teacher_post("/teacher/dna-edit-log", body)
+        except Exception:  # noqa: BLE001
+            return None
+
 
 # ---------------------------------------------------------------------------
 # 两步锚定·叶子池 + 标签复用池（PRD-C-014 B1·dna_extract 的生产数据源）

@@ -447,6 +447,10 @@ async def variant_persist(input: VariantPersistInput) -> dict[str, Any]:
         merged = {**values, **{k: v for k, v in update.items() if k != "messages"}}
         msgs = update.get("messages") or []
         reply = str(msgs[-1].content) if msgs else ""
+        # 🔴 B4 入库 → 写偏好记忆（确定性 D10）：常教年级册 + 常出题型。best-effort。
+        _gb = ((merged.get("analysis") or {}).get("grade") or {}).get("value")
+        _qt = ((merged.get("mother_dna") or {}).get("dna") or {}).get("qtype")
+        await _mem_write_preference(input.ruoyi_token, grade_book=_gb, qtype=_qt)
         return {"ok": True, "reply": reply, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
     except HTTPException:
         raise
@@ -468,6 +472,34 @@ class VariantFigureInput(BaseModel):
     answer: str | None = None
     correction_prompt: str | None = None
     item_id: str | None = None
+
+
+async def _exp_write(token: str, **kw: Any) -> None:
+    """PRD-C-100 B4 经验层留痕 best-effort（图修正/改DNA 每次都写，只累计不消费 D13）。
+    走 RuoYi HTTP（不直连 MySQL）；端点未上线/故障静默吞，绝不影响主流程。"""
+    try:
+        from agents.variant_support import RuoyiClient
+        c = RuoyiClient(token=token)
+        try:
+            await c.write_dna_edit_log(**kw)
+        finally:
+            await c.aclose()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_exp_write best-effort skip: {e}")
+
+
+async def _mem_write_preference(token: str, *, grade_book: str | None, qtype: str | None) -> None:
+    """PRD-C-100 B4 入库 → 写偏好记忆 best-effort（确定性直存 D10）。"""
+    try:
+        from agents import teacher_memory as TM
+        from agents.variant_support import RuoyiClient
+        c = RuoyiClient(token=token)
+        try:
+            await TM.write_preference_on_persist(c, grade_book=grade_book, qtype=qtype)
+        finally:
+            await c.aclose()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_mem_write_preference best-effort skip: {e}")
 
 
 @router.post("/variant/compose-figure")
@@ -500,11 +532,16 @@ async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
         if input.mode == "compose_variant":
             if not input.stem:
                 raise HTTPException(status_code=400, detail="compose_variant 需 stem")
-            return await compose.compose_variant_figure(
+            result = await compose.compose_variant_figure(
                 stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
                 parse_json=_parse_json, correction_prompt=input.correction_prompt,
                 item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
             )
+            # 🔴 B4 经验层留痕（图修正）：老师发修正提示词 → 每次都写（只累计 D13）。best-effort。
+            if input.correction_prompt:
+                await _exp_write(input.ruoyi_token, edit_kind="图修正",
+                                 target_id=input.item_id, correction_prompt=input.correction_prompt)
+            return result
         raise HTTPException(status_code=400, detail=f"未知 mode: {input.mode}")
     except HTTPException:
         raise
@@ -714,6 +751,8 @@ class VariantEditDnaInput(BaseModel):
     index: int
     field: str
     value: Any = None
+    # 🔴 PRD-C-100 B4：经验层留痕需 teacher_id（从 token 解）。可选（不传则跳过留痕，编辑本身不需登录态）。
+    ruoyi_token: str | None = None
 
 
 class VariantReviseInput(BaseModel):
@@ -743,7 +782,12 @@ async def variant_edit_dna(input: VariantEditDnaInput) -> dict[str, Any]:
         )
         return update, error
 
-    return await _variant_apply(input.thread_id, _fn)
+    out = await _variant_apply(input.thread_id, _fn)
+    # 🔴 B4 经验层留痕（改DNA维）：每次改维都写（只累计 D13）。best-effort（成功才写）。
+    if out.get("ok") and getattr(input, "ruoyi_token", None):
+        await _exp_write(input.ruoyi_token, edit_kind="dna维", dim=str(input.field),
+                         after=str(input.value), target_id=input.thread_id)
+    return out
 
 
 @router.post("/variant/revise")
