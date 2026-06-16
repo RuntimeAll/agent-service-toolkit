@@ -1334,6 +1334,10 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         "difficulty": difficulty if isinstance(difficulty, int) else None,
         "main_kp": main_kp_name,  # anchorKp（考点名）
         "need_anchor_review": need_review,
+        # 🔴 PRD-C-100 B3/B6：带图母题钩子——FE 据 mother_has_figure 自动调 crop_mother_figure
+        #   （/variant/compose-figure mode=crop_mother，传 mother_image_url）显示母题切图（AC4）。
+        "mother_has_figure": bool(state.get("mother_has_figure")),
+        "mother_image_url": str(state.get("image_url") or "") or None,
         # 10 维 DNA（FE pickDna 解析；键名对齐 _item_dna）
         "dna": {
             "main_kp": main_kp_name,
