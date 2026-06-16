@@ -197,3 +197,8 @@ data/agent.db-shm
 data/agent.db-wal
 data/llm_trace.jsonl
 tools/c018_result.json
+
+# PRD-C-100 figure transient outputs + weights (40MB .pt not in git)
+src/agents/figure/out/
+tools/_b0_figcrop/
+weights/*.pt

@@ -59,6 +59,16 @@ dependencies = [
     "langchain-mcp-adapters>=0.1.10",
     "ddgs>=9.9.1",
     "pymysql ~=1.1.0",
+    # === PRD-C-100 带图配图（B-mathfig 内嵌：mathfig 渲染 + figure-crop 切图）===
+    # mathfig 走 `uv pip install -e ../../../codeplace-O/math-figure-builder`（O 线引擎，
+    #   不进 pyproject 锁，授权直改 D15）；下列为内嵌 figure-crop（DocLayout-YOLO）的 torch 全栈。
+    # 🔴 torch CPU 轮子须经 `--index-url https://download.pytorch.org/whl/cpu` 装（uv pip）；
+    #   numpy 守 2.3.4（B0 实测 torch2.12/cv2 4.13/doclayout 0.0.4 不降 numpy）。matplotlib 给 mathfig。
+    "torch ==2.12.0",
+    "torchvision ==0.27.0",
+    "doclayout-yolo ==0.0.4",
+    "opencv-python >=4.13.0",
+    "matplotlib >=3.11.0",
 ]
 
 [dependency-groups]
