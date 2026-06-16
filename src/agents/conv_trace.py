@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS conv_llm_trace (
   reasoning         MEDIUMTEXT NULL      COMMENT '思考型 reasoning_content(可空)',
   prompt_tokens     INT NULL,
   completion_tokens INT NULL,
+  cached_tokens     INT NULL             COMMENT 'PRD-C-100 B2 缓存命中 token(aigeek 自动缓存 prompt_tokens_details.cached_tokens);NULL=未回报',
   cost_yuan         DECIMAL(12,6) NULL   COMMENT '实际消费¥=token×价表(PRD-C-011),无价表则NULL',
   fallback_count    INT NOT NULL DEFAULT 0 COMMENT '中转站转移次数,0=主站一次成功(PRD-C-011)',
   duration_ms       INT NULL,
@@ -60,6 +61,8 @@ _MIGRATE = [
     "ALTER TABLE conv_llm_trace ADD COLUMN relay VARCHAR(64) NULL AFTER model",
     "ALTER TABLE conv_llm_trace ADD COLUMN cost_yuan DECIMAL(12,6) NULL AFTER completion_tokens",
     "ALTER TABLE conv_llm_trace ADD COLUMN fallback_count INT NOT NULL DEFAULT 0 AFTER cost_yuan",
+    # PRD-C-100 B2：缓存命中对账列（aigeek 自动缓存 cached_tokens）。
+    "ALTER TABLE conv_llm_trace ADD COLUMN cached_tokens INT NULL AFTER completion_tokens",
     # 2026-06-11 用户拍板「对话绑死用户·表级限制」：历史无主行回填 0，列改 NOT NULL。
     # 此后 teacher_id 为 NULL 的 INSERT 会被数据库拒绝（write() 静默吞 = 无主调用不留痕，
     # 真实流量由图入口 route_entry 硬闸保证必有 token，二者同源双保险。MODIFY 幂等可重跑。）
@@ -113,6 +116,34 @@ def _usage_tokens(raw: Any) -> tuple[int | None, int | None]:
         return (None, None)
 
 
+def cached_tokens_of(raw: Any) -> int | None:
+    """PRD-C-100 B2：从 response_raw 取缓存命中 token（aigeek 自动缓存）。
+    优先 usage_metadata.input_token_details.cache_read（langchain 标准），退 response_metadata
+    的 prompt_tokens_details.cached_tokens（OpenAI 兼容）/ cache_read_input_tokens（原生 Claude）。
+    取不到 → None（未回报，非 0）。画图链/图片重生不挂缓存，由调用方不传。"""
+    try:
+        um = (raw or {}).get("usage_metadata") or {}
+        itd = um.get("input_token_details") or {}
+        cr = itd.get("cache_read")
+        if cr is not None:
+            return int(cr)
+    except Exception:
+        pass
+    try:
+        meta = (raw or {}).get("response_metadata") or {}
+        usage = meta.get("token_usage") or meta.get("usage") or {}
+        ptd = usage.get("prompt_tokens_details") or {}
+        ct = ptd.get("cached_tokens")
+        if ct is not None:
+            return int(ct)
+        cr = usage.get("cache_read_input_tokens")
+        if cr is not None:
+            return int(cr)
+    except Exception:
+        pass
+    return None
+
+
 def _reasoning(raw: Any) -> str | None:
     """思考型 reasoning_content（如有）。"""
     try:
@@ -141,6 +172,7 @@ def write(
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     cost_yuan: float | None = None,
+    cached_tokens: int | None = None,
 ) -> None:
     """落一条 LLM 往返到 conv_trace.conv_llm_trace。best-effort，永不抛。
 
@@ -153,6 +185,8 @@ def write(
     try:
         if prompt_tokens is None and completion_tokens is None:
             prompt_tokens, completion_tokens = _usage_tokens(response_raw)
+        if cached_tokens is None:
+            cached_tokens = cached_tokens_of(response_raw)
         req_text = (
             request if isinstance(request, str) else json.dumps(request, ensure_ascii=False, default=str)
         )
@@ -170,9 +204,9 @@ def write(
             cur.execute(
                 """INSERT INTO conv_llm_trace
                    (ts, teacher_id, thread_id, source, label, model, relay, request, response,
-                    reasoning, prompt_tokens, completion_tokens, cost_yuan, fallback_count,
-                    duration_ms, retried, error)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    reasoning, prompt_tokens, completion_tokens, cached_tokens, cost_yuan,
+                    fallback_count, duration_ms, retried, error)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                     teacher_id,
@@ -186,6 +220,7 @@ def write(
                     _reasoning(response_raw),
                     prompt_tokens,
                     completion_tokens,
+                    cached_tokens,
                     cost_yuan,
                     int(fallback_count or 0),
                     duration_ms,

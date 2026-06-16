@@ -68,21 +68,23 @@ RESPONSE_FORMAT_ENTRY: dict[str, Any] = {
 
 # ---------------------------------------------------------------------------
 # opus 一把 prompt（判章 + 解题 + 开集 10 维打标；无叶子池注入，kp 开集捕获，代码后锚）
+#
+# 🔴 PRD-C-100 B2 缓存接缝（D7/AC8）：prompt 严格分层
+#   稳定前缀(system, ENTRY_SYSTEM_PREFIX，字节级稳定、无 teacher_id/时间戳/随机/utterance)
+#   ‖ 变量后缀(user message：题图 + query + **teacher 记忆后置**)。
+#   aigeek 自动缓存（无需手打 cache_control）；teacher 记忆**必须在后缀**（per-teacher，进前缀毁
+#   多用户共享缓存——多用户接缝预留）。entry 前缀 ~1500 token < opus 4096 缓存门槛（单用户期不命中，
+#   D7 接缝优先、省钱推多用户期；conv_trace.cached_tokens 记录对账）。画图链/图片重生不挂缓存。
 # ---------------------------------------------------------------------------
-def build_entry_prompt(*, utterance: str | None = None) -> str:
-    """opus 一把合并 prompt：先判年级册+章+置信（含候选），再真解题，再据解答做 10 维 DNA 开集打标。
-
-    🔴 与 mother_opus.build_mother_prompt 的区别：本 prompt **不注入叶子池**（入口阶段年级未定、
-       池取不到，鸡生蛋）→ kp 开集（primaryKp.id 留空、name 如实写），由节点代码用年级叶子池**后锚**
-       （_match_kp_in_pool + mother_opus.anchor_to_chapter）。低置信走确认后由 classify 池注入重锚。
-    """
+def _build_entry_system_prefix() -> str:
+    """稳定系统前缀（模块加载期算一次，字节级稳定）。仅依赖闭集常量（EXAM_TYPES/_GRADE_BOOKS），
+    绝不内插 utterance/teacher_id/时间戳/随机。"""
     exam_types = "/".join(dna_extract.EXAM_TYPES)
     books = "、".join(_GRADE_BOOKS)
-    note = f"\n🔴 老师附带的出题要求（仅语境参考，**不要**在此抽出题配方）：{utterance}\n" if utterance else ""
     return f"""你是浙教版初中数学命题专家 + 题库打标师。看这张母题图，按顺序做三件事并一次输出：
 ① **判年级册 + 章 + 置信度**（判定母题属于哪个教材册、哪一章，给整体置信 0~1，拿不准给候选）；
 ② **真正把题解出来**（一步步算到最终答案，不许抄图、不许跳步）；
-③ **据你的解答做 10 维 DNA 打标**（母题是所有变式的基准，解错则全变式跟着错——务必稳准）。{note}
+③ **据你的解答做 10 维 DNA 打标**（母题是所有变式的基准，解错则全变式跟着错——务必稳准）。
 ================ 判年级册 + 章（闭集 + 候选） ================
 - gradeBook **只能从这 6 册选一个**：{books}。判不出 → 留空串 ""、confidence 给低、gradeCandidates 给你最可能的 1~2 个。
 - chapter：章名（如「第2章 一元二次方程」）；判不出留空。**章有歧义（说不清是哪一章）→ chapterCandidates 给 ≥2 个**。
@@ -131,6 +133,40 @@ def build_entry_prompt(*, utterance: str | None = None) -> str:
     "modelCandidates": []
   }}
 }}"""
+
+
+# 🔴 稳定系统前缀（模块加载期算一次，字节级稳定 = 缓存前缀；多用户期跨老师逐字节相同可共享）。
+ENTRY_SYSTEM_PREFIX: str = _build_entry_system_prefix()
+
+
+def build_entry_messages(
+    *, image_url: str, utterance: str | None = None, teacher_memory: str | None = None,
+) -> list[Any]:
+    """B2 缓存接缝：稳定 system 前缀 ‖ 变量 user 后缀（题图 + query + teacher 记忆**后置**）。
+
+    🔴 teacher_memory 必须在后缀（per-teacher，进前缀毁多用户共享缓存）；B4 记忆层注入填这里。
+    🔴 前缀 = ENTRY_SYSTEM_PREFIX（字节稳定）；后缀变量随请求变。aigeek 自动缓存吃前缀。
+    """
+    from langchain_core.messages import SystemMessage  # 局部 import（顶层已 import HumanMessage）
+
+    parts: list[dict[str, Any]] = []
+    var_text_segs: list[str] = []
+    if utterance:
+        var_text_segs.append(f"【老师附带要求（语境参考，不抽配方）】{utterance}")
+    if teacher_memory:  # B4 记忆注入（后置，不进缓存前缀）
+        var_text_segs.append(f"【该老师的偏好/纠正记忆（参考，不强制）】\n{teacher_memory}")
+    if var_text_segs:
+        parts.append({"type": "text", "text": "\n".join(var_text_segs)})
+    parts.append({"type": "image_url", "image_url": {"url": image_url}})
+    return [SystemMessage(content=ENTRY_SYSTEM_PREFIX), HumanMessage(content=parts)]
+
+
+def build_entry_prompt(*, utterance: str | None = None) -> str:
+    """兼容壳（单测/旧调用）：返回稳定前缀（+ utterance 仅作可读拼接，真实调用走 build_entry_messages
+    把 utterance 放变量后缀，不进缓存前缀）。"""
+    if utterance:
+        return ENTRY_SYSTEM_PREFIX + f"\n【老师附带要求】{utterance}"
+    return ENTRY_SYSTEM_PREFIX
 
 
 # ---------------------------------------------------------------------------
@@ -210,15 +246,16 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     V._emit_stage("classify", "锚定考点", "running", "opus 读图判章 + 解题打标…")
 
     user_text = V._strip_urls(V._latest_human_text(state.get("messages", [])))
-    prompt = build_entry_prompt(utterance=user_text or None)
-    msg = HumanMessage(content=[
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": url}},
-    ])
+    # B2 缓存接缝：稳定 system 前缀 ‖ 变量 user 后缀（题图+query+teacher记忆后置）。
+    #   teacher_memory 槽 B4 记忆层接（此处 None，结构先就位 = 多用户接缝）。
+    teacher_memory = state.get("_teacher_memory_block")  # B4 注入；现 None
+    messages = build_entry_messages(
+        image_url=url, utterance=user_text or None, teacher_memory=teacher_memory,
+    )
     opus_model = V.settings.variant_model("mother_solve_label")  # fail-fast 已锁 opus
     try:
         opus_text = await V._ainvoke_text(
-            [msg], model=opus_model,
+            messages, model=opus_model,
             max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
             temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
             response_format=RESPONSE_FORMAT_ENTRY,
