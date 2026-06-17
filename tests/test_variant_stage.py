@@ -524,6 +524,9 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
         "can_undo_regen": False,
         # PRD-C-100 BC2：变式配图 OSS url（裸 item 无图 → None）。
         "figure_url": None,
+        # PRD-C-100 BC3：在库 id（无 _persist_id → None）+ 手动排版印记（无 → False）。
+        "question_id": None,
+        "manual_block": False,
     }
     assert art["items"][1]["index"] == 2
     assert art["items"][1]["level"] == "hard"
@@ -596,6 +599,9 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "can_undo_regen": False,
         # PRD-C-100 BC2：变式配图 OSS url（裸 item 无图 → None）。
         "figure_url": None,
+        # PRD-C-100 BC3：在库 id（无 _persist_id → None）+ 手动排版印记（无 → False）。
+        "question_id": None,
+        "manual_block": False,
     }
     # 缺省哨兵值（未知考点/未知年级）→ None 化；空 knobs → recipe None（+ 批4 母题脏/待重生集合）
     assert art["header"] == {

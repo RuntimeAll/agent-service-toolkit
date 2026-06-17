@@ -763,6 +763,34 @@ async def variant_set_figure_url(input: VariantSetFigureUrlInput) -> dict[str, A
     return await _variant_apply(input.thread_id, _fn)
 
 
+class VariantMarkManualBlockInput(BaseModel):
+    """PRD-C-100 BC3：标/清「老师手动排版过」印记（零 LLM）。index=1-based。
+
+    老师对已入库变式点「手动排版」→ FE 跳 A-015 网格编辑器存 blockJson → 回会话调本端点标印记
+    （edited=True）。确认重生时先调 edited=False 清印记，再走既有 regen。
+    """
+
+    thread_id: str
+    index: int
+    edited: bool = True
+
+
+@router.post("/variant/mark-manual-block")
+async def variant_mark_manual_block(input: VariantMarkManualBlockInput) -> dict[str, Any]:
+    """标/清「老师手动排版过」印记（零 LLM）：标 manual_block + manual_edited + from_edit（edited=True）
+    或清 manual_block（edited=False）。这俩内部键不入库（白名单挡）；artifact 透传 manual_block + question_id 给 FE。
+
+    index 越界 → 400。与编辑器端点同直连范式（aget_state → 纯逻辑 → aupdate_state → _artifact_payload）。
+    """
+    from agents.variant import mark_item_manual_block_state
+
+    def _fn(values):
+        update, _item, error = mark_item_manual_block_state(values, input.index, input.edited)
+        return update, error
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
 # ---------------------------------------------------------------------------
 # DNA 双模态编辑两端点（PRD-C-014 B4·T1/T2，契约 PRD §10.5 / §3.5）。
 # 同上直连范式（aget_state → variant.py 纯逻辑 → aupdate_state(as_node) → _artifact_payload）。

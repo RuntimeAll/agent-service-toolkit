@@ -1195,6 +1195,16 @@ def _artifact_payload(
         #   传 OSS → 经 /variant/set-figure-url 回写 state.items[i].figure_url）。入库时
         #   build_create_bo 据它产 A-015 image 块；透传给 FE 用于会话恢复后保持配图态。缺则 None。
         cell["figure_url"] = str(it.get("figure_url") or "") or None
+        # 🔴 PRD-C-100 BC3：已入库题在库雪花 id（= _persist_id 内部簿记键，persist_one/全部入库后回写）。
+        #   FE 据它把已入库变式 round-trip 进 A-015 网格编辑器（/question/editor/:id 按 questionId 载 blockJson
+        #   编辑 → /teacher/question/update-block 存）。未入库题为 None（无 questionId 不能进编辑器）。
+        cell["question_id"] = (
+            str(it.get("_persist_id")) if it.get("_persist_id") not in (None, "") else None
+        )
+        # 🔴 PRD-C-100 BC3：本题被老师手动排版过（A-015 网格编辑器存过 blockJson）→ 卡显「手动排版」印记 +
+        #   重生前二次确认（会覆盖手改布局）。复用 manual_edited 印记语义（与内容编辑共用一面旗，
+        #   都表「老师亲手改过，重生需确认」）；manual_block 单独标「排版」态供文案区分。
+        cell["manual_block"] = bool(it.get("manual_block"))
         out_items.append(cell)
     # 🔴 批4·组级重生态：mother_dirty（母题守恒维改）+ regen_pending（待重生集合 1-based 题号）。
     #   FE 据 regen_pending 非空 → 「重生」按钮可点 + 入库按钮禁用（致命① dirty 拒入库视觉）。
@@ -5653,6 +5663,36 @@ def set_item_figure_state(
         it["figure_url"] = url
     else:
         it.pop("figure_url", None)
+    return {"items": new_items}, it, None
+
+
+def mark_item_manual_block_state(
+    state: VariantState, index: int, edited: bool = True
+) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+    """PRD-C-100 BC3：标/清「老师手动排版过」印记（零 LLM）。
+
+    老师对已入库变式点「手动排版」→ FE 跳 A-015 网格编辑器存 blockJson 后回本会话调本端点，
+    把该题标 manual_block=True + manual_edited=True（复用「老师意志优先」印记：下游 reverify/入库
+    闸B 见 from_edit 不回炉换题；重生前 FE 据 manual_edited 弹二次确认）。这俩内部键不入库
+    （build_create_bo/_artifact_payload 白名单挡，question_id/manual_block 仅透传给 FE 渲染）。
+
+    edited=False = 清印记（确认重生时调，重生后该题不再算「手动排版态」）。重生本身仍走既有
+    regen 通路（_regen_once），本函数只管印记；重生产物的脏 blockJson 由 FE 另调 BE delete-block
+    清掉（避免详情/卷库按旧布局渲染新题面）。
+
+    返回 (update, edited_item, error)：index 越界 → ({}, None, 错误串) 让端点回 400。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
+    new_items = [dict(it) for it in items]
+    it = new_items[index - 1]
+    if edited:
+        it["manual_block"] = True
+        it["manual_edited"] = True
+        it["from_edit"] = True
+    else:
+        it.pop("manual_block", None)
     return {"items": new_items}, it, None
 
 

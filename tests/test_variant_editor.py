@@ -18,6 +18,7 @@ from agents.variant import (
     _is_full_permutation,
     _reorder_items,
     edit_item_state,
+    mark_item_manual_block_state,
     reorder_items_state,
     reverify_item_state,
 )
@@ -310,3 +311,43 @@ def test_reverify_does_not_mutate_input_state(monkeypatch):
     asyncio.run(reverify_item_state(state, 1))
     # 原 state.items 不被改（端点回写走 update.items）
     assert state["items"][0]["check"] == {"tier": TIER_MANUAL}
+
+
+# ---------------------------------------------------------------------------
+# PRD-C-100 BC3 — mark_item_manual_block_state（标/清「手动排版过」印记）。
+# ---------------------------------------------------------------------------
+def test_mark_manual_block_sets_flags_and_question_id_exposed():
+    items = [{"stem": "q1", "_persist_id": "12345"}]
+    state = dict(_FACTS_STATE, items=items)
+    update, item, err = mark_item_manual_block_state(state, 1, True)
+    assert err is None
+    it = update["items"][0]
+    assert it["manual_block"] is True
+    assert it["manual_edited"] is True
+    assert it["from_edit"] is True
+    # 原 state 不被改（端点回写走 update.items）
+    assert "manual_block" not in state["items"][0]
+    # _artifact_payload 把 _persist_id 映射成 question_id + 透出 manual_block
+    merged = {**state, **update}
+    cell = _artifact_payload(merged)["items"][0]
+    assert cell["question_id"] == "12345"
+    assert cell["manual_block"] is True
+
+
+def test_mark_manual_block_clear_removes_only_block_flag():
+    items = [{"stem": "q1", "manual_block": True, "manual_edited": True, "from_edit": True}]
+    state = dict(_FACTS_STATE, items=items)
+    update, item, err = mark_item_manual_block_state(state, 1, False)
+    assert err is None
+    it = update["items"][0]
+    assert "manual_block" not in it  # 清掉排版印记
+    # manual_edited/from_edit 不强行清（内容编辑语义不动；重生本身按新题面重出）
+    assert it.get("manual_edited") is True
+
+
+def test_mark_manual_block_index_out_of_range_rejected():
+    state = dict(_FACTS_STATE, items=[{"stem": "q1"}])
+    for bad in (0, 2, -1):
+        update, item, err = mark_item_manual_block_state(state, bad, True)
+        assert err is not None and "越界" in err
+        assert update == {} and item is None

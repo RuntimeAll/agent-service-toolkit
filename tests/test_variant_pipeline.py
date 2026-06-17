@@ -286,7 +286,13 @@ def test_artifact_payload_never_leaks_internal_item_keys():
         "level", "verify", "tier", "gene", "persisted", "dna",
         # 🔴 PRD-C-015 批4·DNA 改→重生态（FE 批5 角标/重生·撤销按钮/dirty 入库拦截）
         "dna_dirty", "dirty_dims", "mother_dirty_dims", "can_undo_regen",
+        # 🔴 PRD-C-100 BC2 变式配图 OSS url（FE 会话恢复保持配图态）
+        "figure_url",
+        # 🔴 PRD-C-100 BC3 已入库题在库 id（FE 进 A-015 编辑器）+ 手动排版印记（FE 重生前二次确认）
+        "question_id", "manual_block",
     }
+    # question_id = _persist_id 的对外映射（非泄漏）；内部键 _persist_id 本身仍不进帧
+    assert "_persist_id" not in it
 
 
 def test_artifact_payload_dropped_item_carries_sentinel_and_stable_seq():
