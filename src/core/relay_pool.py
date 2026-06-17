@@ -92,6 +92,12 @@ def _relays() -> list[Relay]:
     return out
 
 
+# 🔴 2026-06-17：relay 层默认请求超时（秒）。sui-xiang 逆向站偶发「挂起不返回、不报错」，
+#   无超时则调用永久等（生成链 solve/generate 没传 timeout → 整条流卡死，7min+ 无返回实测）。
+#   兜底超时 → 挂起到点抛异常 → ainvoke_failover 自动切 aigeek。母题入口仍传自己的 180s。
+_DEFAULT_TIMEOUT_S = 120.0  # 2026-06-17：180→120，sui-xiang 挂起更快切 aigeek（实测合法调用最慢 ~90s，留余量）
+
+
 def _chat(relay: Relay) -> ChatOpenAI:
     """每中转站一个 ChatOpenAI（缓存）。🔴 stream_usage=True 是 token 不再 NULL 的关键。"""
     c = _chat_cache.get(relay.name)
@@ -103,6 +109,7 @@ def _chat(relay: Relay) -> ChatOpenAI:
             stream_usage=True,  # 🔴 streaming 下必须开，否则 usage_metadata 为空（token NULL 根因）
             openai_api_base=relay.base_url,
             openai_api_key=relay.api_key,
+            timeout=_DEFAULT_TIMEOUT_S,  # 🔴 防 sui-xiang 挂起无限等（无超时则永久阻塞）
         )
         _chat_cache[relay.name] = c
     return c
@@ -130,8 +137,8 @@ def _chat_override(
             openai_api_base=relay.base_url,
             openai_api_key=relay.api_key,
         )
-        if timeout is not None and timeout > 0:
-            kw["timeout"] = timeout
+        # 🔴 2026-06-17：显式 timeout 优先；没传则兜默认（防 sui-xiang 挂起无限等，failover 才能触发）
+        kw["timeout"] = timeout if (timeout is not None and timeout > 0) else _DEFAULT_TIMEOUT_S
         c = ChatOpenAI(**kw)
         _chat_cache[ck] = c
     return c

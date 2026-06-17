@@ -1357,6 +1357,8 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         # 锚定（FE anchor.chapter_id → anchorChapterId）
         "anchor": {
             "grade_book_id": grade_book_id,
+            # 🔴 2026-06-17：补年级册名(八年级下册)，FE 显示它而非 ID(3082)——帧原先只发 code
+            "grade_book_name": str(grade_node.get("value") or "").strip() or None,
             "chapter_id": chapter_id,
             "confidence": confidence if isinstance(confidence, (int, float)) else None,
             "need_anchor_review": need_review,
