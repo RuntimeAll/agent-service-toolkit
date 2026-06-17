@@ -1200,6 +1200,12 @@ def _artifact_payload(
     #   confirmed_dims/audit_ref），FE pickMotherConfirm 解析弹合并确认面。缺省 → None
     #   （旧 FE 不读不坏，向后兼容）。
     mother_confirm = state.get("mother_confirm") or None
+    # 🔴 2026-06-17：母题卡专帧 sticky 化（修「母题入库·题面尚未产出」根因）。原 mother_card 只在
+    #   classify 经 _emit_mother_card 发一次（turn1）；turn2「开始举一反三」的 assemble/persist 帧
+    #   走 _artifact_payload 不带 mother_card → FE artifact.value 整帧替换后 header.mother_card=null
+    #   → pickMotherCard 路①失效、mc.stem 丢 → 母题入库被拦。修法：每帧都附 _build_mother_card(state)
+    #   （纯函数；无 mother_dna→None，FE 兼容 null 不回归）。让母题专帧贯穿全生命周期、stem 永在。
+    mother_card = _build_mother_card(state)
     return {
         "items": out_items,
         "header": {
@@ -1211,6 +1217,8 @@ def _artifact_payload(
             "regen_pending": regen_pending,
             # 批5·合并确认面（G10/G11）：母题确认状态（needs_confirm 时 FE 弹面）
             "mother_confirm": mother_confirm,
+            # 🔴 母题专帧 sticky：每帧附母题卡（含 stem），FE pickMotherCard 路①全程可用
+            "mother_card": mother_card,
         },
     }
 

@@ -526,7 +526,12 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
     assert art["items"][1]["index"] == 2
     assert art["items"][1]["level"] == "hard"
     # header：recipe 来自 knobs_desc，kp/grade 来自 analysis（+ 批4 母题脏/待重生集合）
-    assert art["header"] == {
+    hdr = dict(art["header"])
+    # 🔴 2026-06-17 母题专帧 sticky：每帧附母题卡（修母题入库「题面尚未产出」根因）。单独断言 stem
+    #   贯穿（assemble 帧也带 stem），其余 header 字段精确比对。
+    mc = hdr.pop("mother_card")
+    assert isinstance(mc, dict) and mc["stem"] == "母题题干"
+    assert hdr == {
         "recipe": "2 道", "kp": "一元一次方程", "grade": "七年级上学期",
         "mother_dirty": False, "regen_pending": [],
         # 批5·合并确认面（G10/G11）：无 mother_confirm → None（向后兼容）
@@ -594,6 +599,8 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "mother_dirty": False, "regen_pending": [],
         # 批5·合并确认面（G10/G11）：无 mother_confirm → None（向后兼容）
         "mother_confirm": None,
+        # 🔴 母题专帧 sticky：无 mother_dna（裸题/库内母题）→ _build_mother_card 返回 None（FE 兼容）
+        "mother_card": None,
     }
 
 
