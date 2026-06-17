@@ -350,7 +350,7 @@ async def _call_llm(prompt: str, *, model: str | None, invoke: Any) -> str | Non
             return await invoke(
                 [HumanMessage(content=prompt)], model=chosen_model
             )
-        resp, _relay, _model_used, _fb = await relay_pool.ainvoke_failover(
+        resp, _relay, _model_used, _fb, _fbd = await relay_pool.ainvoke_failover(
             [HumanMessage(content=prompt)],
             max_tokens=settings.VARIANT_MAX_TOKENS,
             tags=["skip_stream"],

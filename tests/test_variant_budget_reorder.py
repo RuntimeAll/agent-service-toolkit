@@ -133,7 +133,7 @@ def test_budget_bind_none_when_state_has_no_budget():
 def test_ainvoke_text_ticks_budget_on_success(monkeypatch):
     # _ainvoke_text 成功返回 → _budget_tick()+1（核心记账点）
     async def fake_failover(messages, **kw):
-        return (variant_mod.AIMessage(content="ok"), "relay", "model", 0)
+        return (variant_mod.AIMessage(content="ok"), "relay", "model", 0, None)
 
     monkeypatch.setattr(variant_mod.relay_pool, "ainvoke_failover", fake_failover)
     monkeypatch.setattr(variant_mod.relay_pool, "usage_tokens", lambda r: (0, 0))

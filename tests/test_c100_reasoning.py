@@ -43,7 +43,7 @@ async def test_relay_captures_reasoning(monkeypatch):
     monkeypatch.setattr(relay_pool, "_chat_override", lambda *a, **k: _StubLLM())
 
     seen = []
-    resp, name, model, fb = await relay_pool.ainvoke_failover(
+    resp, name, model, fb, _detail = await relay_pool.ainvoke_failover(
         [], max_tokens=100, on_reasoning=lambda t: seen.append(t))
     # reasoning 累计：第一帧「先分析题目…」，第二帧累加
     assert seen and seen[-1] == "先分析题目…再算一步…"

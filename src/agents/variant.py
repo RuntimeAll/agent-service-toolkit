@@ -789,10 +789,11 @@ async def _ainvoke_text(
     relay = settings.RELAY_NAME
     model_used = settings.COMPATIBLE_MODEL
     fallback = 0
+    fb_detail: str | None = None  # 🔴 熔断回溯：每站失败原因（成功且 0 转移=None）
     try:
-        # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数
+        # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数 + 失败原因串
         #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
-        resp, relay, model_used, fallback = await relay_pool.ainvoke_failover(
+        resp, relay, model_used, fallback, fb_detail = await relay_pool.ainvoke_failover(
             messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta,
             on_reasoning=on_reasoning, model=model,
             temperature=temperature, response_format=response_format, timeout=timeout,
@@ -801,18 +802,19 @@ async def _ainvoke_text(
         retried = False
         if not text and retry:
             retried = True
-            resp, relay, model_used, fb2 = await relay_pool.ainvoke_failover(
+            resp, relay, model_used, fb2, fbd2 = await relay_pool.ainvoke_failover(
                 messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
                 temperature=temperature, response_format=response_format, timeout=timeout,
             )
             fallback += fb2
+            fb_detail = "; ".join(x for x in (fb_detail, fbd2) if x) or None
             text = _content_text(resp).strip()
     except Exception as e:  # noqa: BLE001 — 记下失败往返后照常抛
         dur = int((time.monotonic() - t0) * 1000)
         _trace_llm(label, messages, "", None, dur, error=str(e), model=model_used)
         conv_trace.write(
             teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
-            model=model_used, relay=relay, fallback_count=fallback,
+            model=model_used, relay=relay, fallback_count=fallback, fallback_detail=fb_detail,
             request=_serialize_request(messages),
             response="", response_raw=None, duration_ms=dur, error=str(e),
         )
@@ -836,7 +838,7 @@ async def _ainvoke_text(
     # 🔴 用户级对话持久化（优化基础数据源）→ 独立解耦库 conv_trace
     conv_trace.write(
         teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
-        model=model_used, relay=relay, fallback_count=fallback,
+        model=model_used, relay=relay, fallback_count=fallback, fallback_detail=fb_detail,
         request=_serialize_request(messages),
         response=text, response_raw=raw, duration_ms=dur, retried=retried,
         prompt_tokens=pt, completion_tokens=ct, cost_yuan=cost,

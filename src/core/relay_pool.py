@@ -15,12 +15,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 
@@ -92,10 +94,20 @@ def _relays() -> list[Relay]:
     return out
 
 
-# 🔴 2026-06-17：relay 层默认请求超时（秒）。sui-xiang 逆向站偶发「挂起不返回、不报错」，
-#   无超时则调用永久等（生成链 solve/generate 没传 timeout → 整条流卡死，7min+ 无返回实测）。
-#   兜底超时 → 挂起到点抛异常 → ainvoke_failover 自动切 aigeek。母题入口仍传自己的 180s。
-_DEFAULT_TIMEOUT_S = 120.0  # 2026-06-17：180→120，sui-xiang 挂起更快切 aigeek（实测合法调用最慢 ~90s，留余量）
+# 🔴 2026-06-17 v2：双层超时防 sui-xiang 逆向站两类挂起（压测 round0 实证：单 read 超时不够）。
+#   ① read-gap（httpx read）= 相邻 chunk 间隔上限。流式下每来一个 token 重置计时器 → 健康调用免疫，
+#      「连上但 0 字节/死寂」挂起在 read 秒内抛 ReadTimeout。防【死寂挂起】。
+#   ② total（asyncio.timeout）= 整次调用墙钟硬上限。逆向站「慢吐 reasoning 一直不收尾」会持续重置
+#      read 计时器、read 永不触发 → 必须再加墙钟闸（round0 跑满 300s 的真因）。防【慢吐挂起】。
+#   任一触发 → 抛异常 → ainvoke_failover 切下一站。母题读图慢，total 走入口传的 180s；其余默认 150s。
+_READ_GAP_S = 60.0   # httpx read：相邻 chunk 间隔上限（覆盖最慢首 token，留余量）
+_DEFAULT_TOTAL_S = 150.0  # asyncio 墙钟：单次调用总时长硬上限（实测合法最慢 114s + 余量）
+
+
+def _httpx_timeout() -> httpx.Timeout:
+    """🔴 四元组超时：read=相邻chunk间隔闸（防死寂），connect/write/pool 给小常量快失败。
+    总时长闸不在这里，由 ainvoke_failover 的 asyncio.timeout 兜（防慢吐）。"""
+    return httpx.Timeout(connect=10.0, read=_READ_GAP_S, write=10.0, pool=5.0)
 
 
 def _chat(relay: Relay) -> ChatOpenAI:
@@ -109,7 +121,7 @@ def _chat(relay: Relay) -> ChatOpenAI:
             stream_usage=True,  # 🔴 streaming 下必须开，否则 usage_metadata 为空（token NULL 根因）
             openai_api_base=relay.base_url,
             openai_api_key=relay.api_key,
-            timeout=_DEFAULT_TIMEOUT_S,  # 🔴 防 sui-xiang 挂起无限等（无超时则永久阻塞）
+            timeout=_httpx_timeout(),  # 🔴 read-gap 闸防死寂挂起（总时长闸在 ainvoke_failover）
         )
         _chat_cache[relay.name] = c
     return c
@@ -124,22 +136,21 @@ def _chat_override(
     🔴 PRD-C-017 M9：temperature 加 per-call 覆盖（默认 0.5 = 旧行为不变）。母题 opus 精确
     解题/结构化打标须低温（0.1~0.2），降 JSON 不稳 + 解题采样波动。缓存键带温度，避免
     同 (站|model) 不同温度互相覆盖实例。
-    🔴 PRD-C-017 B1·H4：timeout（秒）per-call 覆盖。母题 opus 读图慢（纯文本 ~21s、带图
-    可达数百秒）须设上限（≤180s）防挂死；None = 不设（旧行为）。缓存键带 timeout。"""
+    🔴 PRD-C-017 B1·H4 → 2026-06-17 v2：timeout（秒）现仅作【总时长墙钟闸】的入参，由
+    ainvoke_failover 的 asyncio.timeout 读取（母题读图慢传 180s）；httpx 层一律用 read-gap 闸
+    （_httpx_timeout），不再把 timeout 当 httpx 超时。缓存键仍带 timeout（无副作用，保持隔离）。"""
     ck = f"{relay.name}|{model}|t={temperature}|to={timeout}"
     c = _chat_cache.get(ck)
     if c is None:
-        kw: dict[str, Any] = dict(
+        c = ChatOpenAI(
             model=model,
             temperature=temperature,
             streaming=True,
             stream_usage=True,
             openai_api_base=relay.base_url,
             openai_api_key=relay.api_key,
+            timeout=_httpx_timeout(),  # 🔴 read-gap 闸（总时长闸由 asyncio.timeout 管）
         )
-        # 🔴 2026-06-17：显式 timeout 优先；没传则兜默认（防 sui-xiang 挂起无限等，failover 才能触发）
-        kw["timeout"] = timeout if (timeout is not None and timeout > 0) else _DEFAULT_TIMEOUT_S
-        c = ChatOpenAI(**kw)
         _chat_cache[ck] = c
     return c
 
@@ -163,10 +174,12 @@ async def ainvoke_failover(
     temperature: float | None = None,
     response_format: dict[str, Any] | None = None,
     timeout: float | None = None,
-) -> tuple[Any, str, str, int]:
+) -> tuple[Any, str, str, int, str | None]:
     """按主→备顺序调用，熔断转移。
 
-    返回 (resp, relay_name, relay_model, fallback_count)。
+    返回 (resp, relay_name, relay_model, fallback_count, fallback_detail)。
+    🔴 fallback_detail = 每站失败原因串（"sui-xiang:ReadTimeout; ..."），成功且 0 转移时为 None。
+    供 conv_trace 回溯「中途切了/为什么切」（用户可查的熔断证据），不影响主流程。
     🔴 relay_model = 实际成交中转站的 per-relay model（RELAY_POOL 各站可配不同模型），
     供上层 conv_trace/_trace_llm/cost_yuan 正确归因（不再恒写 COMPATIBLE_MODEL）。
     全部中转站不可用 → 抛最后一个异常（由上层记 error 后照常抛）。
@@ -192,11 +205,15 @@ async def ainvoke_failover(
     single = len(relays) == 1
     last_exc: Exception | None = None
     fallback = 0
+    fail_reasons: list[str] = []  # 🔴 每站失败原因（回溯用），成功合并成 fallback_detail
+    # 🔴 总时长墙钟闸（防慢吐挂起）：母题入口传 180s，其余默认 150s。read-gap 闸（防死寂）在 httpx 层。
+    total_cap = timeout if (timeout is not None and timeout > 0) else _DEFAULT_TOTAL_S
     cfg: dict[str, Any] | None = {"tags": tags} if tags else None
     for relay in relays:
         br = _breaker(relay.name)
         if br.is_open() and not single:
             fallback += 1  # 跳过开闸的主站 = 一次转移
+            fail_reasons.append(f"{relay.name}:breaker_open")
             continue
         try:
             # per-call 模型覆盖（S1.1）：换 model 字段须重建 ChatOpenAI（model 是构造期字段，
@@ -215,36 +232,39 @@ async def ainvoke_failover(
             if response_format is not None:
                 bind_kw["response_format"] = response_format
             llm = chat.bind(**bind_kw)
-            if on_delta is None and on_reasoning is None:
-                # cfg 为空不传（兼容测试桩的窄签名 ainvoke(messages)）
-                resp = await (llm.ainvoke(messages, config=cfg) if cfg else llm.ainvoke(messages))
-            else:
-                # 🔴 PRD-C-100 D18 思考流式：on_reasoning 给了走 astream，逐 chunk 捞 content +
-                #   reasoning_content（additional_kwargs）；reasoning 累计回调（可折叠「思考中」块）。
-                #   思考型模型先吐 reasoning 再吐 content；只把 content 当正文，reasoning 单独转发。
-                resp = None
-                acc = ""
-                racc = ""
-                async for chunk in llm.astream(messages, config=cfg):
-                    resp = chunk if resp is None else resp + chunk
-                    try:
-                        c = chunk.content
-                        if isinstance(c, str) and c and on_delta is not None:
-                            acc += c
-                            on_delta(acc)
-                    except Exception:  # noqa: BLE001 — 进度回调绝不炸主流程
-                        pass
-                    if on_reasoning is not None:
+            # 🔴 2026-06-17 v2：墙钟硬闸包整次调用（防逆向站慢吐 reasoning 永不收尾 = round0 真因）。
+            #   read-gap 闸（httpx）管死寂、total_cap（asyncio）管慢吐，两层互补缺一不可。
+            async with asyncio.timeout(total_cap):
+                if on_delta is None and on_reasoning is None:
+                    # cfg 为空不传（兼容测试桩的窄签名 ainvoke(messages)）
+                    resp = await (llm.ainvoke(messages, config=cfg) if cfg else llm.ainvoke(messages))
+                else:
+                    # 🔴 PRD-C-100 D18 思考流式：on_reasoning 给了走 astream，逐 chunk 捞 content +
+                    #   reasoning_content（additional_kwargs）；reasoning 累计回调（可折叠「思考中」块）。
+                    #   思考型模型先吐 reasoning 再吐 content；只把 content 当正文，reasoning 单独转发。
+                    resp = None
+                    acc = ""
+                    racc = ""
+                    async for chunk in llm.astream(messages, config=cfg):
+                        resp = chunk if resp is None else resp + chunk
                         try:
-                            ak = getattr(chunk, "additional_kwargs", None) or {}
-                            rc = ak.get("reasoning_content")
-                            if isinstance(rc, str) and rc:
-                                racc += rc
-                                on_reasoning(racc)
-                        except Exception:  # noqa: BLE001
+                            c = chunk.content
+                            if isinstance(c, str) and c and on_delta is not None:
+                                acc += c
+                                on_delta(acc)
+                        except Exception:  # noqa: BLE001 — 进度回调绝不炸主流程
                             pass
-                if resp is None:
-                    raise RuntimeError("empty stream")
+                        if on_reasoning is not None:
+                            try:
+                                ak = getattr(chunk, "additional_kwargs", None) or {}
+                                rc = ak.get("reasoning_content")
+                                if isinstance(rc, str) and rc:
+                                    racc += rc
+                                    on_reasoning(racc)
+                            except Exception:  # noqa: BLE001
+                                pass
+                    if resp is None:
+                        raise RuntimeError("empty stream")
             # 🔴 2026-06-17：sui-xiang 逆向站偶发返 200 + 内容空/空白（非硬错误，常规 failover 不触发）
             #   → 显式当失败、切下一站（aigeek 兜底）。只挡真空/空白（合法返回都远超），不误伤短返回。
             _c = getattr(resp, "content", None)
@@ -252,14 +272,20 @@ async def ainvoke_failover(
                 raise RuntimeError("blank relay response (suspected truncation)")
             br.fails = 0
             br.open_until = 0.0  # 成功即复位
-            return resp, relay.name, relay_model, fallback
+            return resp, relay.name, relay_model, fallback, ("; ".join(fail_reasons) or None)
         except Exception as e:  # noqa: BLE001 — 失败 → trip 计数 + 切下一个
             last_exc = e
+            # 🔴 TimeoutError（asyncio 墙钟闸触发，3.11 起=内置 TimeoutError）单独标注，便于回溯区分
+            #   「慢吐挂起被硬闸砍」vs 其它错误；ReadTimeout（httpx 死寂闸）走 type 名自然区分。
+            ename = "WallClockTimeout" if isinstance(e, asyncio.TimeoutError) else type(e).__name__
+            fail_reasons.append(f"{relay.name}:{ename}")
             br.fails += 1
             if br.fails >= settings.RELAY_FAIL_THRESHOLD:
                 br.open_until = time.monotonic() + settings.RELAY_COOLDOWN_S
             fallback += 1
-    raise last_exc or RuntimeError("no relay available")
+    # 全站失败：异常 message 带上所有站失败原因（落 conv_trace.error 供回溯）；链上 last_exc 保留类型。
+    detail = "; ".join(fail_reasons) or "no relay available"
+    raise RuntimeError(detail) from last_exc
 
 
 def usage_tokens(resp: Any) -> tuple[int | None, int | None]:

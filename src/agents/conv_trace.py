@@ -63,6 +63,8 @@ _MIGRATE = [
     "ALTER TABLE conv_llm_trace ADD COLUMN fallback_count INT NOT NULL DEFAULT 0 AFTER cost_yuan",
     # PRD-C-100 B2：缓存命中对账列（aigeek 自动缓存 cached_tokens）。
     "ALTER TABLE conv_llm_trace ADD COLUMN cached_tokens INT NULL AFTER completion_tokens",
+    # 2026-06-17 v2 熔断回溯：每站失败原因串（"sui-xiang:ReadTimeout; aigeek:ok"），供查「中途切了/为什么」。
+    "ALTER TABLE conv_llm_trace ADD COLUMN fallback_detail VARCHAR(255) NULL AFTER fallback_count",
     # 2026-06-11 用户拍板「对话绑死用户·表级限制」：历史无主行回填 0，列改 NOT NULL。
     # 此后 teacher_id 为 NULL 的 INSERT 会被数据库拒绝（write() 静默吞 = 无主调用不留痕，
     # 真实流量由图入口 route_entry 硬闸保证必有 token，二者同源双保险。MODIFY 幂等可重跑。）
@@ -169,6 +171,7 @@ def write(
     error: str | None = None,
     relay: str | None = None,
     fallback_count: int = 0,
+    fallback_detail: str | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     cost_yuan: float | None = None,
@@ -205,8 +208,8 @@ def write(
                 """INSERT INTO conv_llm_trace
                    (ts, teacher_id, thread_id, source, label, model, relay, request, response,
                     reasoning, prompt_tokens, completion_tokens, cached_tokens, cost_yuan,
-                    fallback_count, duration_ms, retried, error)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    fallback_count, fallback_detail, duration_ms, retried, error)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                     teacher_id,
@@ -223,6 +226,7 @@ def write(
                     cached_tokens,
                     cost_yuan,
                     int(fallback_count or 0),
+                    (fallback_detail or None) and str(fallback_detail)[:255],
                     duration_ms,
                     1 if retried else 0,
                     (error or None) and str(error)[:512],

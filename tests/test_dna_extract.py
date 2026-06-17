@@ -43,7 +43,7 @@ def _patch_llm(monkeypatch, payload):
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
 
     async def fake_failover(messages, *, max_tokens, tags=None, on_delta=None, model=None):
-        return AIMessage(content=text), "fake-relay", model or "fake-model", 0
+        return AIMessage(content=text), "fake-relay", model or "fake-model", 0, None
 
     monkeypatch.setattr(dna_mod.relay_pool, "ainvoke_failover", fake_failover)
 
@@ -294,7 +294,7 @@ def test_extract_uses_light_model_by_default(monkeypatch):
     async def fake_failover(messages, *, max_tokens, tags=None, on_delta=None, model=None):
         seen["model"] = model
         seen["tags"] = tags
-        return AIMessage(content="{}"), "r", model, 0
+        return AIMessage(content="{}"), "r", model, 0, None
 
     monkeypatch.setattr(dna_mod.relay_pool, "ainvoke_failover", fake_failover)
     _run()
@@ -340,7 +340,7 @@ def test_refine_prompt_contains_pool_words_and_prefers_reuse(monkeypatch):
         seen["prompt"] = messages[0].content
         return AIMessage(
             content=json.dumps({"tags": ["移项变号", "去分母", "自拟新词"]}, ensure_ascii=False)
-        ), "r", model, 0
+        ), "r", model, 0, None
 
     monkeypatch.setattr(dna_mod.relay_pool, "ainvoke_failover", fake_failover)
     out = asyncio.run(

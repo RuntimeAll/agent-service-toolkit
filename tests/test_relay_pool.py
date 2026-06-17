@@ -15,6 +15,7 @@ import time
 
 import core.relay_pool as rp
 from core.relay_pool import Relay, _Breaker, ainvoke_failover
+from langchain_core.messages import AIMessage
 
 
 class _FakeChat:
@@ -27,7 +28,8 @@ class _FakeChat:
     async def ainvoke(self, _messages):
         if isinstance(self._resp, Exception):
             raise self._resp
-        return self._resp
+        # 🔴 包成 AIMessage（有 .content）：relay_pool 空白返回闸用 resp.content 判真空，裸 str 会被误判
+        return AIMessage(content=self._resp) if isinstance(self._resp, str) else self._resp
 
 
 def _wire(monkeypatch, relays, responses):
@@ -43,8 +45,8 @@ def test_single_relay_open_breaker_still_attempts(monkeypatch):
     # trip the breaker wide open
     rp._breakers["main"] = _Breaker(fails=9, open_until=time.monotonic() + 999)
 
-    resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
-    assert resp == "RESP" and name == "main" and model == "m-main"
+    resp, name, model, fallback, _d = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert resp.content == "RESP" and name == "main" and model == "m-main"
     assert fallback == 0
     assert rp._breakers["main"].open_until == 0.0  # success resets the breaker
 
@@ -54,8 +56,8 @@ def test_multi_relay_failover_returns_backup_per_relay_model(monkeypatch):
     backup = Relay(name="backup", base_url="http://b", api_key="k", model="m-backup")
     _wire(monkeypatch, [main, backup], {"main": RuntimeError("down"), "backup": "RESP"})
 
-    resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
-    assert resp == "RESP"
+    resp, name, model, fallback, _d = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert resp.content == "RESP"
     assert name == "backup" and model == "m-backup"  # cost/trace attribution source
     assert fallback == 1
 
@@ -74,7 +76,7 @@ def test_multi_relay_open_main_is_skipped(monkeypatch):
     rp._breakers.clear()
     rp._breakers["main"] = _Breaker(fails=3, open_until=time.monotonic() + 999)
 
-    resp, name, model, fallback = asyncio.run(ainvoke_failover([], max_tokens=10))
+    resp, name, model, fallback, _d = asyncio.run(ainvoke_failover([], max_tokens=10))
     assert calls == ["backup"]  # open main skipped (breaker semantics intact with a backup)
     assert name == "backup" and model == "m-backup" and fallback == 1
 
@@ -95,10 +97,10 @@ def test_per_call_model_override_swaps_model_only(monkeypatch):
     monkeypatch.setattr(rp, "_chat_override", chat_override)
     rp._breakers.clear()
 
-    resp, name, model, fallback = asyncio.run(
+    resp, name, model, fallback, _d = asyncio.run(
         ainvoke_failover([], max_tokens=10, model="gpt-5.4-nano")
     )
-    assert resp == "RESP" and name == "main" and fallback == 0
+    assert resp.content == "RESP" and name == "main" and fallback == 0
     assert model == "gpt-5.4-nano"  # 归因到覆盖模型，不再是 relay.model
     assert seen == [("main", "http://x", "gpt-5.4-nano")]  # 站点不变，只换 model
 
@@ -138,7 +140,7 @@ def test_response_format_and_timeout_threaded(monkeypatch):
             return self
 
         async def ainvoke(self, _messages):
-            return "RESP"
+            return AIMessage(content="RESP")
 
     def chat_override(r, m, temperature=0.5, timeout=None):
         seen_timeout.append(timeout)
@@ -154,6 +156,58 @@ def test_response_format_and_timeout_threaded(monkeypatch):
     assert seen_timeout == [180]
     assert bind_kw_seen.get("response_format") == rf
     assert bind_kw_seen.get("max_tokens") == 10
+
+
+class _Chunk:
+    """伪 langchain 流式 chunk：content + additional_kwargs（+ 可选 usage）。"""
+
+    def __init__(self, content="", usage=False):
+        self.content = content
+        self.additional_kwargs = {}
+        if usage:
+            self.usage_metadata = {"input_tokens": 1, "output_tokens": 1}
+
+    def __add__(self, other):
+        return _Chunk(self.content + (other.content or ""))
+
+
+def test_wall_clock_cap_catches_slow_dribble_and_failsover(monkeypatch):
+    """🔴 round0 真因回归：sui-xiang「慢吐 reasoning 永不收尾」会持续重置 httpx read-gap 计时器
+    （read 闸不触发），必须靠 asyncio 墙钟硬闸砍掉 → 切备用站。验证 fallback_detail 标
+    WallClockTimeout（区别于 read 闸的 ReadTimeout）。timeout=1 让墙钟 1s 触发，测试秒级跑完。"""
+    main = Relay(name="main", base_url="http://a", api_key="k", model="m-main")
+    backup = Relay(name="backup", base_url="http://b", api_key="k", model="m-backup")
+
+    class _SlowDribble:  # 主站：吐一帧后睡死（模拟慢吐，read-gap 永不触发）
+        def bind(self, **_kw):
+            return self
+
+        async def astream(self, _messages, config=None):
+            yield _Chunk("partial")
+            await asyncio.sleep(30)  # > total_cap(1s) → 墙钟闸砍
+            yield _Chunk("never")
+
+    class _OkStream:  # 备站：正常吐
+        def bind(self, **_kw):
+            return self
+
+        async def astream(self, _messages, config=None):
+            yield _Chunk("OK", usage=True)
+
+    monkeypatch.setattr(rp, "_relays", lambda: [main, backup])
+    monkeypatch.setattr(
+        rp, "_chat", lambda relay: _SlowDribble() if relay.name == "main" else _OkStream()
+    )
+    rp._breakers.clear()
+
+    # on_delta 给了 → 走 astream（慢吐挂起只在流式路径出现）；timeout=1 = 墙钟 1s
+    resp, name, model, fallback, detail = asyncio.run(
+        ainvoke_failover([], max_tokens=10, on_delta=lambda _t: None, timeout=1)
+    )
+    assert name == "backup" and model == "m-backup"  # 慢吐被墙钟砍 → 切备用
+    assert resp.content == "OK"
+    assert fallback == 1
+    assert detail and "main:WallClockTimeout" in detail  # 回溯证据：主站慢吐被硬闸砍
 
 
 def test_chat_override_caches_per_temperature(monkeypatch):
