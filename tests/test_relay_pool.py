@@ -210,6 +210,37 @@ def test_wall_clock_cap_catches_slow_dribble_and_failsover(monkeypatch):
     assert detail and "main:WallClockTimeout" in detail  # 回溯证据：主站慢吐被硬闸砍
 
 
+def test_truncated_finish_length_failsover(monkeypatch):
+    """🔴 H3（审计补）截断哨兵回归：主站返「非空但 finish_reason=length」（截断坏 JSON）
+    现过 blank 检测被当成功 → 必须当失败切备用站；fallback_detail 标 Truncated（区别于 blank/timeout）。"""
+    main = Relay(name="main", base_url="http://a", api_key="k", model="m-main")
+    backup = Relay(name="backup", base_url="http://b", api_key="k", model="m-backup")
+
+    class _TruncChat:  # 主站：内容非空但被截断（finish_reason=length）
+        def bind(self, **_kw):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(content='{"stem":"半截 JSON 没收', response_metadata={"finish_reason": "length"})
+
+    class _OkChat:  # 备站：完整收尾
+        def bind(self, **_kw):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(content='{"stem":"完整"}', response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(rp, "_relays", lambda: [main, backup])
+    monkeypatch.setattr(rp, "_chat", lambda relay: _TruncChat() if relay.name == "main" else _OkChat())
+    rp._breakers.clear()
+
+    resp, name, model, fallback, detail = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert name == "backup" and model == "m-backup"  # 截断被判失败 → 切备用
+    assert resp.content == '{"stem":"完整"}'
+    assert fallback == 1
+    assert detail and "main:Truncated" in detail  # 回溯标注：主站截断
+
+
 def test_chat_override_caches_per_temperature(monkeypatch):
     """温度进缓存键：同 (站|model) 不同温度构出独立实例，不互相覆盖。"""
     relay = Relay(name="main", base_url="http://x", api_key="k", model="m-main")

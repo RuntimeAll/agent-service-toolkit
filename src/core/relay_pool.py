@@ -270,14 +270,33 @@ async def ainvoke_failover(
             _c = getattr(resp, "content", None)
             if not (_c if isinstance(_c, str) else "").strip():
                 raise RuntimeError("blank relay response (suspected truncation)")
+            # 🔴 H3（2026-06-17 架构审计补）：截断哨兵。finish_reason=="length"（max_tokens 截断或
+            #   逆向站 ~6400 幻影 token 提前截断）会让「非空但残缺的 JSON」过上面的 blank 检测被当成功
+            #   → 下游 _parse_json 拿坏 JSON（母题有重试+修复接住，generate/solve 静默丢质量）。
+            #   显式当失败 → 切下一站（aigeek 大概率完整收尾）；两站都截断才报错（响应确实坏）。
+            #   逆向站不报 finish_reason 时本检查为 no-op（None != "length"），不误伤。
+            try:
+                _meta = getattr(resp, "response_metadata", None) or {}
+                _fr = str(_meta.get("finish_reason") or _meta.get("stop_reason") or "")
+            except Exception:  # noqa: BLE001
+                _fr = ""
+            if _fr == "length":
+                raise RuntimeError("truncated relay response (finish_reason=length)")
             br.fails = 0
             br.open_until = 0.0  # 成功即复位
             return resp, relay.name, relay_model, fallback, ("; ".join(fail_reasons) or None)
         except Exception as e:  # noqa: BLE001 — 失败 → trip 计数 + 切下一个
             last_exc = e
-            # 🔴 TimeoutError（asyncio 墙钟闸触发，3.11 起=内置 TimeoutError）单独标注，便于回溯区分
-            #   「慢吐挂起被硬闸砍」vs 其它错误；ReadTimeout（httpx 死寂闸）走 type 名自然区分。
-            ename = "WallClockTimeout" if isinstance(e, asyncio.TimeoutError) else type(e).__name__
+            # 🔴 回溯标注（落 fallback_detail）：墙钟闸/截断/空返各给清晰短名，便于区分挂起类型。
+            _m = str(e)
+            if isinstance(e, asyncio.TimeoutError):
+                ename = "WallClockTimeout"  # asyncio 墙钟闸（慢吐挂起），3.11 起=内置 TimeoutError
+            elif "truncated" in _m:
+                ename = "Truncated"  # H3 截断哨兵（finish_reason=length）
+            elif "blank" in _m:
+                ename = "BlankResp"  # 200 空/空白返回
+            else:
+                ename = type(e).__name__  # ReadTimeout（httpx 死寂闸）/ 硬错误走 type 名
             fail_reasons.append(f"{relay.name}:{ename}")
             br.fails += 1
             if br.fails >= settings.RELAY_FAIL_THRESHOLD:
