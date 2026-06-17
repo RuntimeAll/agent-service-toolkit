@@ -238,6 +238,11 @@ async def ainvoke_failover(
                             pass
                 if resp is None:
                     raise RuntimeError("empty stream")
+            # 🔴 2026-06-17：sui-xiang 逆向站偶发返 200 + 内容空/空白（非硬错误，常规 failover 不触发）
+            #   → 显式当失败、切下一站（aigeek 兜底）。只挡真空/空白（合法返回都远超），不误伤短返回。
+            _c = getattr(resp, "content", None)
+            if not (_c if isinstance(_c, str) else "").strip():
+                raise RuntimeError("blank relay response (suspected truncation)")
             br.fails = 0
             br.open_until = 0.0  # 成功即复位
             return resp, relay.name, relay_model, fallback

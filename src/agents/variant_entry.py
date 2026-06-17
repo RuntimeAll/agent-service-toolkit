@@ -23,6 +23,7 @@ r"""PRD-C-100 B1a · 塌缩入口：opus 一把（读图判年级册+章 + has_f
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -107,6 +108,7 @@ def _build_entry_system_prefix() -> str:
 
 ================ 富文本红线（题面/答案/解析） ================
 🔴 数学式用行内 $...$；换行 \\n；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数配对完整（下游有机器闸逐项检）。
+🔴 **analysis/解析 = 给学生看的最终干净解法,不是草稿**：数学式/符号优先用 $LaTeX$ 表达、推导紧凑；**只写正确的最终推导链,禁止写试错/回头/『等等重新算』/反复估算/自我纠正等思考过程**（那些在你心里算，别外吐）。低冗余、省 token、一遍到底。
 🔴 has_figure：题面真含图形/图表/几何图填 true；只是拍照的纯文本题填 false。
 
 ================ 输出（只输出一个 JSON，不要解释、不要 markdown fence） ================
@@ -152,13 +154,109 @@ def build_entry_messages(
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
     if utterance:
-        var_text_segs.append(f"【老师附带要求（语境参考，不抽配方）】{utterance}")
+        var_text_segs.append(
+            "【老师附带要求（仅作背景语境参考，不抽配方）：本步只给"
+            "母题本身打标，**只输出一个 JSON 对象**，不要据此出变式、不要输出数组或多个对象、不要写前言】"
+            f"{utterance}"
+        )
     if teacher_memory:  # B4 记忆注入（后置，不进缓存前缀）
         var_text_segs.append(f"【该老师的偏好/纠正记忆（参考，不强制）】\n{teacher_memory}")
     if var_text_segs:
         parts.append({"type": "text", "text": "\n".join(var_text_segs)})
     parts.append({"type": "image_url", "image_url": {"url": image_url}})
     return [SystemMessage(content=ENTRY_SYSTEM_PREFIX), HumanMessage(content=parts)]
+
+
+async def _to_b64_data_url(url: str) -> str:
+    """sui-xiang(kiro 逆向站)不抓远程图 URL → 母题图必须 base64 内嵌。下载 OSS 图 → data URL。
+    已是 data: 直接返回；下载失败 → 原样返回 url（aigeek failover 仍可用远程 URL，不破熔断备用）。"""
+    if not url or url.startswith("data:"):
+        return url
+    try:
+        import base64 as _b64
+
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=30, trust_env=False) as c:
+            resp = await c.get(url)
+            resp.raise_for_status()
+        ctype = (resp.headers.get("content-type") or "image/png").split(";")[0].strip() or "image/png"
+        return f"data:{ctype};base64,{_b64.b64encode(resp.content).decode()}"
+    except Exception:  # noqa: BLE001 — 下载失败 → 原 url（aigeek 兜底能用远程 URL）
+        return url
+
+
+def _repair_json_quotes(text: str) -> str:
+    """确定性修未转义引号（opus 复杂几何题高发，conv_trace id=1399：字符串值内写了 ASCII 双引号
+    如 关于"...的映射" 未转义 → json.loads 断）。字符级扫描：字符串内遇 " 看下一个非空白字符——
+    是 :,}] 或结尾 → 闭合引号(留)；否则 = 内容引号 → 转义。对本就合法的 JSON 无副作用
+    （内容引号已是 \\" escape pair，扫描跳过；结构引号后必跟 :,}]）。"""
+    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    body = (m.group(1) if m else text).strip()
+    out: list[str] = []
+    in_str = False
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if not in_str:
+            out.append(ch)
+            if ch == '"':
+                in_str = True
+            i += 1
+            continue
+        if ch == "\\":  # escape pair：原样保留两字符
+            out.append(ch)
+            if i + 1 < n:
+                out.append(body[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and body[j] in " \t\r\n":
+                j += 1
+            nxt = body[j] if j < n else ""
+            if nxt in ":,}]" or nxt == "":  # 闭合引号
+                out.append(ch)
+                in_str = False
+            else:  # 内容引号 → 转义
+                out.append('\\"')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+async def _repair_entry_json(broken: str) -> Any:
+    """母题 opus 非法 JSON 两级修复：① 确定性修未转义引号（覆盖 id=1399 失败模式，无副作用、不花钱）；
+    ② 仍失败 → 文本级 LLM 修复兜底（C-010 §② 失败带反馈 retry，不重读图）。返回解析对象（失败→None）。"""
+    import json as _json
+    try:
+        return _json.loads(_repair_json_quotes(broken))
+    except Exception:  # noqa: BLE001 — 确定性修不了 → LLM 兜底
+        pass
+    return await _repair_json_via_llm(broken)
+
+
+async def _repair_json_via_llm(broken: str) -> Any:
+    """文本级 LLM 修复兜底：喂坏文本让模型只修语法、内容一字不改。返回解析后的对象（失败→None）。"""
+    from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
+
+    sys_p = (
+        "你是 JSON 修复器。下面文本本应是合法 JSON，但有语法错误（最常见：字符串值内出现"
+        '未转义的 ASCII 双引号 " → 破坏 JSON 定界）。请输出**修正后的严格合法 JSON**：'
+        "保持所有字段/内容/数学式 $LaTeX$ 一字不改，**只修语法**——字符串内的 ASCII 引号转义为 "
+        '\\" 或改成中文「」。只输出 JSON 本身，不要解释、不要 markdown fence。'
+    )
+    try:
+        fixed = await V._ainvoke_text(
+            [_SM(content=sys_p), _HM(content=broken)],
+            model=None, max_tokens=8192, temperature=0.0,
+        )
+        return V._parse_json(fixed)
+    except Exception:  # noqa: BLE001 — 修复失败 → 上层走原 parse_fail
+        return None
 
 
 def build_entry_prompt(*, utterance: str | None = None) -> str:
@@ -270,29 +368,56 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         await _mem_client.aclose()
     except Exception:  # noqa: BLE001 — 记忆拉取失败 → 不注入，继续
         teacher_memory = None
+    # 🔴 2026-06-17：sui-xiang(kiro 逆向站)主站不抓远程图 URL，母题图必须 base64 内嵌；
+    #   下载失败 → 原 url 兜底（aigeek failover 仍可用远程 URL，不破熔断备用路径）。
+    img_for_llm = await _to_b64_data_url(url)
     messages = build_entry_messages(
-        image_url=url, utterance=user_text or None, teacher_memory=teacher_memory,
+        image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
     )
     opus_model = V.settings.variant_model("mother_solve_label")  # fail-fast 已锁 opus
-    try:
-        opus_text = await V._ainvoke_text(
-            messages, model=opus_model,
-            max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
-            temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
-            response_format=RESPONSE_FORMAT_ENTRY,
-            timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
-            on_reasoning=V._emit_reasoning,  # D18 思考流式（reasoning 可折叠块；aigeek 当前未吐=dormant）
-        )
-    except Exception as e:  # noqa: BLE001 — opus 失败 → SSE error，绝不静默退 gpt-5.4（母题唯一安全网）
-        V._emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")
-        V._emit_error("mother_opus_failed", f"母题读图解题失败（{str(e)[:80]}），请重试或换更清晰的图。")
-        return {
-            "image_url": url, "_entry_finalized": False,
-            "messages": [AIMessage(content="母题读图解题失败了（opus 超时或异常），请重试或换一张更清晰的题目图。")],
-        }
-
-    entry = V._parse_json(opus_text)
+    # 🔴 2026-06-17：母题「opus 调用 + 解析」失败重试一次（治 sui-xiang 逆向站静默截断/瞬时坏 JSON）。
+    #   relay_pool 已对「200+空内容」failover 到 aigeek；此处兜「200+截断后非空但解不出」的残缺返回
+    #   （几何压轴常见，C-010 §② 失败带反馈 retry≤2 范式）。绝不静默退 gpt——母题唯一安全网。
+    entry: Any = None
+    opus_exc: Exception | None = None
+    for _attempt in range(2):
+        try:
+            opus_text = await V._ainvoke_text(
+                messages, model=opus_model,
+                max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
+                temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
+                response_format=RESPONSE_FORMAT_ENTRY,
+                timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
+                on_reasoning=V._emit_reasoning,  # D18 思考流式（aigeek/sui-xiang 当前未吐=dormant）
+            )
+        except Exception as e:  # noqa: BLE001 — opus 调用异常（超时/全站失败）
+            opus_exc = e
+            if _attempt == 0:
+                V._emit_stage("classify", "锚定考点", "running", "母题读图重试中…")
+                continue
+            break
+        # 解析：数组解包（id=1383/1384）→ 引号修复兜底（id=1399）
+        parsed = V._parse_json(opus_text)
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        if not isinstance(parsed, dict):
+            V._emit_stage("classify", "锚定考点", "running", "解析修复中…")
+            parsed = await _repair_entry_json(opus_text)
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                parsed = parsed[0]
+        if isinstance(parsed, dict):
+            entry, opus_exc = parsed, None
+            break
+        if _attempt == 0:  # 解析+修复仍失败 → 重读母题一次（截断/坏 JSON 多为瞬时）
+            V._emit_stage("classify", "锚定考点", "running", "解析失败，重读母题…")
     if not isinstance(entry, dict):
+        if opus_exc is not None:
+            V._emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")
+            V._emit_error("mother_opus_failed", f"母题读图解题失败（{str(opus_exc)[:80]}），请重试或换更清晰的图。")
+            return {
+                "image_url": url, "_entry_finalized": False,
+                "messages": [AIMessage(content="母题读图解题失败了（opus 超时或异常），请重试或换一张更清晰的题目图。")],
+            }
         V._emit_stage("classify", "锚定考点", "error", "母题解题打标解析失败")
         V._emit_error("mother_opus_parse_fail", "母题解题打标结果解析失败，请重试。")
         return {
