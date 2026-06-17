@@ -1,0 +1,381 @@
+{
+  "pass": 10,
+  "total": 10,
+  "dur_s": 525,
+  "agg": {
+    "calls": 0,
+    "by_relay": {},
+    "fallback_calls": 0,
+    "error_calls": 0,
+    "total_cost_yuan": 0.0,
+    "total_pt": 0,
+    "total_ct": 0,
+    "all_model_opus": null
+  },
+  "results": [
+    {
+      "case": "A1",
+      "desc": "无登录→require_login",
+      "pass": true,
+      "detail": "nodes=['require_login']",
+      "raw": {
+        "nodes": [
+          "require_login"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 0
+        },
+        "dur": 0,
+        "state_items": 0,
+        "await_review": false,
+        "await_confirm": false,
+        "has_dna": false
+      }
+    },
+    {
+      "case": "A2",
+      "desc": "无图→ask_for_image",
+      "pass": true,
+      "detail": "nodes=['ask_for_image']",
+      "raw": {
+        "nodes": [
+          "ask_for_image"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 0
+        },
+        "dur": 0,
+        "state_items": 0,
+        "await_review": false,
+        "await_confirm": false,
+        "has_dna": false
+      }
+    },
+    {
+      "case": "B1",
+      "desc": "新图→塌缩入口→母题卡",
+      "pass": true,
+      "detail": "review=True confirm=False card=True 30s",
+      "raw": {
+        "nodes": [
+          "mother_opus_entry",
+          "await_review"
+        ],
+        "frames": [
+          "artifact",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": true,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 0
+        },
+        "dur": 30,
+        "state_items": 0,
+        "await_review": true,
+        "await_confirm": false,
+        "has_dna": true
+      }
+    },
+    {
+      "case": "B2",
+      "desc": "开始举一反三→生成链四节点→出变式",
+      "pass": true,
+      "detail": "chain=['generate', 'gene_gate', 'solve_explain', 'assemble'] items=2 82s err=None",
+      "raw": {
+        "nodes": [
+          "generate",
+          "gene_gate",
+          "solve_explain",
+          "assemble"
+        ],
+        "frames": [
+          "artifact",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 2
+        },
+        "dur": 82,
+        "state_items": 2,
+        "await_review": true,
+        "await_confirm": false,
+        "has_dna": true
+      }
+    },
+    {
+      "case": "B3",
+      "desc": "删第N→exec_remove",
+      "pass": true,
+      "detail": "nodes·rm=['parse_instruction', 'exec_remove'] items=1",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "dispatch",
+          "exec_remove",
+          "solve_explain",
+          "assemble"
+        ],
+        "frames": [
+          "artifact",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 1
+        },
+        "dur": 11,
+        "state_items": 1,
+        "await_review": true,
+        "await_confirm": false,
+        "has_dna": true
+      }
+    },
+    {
+      "case": "B4",
+      "desc": "补N道→exec_add",
+      "pass": true,
+      "detail": "add=['exec_add'] items=2",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "dispatch",
+          "exec_add",
+          "gene_gate",
+          "solve_explain",
+          "assemble"
+        ],
+        "frames": [
+          "artifact",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 2
+        },
+        "dur": 33,
+        "state_items": 2,
+        "await_review": true,
+        "await_confirm": false,
+        "has_dna": true
+      }
+    },
+    {
+      "case": "B5",
+      "desc": "答疑→answer_question",
+      "pass": true,
+      "detail": "nodes=['parse_instruction', 'answer_question']",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "answer_question"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 0
+        },
+        "dur": 22,
+        "state_items": 2,
+        "await_review": true,
+        "await_confirm": false,
+        "has_dna": true
+      }
+    },
+    {
+      "case": "B6",
+      "desc": "入库→persist_to_bank",
+      "pass": true,
+      "detail": "nodes=['parse_instruction', 'persist_to_bank'] paper=False",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "persist_to_bank"
+        ],
+        "frames": [
+          "artifact",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": null,
+          "items": 2
+        },
+        "dur": 3,
+        "state_items": 2,
+        "await_review": true,
+        "await_confirm": false,
+        "has_dna": true
+      }
+    },
+    {
+      "case": "C-stab",
+      "desc": "母题稳定性循环 8/8",
+      "pass": true,
+      "detail": "成功=8/8 延迟=[19, 34, 46, 17, 17, 29, 105, 77]",
+      "raw": {
+        "stab": [
+          {
+            "i": 0,
+            "kind": "代数",
+            "ok": true,
+            "dur": 19,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          },
+          {
+            "i": 1,
+            "kind": "代数",
+            "ok": true,
+            "dur": 34,
+            "card": true,
+            "err": null,
+            "review": false,
+            "confirm": false
+          },
+          {
+            "i": 2,
+            "kind": "代数",
+            "ok": true,
+            "dur": 46,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          },
+          {
+            "i": 3,
+            "kind": "代数",
+            "ok": true,
+            "dur": 17,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          },
+          {
+            "i": 4,
+            "kind": "代数",
+            "ok": true,
+            "dur": 17,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          },
+          {
+            "i": 5,
+            "kind": "代数",
+            "ok": true,
+            "dur": 29,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          },
+          {
+            "i": 6,
+            "kind": "几何",
+            "ok": true,
+            "dur": 105,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          },
+          {
+            "i": 7,
+            "kind": "几何",
+            "ok": true,
+            "dur": 77,
+            "card": true,
+            "err": null,
+            "review": true,
+            "confirm": false
+          }
+        ]
+      }
+    },
+    {
+      "case": "D1",
+      "desc": "预算超额→母题前拦截",
+      "pass": true,
+      "detail": "error={'reason': 'budget_exceeded', 'message': '今日 AI 额度已用尽（已用 ¥3.42/¥0.00），请稍后或明日再试。'} card=False",
+      "raw": {
+        "nodes": [
+          "mother_opus_entry"
+        ],
+        "frames": [
+          "error",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "paper": false,
+          "error": "{'reason': 'budget_exceeded', 'message': '今日 AI 额度已用尽（已用 ¥3.42/¥0.00），请稍后或明日再试。'}",
+          "items": 0
+        },
+        "dur": 0,
+        "state_items": 0,
+        "await_review": false,
+        "await_confirm": false,
+        "has_dna": false
+      }
+    }
+  ],
+  "log": [
+    "[窗口起点 2026-06-17 12:20:51.221000]",
+    "[token ok] ALG=https://question-1256278081.cos.ap-shanghai.myqcloud.com/2026-05-17/e3",
+    "[PASS] A1 无登录→require_login :: nodes=['require_login']",
+    "[PASS] A2 无图→ask_for_image :: nodes=['ask_for_image']",
+    "[PASS] B1 新图→塌缩入口→母题卡 :: review=True confirm=False card=True 30s",
+    "[PASS] B2 开始举一反三→生成链四节点→出变式 :: chain=['generate', 'gene_gate', 'solve_explain', 'assemble'] items=2 82s err=None",
+    "[PASS] B3 删第N→exec_remove :: nodes·rm=['parse_instruction', 'exec_remove'] items=1",
+    "[PASS] B4 补N道→exec_add :: add=['exec_add'] items=2",
+    "[PASS] B5 答疑→answer_question :: nodes=['parse_instruction', 'answer_question']",
+    "[PASS] B6 入库→persist_to_bank :: nodes=['parse_instruction', 'persist_to_bank'] paper=False",
+    "\n===== Phase C 稳定性循环 =====",
+    "  loop0(代数): OK 19s card=True err=None",
+    "  loop1(代数): OK 34s card=True err=None",
+    "  loop2(代数): OK 46s card=True err=None",
+    "  loop3(代数): OK 17s card=True err=None",
+    "  loop4(代数): OK 17s card=True err=None",
+    "  loop5(代数): OK 29s card=True err=None",
+    "  loop6(几何): OK 105s card=True err=None",
+    "  loop7(几何): OK 77s card=True err=None",
+    "[PASS] C-stab 母题稳定性循环 8/8 :: 成功=8/8 延迟=[19, 34, 46, 17, 17, 29, 105, 77]",
+    "[PASS] D1 预算超额→母题前拦截 :: error={'reason': 'budget_exceeded', 'message': '今日 AI 额度已用尽（已用 ¥3.42/¥0.00），请稍后或明日再试。'} card=False",
+    "\n===== conv_trace 聚合 =====\n{\"calls\": 0, \"by_relay\": {}, \"fallback_calls\": 0, \"error_calls\": 0, \"total_cost_yuan\": 0.0, \"total_pt\": 0, \"total_ct\": 0, \"all_model_opus\": null}",
+    "\n==== 总览 10/10 PASS · 525s ===="
+  ]
+}

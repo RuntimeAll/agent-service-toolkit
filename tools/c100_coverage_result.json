@@ -1,0 +1,255 @@
+{
+  "pass": 3,
+  "total": 10,
+  "dur_s": 174,
+  "results": [
+    {
+      "case": "C1",
+      "desc": "无登录→require_login(身份硬闸)",
+      "pass": true,
+      "detail": "nodes=['require_login']",
+      "raw": {
+        "nodes": [
+          "require_login"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": false,
+        "has_mother_dna": false
+      }
+    },
+    {
+      "case": "C2",
+      "desc": "无图→ask_for_image(催图兜底)",
+      "pass": true,
+      "detail": "nodes=['ask_for_image']",
+      "raw": {
+        "nodes": [
+          "ask_for_image"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": false,
+        "has_mother_dna": false
+      }
+    },
+    {
+      "case": "C3",
+      "desc": "新图→塌缩入口→母题卡(高置信硬停)",
+      "pass": false,
+      "detail": "path=confirm card=False dna=True nodes=['mother_opus_entry']",
+      "raw": {
+        "nodes": [
+          "mother_opus_entry"
+        ],
+        "frames": [
+          "needConfirm",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": true,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": true,
+        "has_mother_dna": true
+      }
+    },
+    {
+      "case": "C5",
+      "desc": "开始举一反三→生成链四节点→出变式",
+      "pass": false,
+      "detail": "chain=[] items=0 frames=[] err=None",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "ask_clarify"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": true,
+        "has_mother_dna": true
+      }
+    },
+    {
+      "case": "C6",
+      "desc": "删第N→exec_remove",
+      "pass": false,
+      "detail": "items 0→0 nodes=['parse_instruction']",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "ask_clarify"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": true,
+        "has_mother_dna": true
+      }
+    },
+    {
+      "case": "C7",
+      "desc": "补N道→exec_add",
+      "pass": false,
+      "detail": "items 0→0 add_chain=[]",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "ask_clarify"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": true,
+        "has_mother_dna": true
+      }
+    },
+    {
+      "case": "C8",
+      "desc": "答疑→answer_question",
+      "pass": true,
+      "detail": "nodes=['parse_instruction', 'answer_question']",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "answer_question"
+        ],
+        "frames": [],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": true,
+        "has_mother_dna": true
+      }
+    },
+    {
+      "case": "C9",
+      "desc": "入库→persist_to_bank(真写库)",
+      "pass": false,
+      "detail": "nodes=['parse_instruction'] frames=['artifact', 'stage']",
+      "raw": {
+        "nodes": [
+          "parse_instruction",
+          "patch",
+          "classify",
+          "clarify"
+        ],
+        "frames": [
+          "artifact",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": true,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": null,
+          "mother_has_figure": false,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": false,
+        "has_mother_dna": true
+      }
+    },
+    {
+      "case": "C10",
+      "desc": "带图母题→塌缩入口(has_figure帧)",
+      "pass": false,
+      "detail": "card=False has_figure=None",
+      "raw": {
+        "nodes": [
+          "mother_opus_entry"
+        ],
+        "frames": [
+          "error",
+          "stage"
+        ],
+        "flags": {
+          "mother_card": false,
+          "needConfirm": false,
+          "needAsk": false,
+          "paper": false,
+          "error": "{'reason': 'mother_opus_parse_fail', 'message': '母题解题打标结果解析失败，请重试。'}",
+          "mother_has_figure": null,
+          "variant_items": 0
+        },
+        "state_items": 0,
+        "awaiting_review": false,
+        "awaiting_confirm": false,
+        "has_mother_dna": false
+      }
+    },
+    {
+      "case": "C11",
+      "desc": "预算超额→母题前拦截",
+      "pass": false,
+      "detail": "EXC 'Settings' object has no attribute 'settings'",
+      "raw": null
+    }
+  ]
+}
