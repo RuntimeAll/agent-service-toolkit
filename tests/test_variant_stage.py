@@ -522,6 +522,8 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
         "dirty_dims": [],
         "mother_dirty_dims": [],
         "can_undo_regen": False,
+        # PRD-C-100 BC2：变式配图 OSS url（裸 item 无图 → None）。
+        "figure_url": None,
     }
     assert art["items"][1]["index"] == 2
     assert art["items"][1]["level"] == "hard"
@@ -592,6 +594,8 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "dirty_dims": [],
         "mother_dirty_dims": [],
         "can_undo_regen": False,
+        # PRD-C-100 BC2：变式配图 OSS url（裸 item 无图 → None）。
+        "figure_url": None,
     }
     # 缺省哨兵值（未知考点/未知年级）→ None 化；空 knobs → recipe None（+ 批4 母题脏/待重生集合）
     assert art["header"] == {

@@ -734,6 +734,35 @@ async def variant_reverify(input: VariantReverifyInput) -> dict[str, Any]:
     return await _variant_apply(input.thread_id, _fn)
 
 
+class VariantSetFigureUrlInput(BaseModel):
+    """PRD-C-100 BC2：变式配图 OSS url 回写请求（零 LLM）。index=1-based。
+
+    FE 先把 compose_variant_figure 产的 PNG base64 经 uploadMotherImage 传 OSS 拿 https url，
+    再调本端点把 url 回写进 state.items[index-1].figure_url → 入库时进 A-015 image 块。
+    figure_url=None/空 = 撤掉配图。
+    """
+
+    thread_id: str
+    index: int
+    figure_url: str | None = None
+
+
+@router.post("/variant/set-figure-url")
+async def variant_set_figure_url(input: VariantSetFigureUrlInput) -> dict[str, Any]:
+    """变式配图 OSS url 回写（零 LLM）：把 https OSS url 存进 state.items[i].figure_url。
+
+    index 越界 → 400；figure_url 非 https → 400。回写后入库（build_create_bo）据它产 image 块。
+    与编辑器三端点同直连范式（aget_state → 纯逻辑 → aupdate_state → _artifact_payload）。
+    """
+    from agents.variant import set_item_figure_state
+
+    def _fn(values):
+        update, _item, error = set_item_figure_state(values, input.index, input.figure_url)
+        return update, error
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
 # ---------------------------------------------------------------------------
 # DNA 双模态编辑两端点（PRD-C-014 B4·T1/T2，契约 PRD §10.5 / §3.5）。
 # 同上直连范式（aget_state → variant.py 纯逻辑 → aupdate_state(as_node) → _artifact_payload）。

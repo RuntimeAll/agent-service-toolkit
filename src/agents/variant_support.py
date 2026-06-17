@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -15,6 +16,11 @@ import httpx
 import pymysql
 
 from agents import dna_extract
+from agents.qtype_format import (
+    _CHOICE_SPLIT_LOOKAHEAD_RE,
+    _FIRST_OPT_RE,
+    format_by_qtype,
+)
 from core import settings
 
 
@@ -617,6 +623,119 @@ def _apply_labels(
         bo["labelConfidence"] = conf
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-100 B-converge BC2：题面 → A-015 block JSON 组装（toolkit 侧，入库实际发生处）。
+#
+# 契约 = artifacts/共享契约-block-schema.md（= PRD-A-015 §10.1，逐字采纳不私改）：
+#   { "v":1, "rows":[ { "cells":[ <block> ] } ] }
+#   block 三型：text {type,md} / image {type,url,width,align} / option {type,label,content:[text|image]}
+# 边界（A-015 §9）：本期 block 只装【题干 + 选项 + 图】；answer/analysis 仍走 biz_question 旧字段，
+#   不进 block（BlockJsonValidator 不校验 answer/analysis）。
+#
+# 数据来源（toolkit 侧）：
+#   - stem（含 $...$ 公式原文）= item.stem / facts.stem，已被 _format_item_stem 规范成 canonical
+#     （选择题选项一行一项：「题干\n\nA. 甲\n\nB. 乙…」）。
+#   - 选项 = 从 canonical stem 用 qtype_format 同口径正则切出（SSOT，与 FE normalize.ts 一致），
+#     只有选择题才切；非选择题整段 stem = 单 text 块。
+#   - 图 url = OSS https（母题图 facts.image_url 已在 state；变式造图由 FE 传 figure_url，见 §FE 注）。
+# 图全链不耦合 OSS 上传（compose.py §13 铁律：base64 在 FE 展示，入库时 FE 传 OSS url）→
+#   本函数只消费现成的 OSS url，绝不在此上传/直传。
+# 选项内联图（option 内含图）本期不拆（选项图极少且需结构化抽取）→ 选项 content 只放 text。
+# ---------------------------------------------------------------------------
+
+# 选项标记切分后，从单项里抠「标签字母 + 正文」。镜像 qtype_format 的标记定义。
+_OPT_LABEL_RE = re.compile(r"^\s*[（(]?\s*([A-H])\s*[）).．、:：]\s*(.*)$", re.DOTALL)
+
+
+def _is_oss_https(url: Any) -> bool:
+    """图 url 仅收 https（契约：image.url 仅 https OSS 域）。非 https / 空 → 不进 image 块。"""
+    s = str(url or "").strip()
+    return s.startswith("https://")
+
+
+def _split_choice_blocks(stem: str) -> tuple[str, list[dict[str, Any]]] | None:
+    """canonical 选择题 stem → (题干 head, [option 块...])。切不出选项返回 None（调用方降级单 text）。
+
+    用 qtype_format 同口径正则（_FIRST_OPT_RE 定位首选项、_CHOICE_SPLIT_LOOKAHEAD_RE 前瞻切各项），
+    保证与 FE normalize.ts / BE formatter 解析完全一致（同一 SSOT，BE 规范 ↔ block 切分对得上）。
+    """
+    m = _FIRST_OPT_RE.search(stem)
+    if not m:
+        return None
+    head = stem[: m.start()].rstrip()
+    region = stem[m.start():]
+    options: list[dict[str, Any]] = []
+    for chunk in _CHOICE_SPLIT_LOOKAHEAD_RE.split(region):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        lm = _OPT_LABEL_RE.match(chunk)
+        if not lm:
+            continue
+        label, content = lm.group(1), (lm.group(2) or "").strip()
+        options.append({
+            "type": "option",
+            "label": label,
+            "content": [{"type": "text", "md": content}],
+        })
+    if not options:
+        return None
+    return head, options
+
+
+def build_block_json(
+    stem: Any,
+    qtype: Any,
+    *,
+    image_url: Any = None,
+) -> str | None:
+    """题面 → A-015 block JSON 字符串（CreateQuestionBo.blockJson，String 序列化）。
+
+    规则（契约 §3 + A-015 §9 边界）：
+      - 题干 → text 块（md 含 $...$ 公式原文，原样不动）。
+      - 选择题 → 题干 head 为 text 块、各选项为 option 块（一行一项，每项单独一 row）。
+      - 非选择题 → 整段 stem 作单 text 块（无 option 块）。
+      - image_url（https OSS）→ 末尾追加 image 块（独占一 row；width=60 居中默认）。
+      - answer/analysis 不进 block（留 biz_question 旧字段）。
+    布局：每 row 一个 cell（一行一块），与 _normalize_choice 一行一项语义一致；
+      列数沿用现状（单列）。空 stem 且无图 → 返回 None（不产空 block，create 跳过校验/落库）。
+    """
+    s = str(stem or "").strip()
+    has_img = _is_oss_https(image_url)
+    if not s and not has_img:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    if s:
+        # 规范一遍（幂等）：确保选项 canonical 一行一项，切分口径与 BE/FE 完全一致。
+        canonical = format_by_qtype(s, qtype)
+        is_choice = _map_qtype(qtype) == 1
+        split = _split_choice_blocks(canonical) if is_choice else None
+        if split is not None:
+            head, options = split
+            if head:
+                rows.append({"cells": [{"type": "text", "md": head}]})
+            for opt in options:
+                rows.append({"cells": [opt]})
+        else:
+            # 非选择题 / 切不出选项 → 整段题干一个 text 块（降级，不丢内容）。
+            rows.append({"cells": [{"type": "text", "md": canonical}]})
+
+    if has_img:
+        rows.append({
+            "cells": [{
+                "type": "image",
+                "url": str(image_url).strip(),
+                "width": 60,
+                "align": "center",
+            }],
+        })
+
+    if not rows:
+        return None
+    return json.dumps({"v": 1, "rows": rows}, ensure_ascii=False)
+
+
 def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     """从上传图抽出的「母题(原题)」→ CreateQuestionBo。
 
@@ -647,6 +766,13 @@ def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     if facts.get("image_url"):
         bo["stemImg"] = facts["image_url"]  # 母题图落题干图字段
     _apply_labels(bo, facts, item=None, role="mother")
+    # 🔴 BC2：母题题面 → A-015 block JSON（题干+选项+母题图）。母题图 url = facts.image_url
+    #   （老师上传/贴的 OSS https，已在 state；非 https 则 build_block_json 自动不进 image 块）。
+    block_json = build_block_json(
+        facts.get("stem"), facts.get("qtype"), image_url=facts.get("image_url")
+    )
+    if block_json:
+        bo["blockJson"] = block_json
     return bo
 
 
@@ -694,6 +820,15 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
         except (TypeError, ValueError):
             pass
     _apply_labels(bo, facts, item=item, role="variant")
+    # 🔴 BC2：变式题面 → A-015 block JSON（题干+选项+变式图）。变式图 url = item.figure_url
+    #   （FE 把 compose_variant_figure 产的 base64 经 uploadMotherImage 传 OSS 后回填的 https url；
+    #   纯文本变式无 figure_url → 不产 image 块）。compose.py 铁律：OSS 上传在 FE，本侧只消费 url。
+    block_json = build_block_json(
+        item.get("stem"), item.get("qtype") or facts.get("qtype"),
+        image_url=item.get("figure_url"),
+    )
+    if block_json:
+        bo["blockJson"] = block_json
     return bo
 
 

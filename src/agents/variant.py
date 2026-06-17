@@ -1191,6 +1191,10 @@ def _artifact_payload(
         cell["dirty_dims"] = list(it.get("dirty_dims") or [])
         cell["mother_dirty_dims"] = list(it.get("mother_dirty_dims") or [])
         cell["can_undo_regen"] = isinstance(it.get("regen_snapshot"), dict)
+        # 🔴 PRD-C-100 BC2：变式配图 OSS url（FE compose_variant_figure 产 base64 → uploadMotherImage
+        #   传 OSS → 经 /variant/set-figure-url 回写 state.items[i].figure_url）。入库时
+        #   build_create_bo 据它产 A-015 image 块；透传给 FE 用于会话恢复后保持配图态。缺则 None。
+        cell["figure_url"] = str(it.get("figure_url") or "") or None
         out_items.append(cell)
     # 🔴 批4·组级重生态：mother_dirty（母题守恒维改）+ regen_pending（待重生集合 1-based 题号）。
     #   FE 据 regen_pending 非空 → 「重生」按钮可点 + 入库按钮禁用（致命① dirty 拒入库视觉）。
@@ -5622,6 +5626,33 @@ def edit_item_state(
     _format_item_stem(it)
     # check 置中性：手动编辑、验算待重跑（清旧 verify/badge/tier，避免徽章误导）
     it["check"] = {"tier": TIER_MANUAL}
+    return {"items": new_items}, it, None
+
+
+def set_item_figure_state(
+    state: VariantState, index: int, figure_url: str | None
+) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+    """PRD-C-100 BC2：把变式配图 OSS url 回写进 state.items[index-1].figure_url（零 LLM）。
+
+    FE 流程：compose_variant_figure 产 PNG base64 → 老师认账 → FE 用 uploadMotherImage 把 base64
+    传 OSS 拿 https url → 调本端点回写 state → 入库时 build_create_bo 据 figure_url 产 A-015 image 块。
+    figure_url=None/空 → 清掉配图（老师撤图）。url 仅收 https（与 build_block_json._is_oss_https 同口径）。
+
+    返回 (update, edited_item, error)：index 越界 → ({}, None, 错误串) 让端点回 400。
+    figure_url 是展示/入库增强键，不入 biz_question 旧字段（仅 blockJson 用），不触碰 check/验算态。
+    """
+    items = list(state.get("items") or [])
+    if not isinstance(index, int) or index < 1 or index > len(items):
+        return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
+    url = str(figure_url or "").strip()
+    if url and not url.startswith("https://"):
+        return {}, None, "figure_url 必须是 https OSS 地址"
+    new_items = [dict(it) for it in items]
+    it = new_items[index - 1]
+    if url:
+        it["figure_url"] = url
+    else:
+        it.pop("figure_url", None)
     return {"items": new_items}, it, None
 
 
