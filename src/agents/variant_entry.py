@@ -343,8 +343,10 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
 
     # 🔴 B5 单一全局日预算护栏（G7）：当日花费超阈值 → 拦截母题 opus 一把（不调，不静默烧钱）。
     from agents import cost_guard
-    if cost_guard.is_budget_exceeded():
-        st = cost_guard.budget_status()
+    # 🔴 P5：护栏读库丢线程池（async 版），慢库不卡 asyncio loop / 不拖垮并发 SSE。
+    if await cost_guard.is_budget_exceeded_async():
+        # 已超 → 取一次 status 拼提示文案（缓存 ~60s，几乎不二次查库）；放线程池保险。
+        st = await cost_guard.budget_status_async()
         V._emit_stage("classify", "锚定考点", "warn", "今日 AI 额度已用尽")
         V._emit_error("budget_exceeded",
                       f"今日 AI 额度已用尽（已用 ¥{st['spend']:.2f}/¥{st['limit']:.2f}），请稍后或明日再试。")

@@ -69,7 +69,8 @@ async def compose_variant_figure(
     """
     # 🔴 B5 预算护栏（G7）：当日花费超阈值 → 造图降级（needs_figure，不调翻命令，题照常交付）。
     from agents import cost_guard
-    if cost_guard.is_budget_exceeded():
+    # 🔴 P5：护栏读库丢线程池（async 版），慢库不卡 asyncio loop / 不拖垮并发 SSE。
+    if await cost_guard.is_budget_exceeded_async():
         return {"item_id": item_id, "ok": False, "needs_figure": True,
                 "reason": "今日 AI 额度已用尽，配图暂缓（可明日重试或手动配图）", "commands": [], "warnings": []}
 

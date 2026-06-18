@@ -812,7 +812,10 @@ async def _ainvoke_text(
     except Exception as e:  # noqa: BLE001 — 记下失败往返后照常抛
         dur = int((time.monotonic() - t0) * 1000)
         _trace_llm(label, messages, "", None, dur, error=str(e), model=model_used)
-        conv_trace.write(
+        # 🔴 P5：conv_trace 是同步 pymysql，丢线程池跑（_conn 已配死超时），绝不阻塞 loop。
+        #   best-effort 不变：write() 内部自吞错；to_thread 包一层防慢库卡住事件循环。
+        await asyncio.to_thread(
+            conv_trace.write,
             teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
             model=model_used, relay=relay, fallback_count=fallback, fallback_detail=fb_detail,
             request=_serialize_request(messages),
@@ -836,7 +839,9 @@ async def _ainvoke_text(
         raw = {"content": str(getattr(resp, "content", ""))}
     _trace_llm(label, messages, text, raw, dur, retried=retried, model=model_used)
     # 🔴 用户级对话持久化（优化基础数据源）→ 独立解耦库 conv_trace
-    conv_trace.write(
+    # 🔴 P5：同步 pymysql 丢线程池（_conn 已配死超时），慢库不阻塞 asyncio loop；best-effort 不变。
+    await asyncio.to_thread(
+        conv_trace.write,
         teacher_id=teacher_id, thread_id=thread_id, source="variant", label=label,
         model=model_used, relay=relay, fallback_count=fallback, fallback_detail=fb_detail,
         request=_serialize_request(messages),

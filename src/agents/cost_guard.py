@@ -12,11 +12,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any
-
-import pymysql
 
 from agents import conv_trace
 from core.settings import settings
@@ -72,3 +71,19 @@ def budget_status() -> dict[str, Any]:
 def is_budget_exceeded() -> bool:
     """护栏闸：当日花费 ≥ 阈值 → True（母题拦截/造图降级）。阈值关 → 永 False。"""
     return budget_status()["exceeded"]
+
+
+# ---------------------------------------------------------------------------
+# 🔴 P5 并发炸弹兜底：护栏读库（today_spend_yuan → conv_trace._conn → 同步 pymysql SUM）
+#   在 async 上下文（母题入口 / 造图）被调用。慢库（:3307 丢包/分区）下同步阻塞会卡死整个
+#   asyncio 事件循环 → 所有并发 SSE 流一起卡。async 调用点必须走下面的 *_async 版本，
+#   把同步读丢线程池（_conn 已配 connect/read/write 死超时，慢库快速抛 → best-effort 不误拦）。
+# ---------------------------------------------------------------------------
+async def budget_status_async() -> dict[str, Any]:
+    """budget_status 的非阻塞版：同步读库丢线程池跑，不卡 asyncio loop。"""
+    return await asyncio.to_thread(budget_status)
+
+
+async def is_budget_exceeded_async() -> bool:
+    """is_budget_exceeded 的非阻塞版（async 上下文必走它）。读库丢线程池，慢库不卡 loop。"""
+    return await asyncio.to_thread(is_budget_exceeded)

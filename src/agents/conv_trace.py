@@ -78,6 +78,10 @@ _MIGRATE = [
 
 def _conn() -> pymysql.connections.Connection:
     pwd = settings.VARIANT_DB_PASSWORD
+    # 🔴 P5 并发炸弹兜底：trace 库(:3307)慢/丢包时，同步 pymysql 不设超时会阻塞整个
+    #   asyncio 事件循环 ~默认TCP超时(可达分钟级)→ 拖垮所有并发 SSE 流。这里给死超时
+    #   (connect 2s / read 3s / write 3s)，库慢时快速抛 → 上层 best-effort 吞错降级，
+    #   绝不让一条慢连接卡住全局 loop（调用点已配 asyncio.to_thread，超时也只占线程池一格）。
     return pymysql.connect(
         host=settings.VARIANT_DB_HOST,
         port=settings.VARIANT_DB_PORT,
@@ -86,6 +90,9 @@ def _conn() -> pymysql.connections.Connection:
         database=_DB_NAME,
         charset="utf8mb4",
         autocommit=True,
+        connect_timeout=2,
+        read_timeout=3,
+        write_timeout=3,
     )
 
 
