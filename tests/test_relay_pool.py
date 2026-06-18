@@ -252,3 +252,84 @@ def test_chat_override_caches_per_temperature(monkeypatch):
     assert c_low is not c_hi  # 不同温度独立实例
     assert c_low.temperature == 0.1 and c_hi.temperature == 0.5
     rp._chat_cache.clear()
+
+
+# --- 思考链开关（prefer_relay + reasoning_effort）---------------------------------
+class _RecChat:
+    """记录 bind kwargs + 调用顺序的桩，验思考链路由/绑参。"""
+
+    def __init__(self, name, resp, order):
+        self.name = name
+        self._resp = resp
+        self._order = order
+        self.bind_kw = None
+
+    def bind(self, **kw):
+        self.bind_kw = kw
+        return self
+
+    async def ainvoke(self, _messages, **_kw):
+        self._order.append(self.name)
+        if isinstance(self._resp, Exception):
+            raise self._resp
+        return AIMessage(content=self._resp) if isinstance(self._resp, str) else self._resp
+
+
+def test_prefer_relay_moves_named_relay_first(monkeypatch):
+    """思考链开：prefer_relay 把同名站提到候选首位（其余原序），reasoning_effort 进 bind。"""
+    main = Relay(name="sui-xiang", base_url="http://a", api_key="k", model="m-kiro")
+    aigeek = Relay(name="aigeek", base_url="http://b", api_key="k", model="m-aigeek")
+    order: list[str] = []
+    chats = {
+        "sui-xiang": _RecChat("sui-xiang", "KIRO", order),
+        "aigeek": _RecChat("aigeek", "AIGEEK", order),
+    }
+    monkeypatch.setattr(rp, "_relays", lambda: [main, aigeek])
+    monkeypatch.setattr(rp, "_chat", lambda relay: chats[relay.name])
+    rp._breakers.clear()
+
+    resp, name, model, fallback, _d = asyncio.run(
+        ainvoke_failover([], max_tokens=10, prefer_relay="aigeek", reasoning_effort="low")
+    )
+    assert name == "aigeek" and resp.content == "AIGEEK"  # 优先站先成交
+    assert order[0] == "aigeek"  # 顺序确实被提前
+    assert chats["aigeek"].bind_kw.get("reasoning_effort") == "low"  # thinking 绑参注入
+
+
+def test_prefer_relay_graceful_failover_when_preferred_down(monkeypatch):
+    """graceful：优先站不可用 → 正常 failover 到下一站（不报错），reasoning_effort 仍绑（被下游忽略）。"""
+    main = Relay(name="sui-xiang", base_url="http://a", api_key="k", model="m-kiro")
+    aigeek = Relay(name="aigeek", base_url="http://b", api_key="k", model="m-aigeek")
+    order: list[str] = []
+    chats = {
+        "sui-xiang": _RecChat("sui-xiang", "KIRO", order),
+        "aigeek": _RecChat("aigeek", RuntimeError("aigeek down"), order),
+    }
+    monkeypatch.setattr(rp, "_relays", lambda: [main, aigeek])
+    monkeypatch.setattr(rp, "_chat", lambda relay: chats[relay.name])
+    rp._breakers.clear()
+
+    resp, name, model, fallback, _d = asyncio.run(
+        ainvoke_failover([], max_tokens=10, prefer_relay="aigeek", reasoning_effort="low")
+    )
+    assert order[0] == "aigeek"  # 先试优先站
+    assert name == "sui-xiang" and resp.content == "KIRO"  # 优先站挂 → failover 回主站，不报错
+    assert fallback == 1
+
+
+def test_no_prefer_relay_keeps_default_order(monkeypatch):
+    """默认路径（不开思考链）：prefer_relay=None → 原序不动、reasoning_effort 不绑（旧行为）。"""
+    main = Relay(name="sui-xiang", base_url="http://a", api_key="k", model="m-kiro")
+    aigeek = Relay(name="aigeek", base_url="http://b", api_key="k", model="m-aigeek")
+    order: list[str] = []
+    chats = {
+        "sui-xiang": _RecChat("sui-xiang", "KIRO", order),
+        "aigeek": _RecChat("aigeek", "AIGEEK", order),
+    }
+    monkeypatch.setattr(rp, "_relays", lambda: [main, aigeek])
+    monkeypatch.setattr(rp, "_chat", lambda relay: chats[relay.name])
+    rp._breakers.clear()
+
+    resp, name, model, fallback, _d = asyncio.run(ainvoke_failover([], max_tokens=10))
+    assert order[0] == "sui-xiang" and name == "sui-xiang"  # 原序：主站先
+    assert "reasoning_effort" not in (chats["sui-xiang"].bind_kw or {})  # 默认不绑 thinking
