@@ -471,6 +471,9 @@ class VariantFigureInput(BaseModel):
     stem: str | None = None
     answer: str | None = None
     correction_prompt: str | None = None
+    # 🔴 PRD-C-100 C·图片重生带上下文：上一版 GeoGebra commands（FE 存住每图上一版透传）。
+    #   correction_prompt + prev_commands 都在 → compose 走增量修改分支（在上一版基础上改，不从零重画）。
+    prev_commands: list[str] | None = None
     item_id: str | None = None
 
 
@@ -535,6 +538,7 @@ async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
             result = await compose.compose_variant_figure(
                 stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
                 parse_json=_parse_json, correction_prompt=input.correction_prompt,
+                prev_commands=input.prev_commands,  # 🔴 PRD-C-100 C：图片重生带上一版命令 → 增量改图
                 item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
             )
             # 🔴 B4 经验层留痕（图修正）：老师发修正提示词 → 每次都写（只累计 D13）。best-effort。

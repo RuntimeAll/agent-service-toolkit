@@ -57,6 +57,7 @@ async def compose_variant_figure(
     invoke: Any,
     parse_json: Any,
     correction_prompt: str | None = None,
+    prev_commands: list[str] | None = None,
     item_id: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
@@ -65,6 +66,9 @@ async def compose_variant_figure(
 
     🔴 invoke = variant._ainvoke_text（落 conv_trace label=figure_geogebra）；parse_json = variant._parse_json。
     🔴 correction_prompt 非空 = 图片重生（老师修正提示词，单图重造，人在回路 D12）。
+    🔴 PRD-C-100 C：图片重生带上一版 GeoGebra commands（prev_commands）+ 原题上下文 →
+       opus 在「上一版配图命令的基础上按修正要求调整」（增量修改，而非从零重画，保证继承上一版）。
+       仅当 correction_prompt 与 prev_commands 同时非空才走增量分支；首次造图（无 prev_commands）维持原行为。
     🔴 任何失败 → needs_figure=True（降级，不抛、不掐流程 G11）。
     """
     # 🔴 B5 预算护栏（G7）：当日花费超阈值 → 造图降级（needs_figure，不调翻命令，题照常交付）。
@@ -77,7 +81,18 @@ async def compose_variant_figure(
     user_segs = [f"【变式题面】\n{stem}"]
     if answer:
         user_segs.append(f"【标准答案/解答】\n{answer}")
-    if correction_prompt:  # 图片重生：老师修正提示词（人在回路）
+    # 🔴 PRD-C-100 C：图片重生 = correction_prompt + prev_commands 都在 → 增量修改（带上一版命令 + 原题上下文）。
+    #   把上一版 GeoGebra commands 原样喂回，指令改成「在下面这版配图命令的基础上，按修正要求调整」，
+    #   让 opus 继承上一版骨架做增量改动，而非丢掉上下文从零重画（跑偏的根因）。
+    incremental_regen = bool(correction_prompt and prev_commands)
+    if incremental_regen:
+        prev_block = "\n".join(str(c) for c in (prev_commands or []) if str(c).strip())
+        user_segs.append(f"【上一版配图 GeoGebra 命令（基准，在此之上调整）】\n{prev_block}")
+        user_segs.append(
+            "【老师修正要求（🔴 在上面这版配图命令的基础上，按本要求调整——而非从零重画，"
+            f"保留与修正无关的部分、只改需要改的）】\n{correction_prompt}"
+        )
+    elif correction_prompt:  # 图片重生但无上一版命令（首版即降级 / 老会话）→ 退回原行为（从修正词重画）
         user_segs.append(f"【老师修正要求（按此重新构造配图）】\n{correction_prompt}")
     messages = [
         SystemMessage(content=_GEO_SYSTEM),
