@@ -6,7 +6,12 @@
 
 import pytest
 
-from agents.variant import _sanitize_item, _sanitize_rich_text
+from agents.variant import (
+    _sanitize_item,
+    _sanitize_rich_text,
+    _strip_bare_spacing_outside_math,
+    join_skeleton,
+)
 
 
 class TestSanitizeRichText:
@@ -60,6 +65,56 @@ class TestSanitizeItem:
         _sanitize_item(it)
         assert it["stem"] is None
         assert it["answer"] is None
+
+
+class TestBareSpacingOutsideMath:
+    """A1（2026-06-18）：$...$ 外裸 LaTeX 间距命令 → 空格；段内原样交 KaTeX。"""
+
+    def test_bare_quad_outside_stripped(self):
+        out = _sanitize_rich_text(r"A. 37° \quad B. 53° \quad C. 60°")
+        assert "\\quad" not in out
+        assert "A. 37°" in out and "B. 53°" in out
+
+    def test_quad_inside_math_preserved(self):
+        # $...$ 内的 \quad 不动，留给 KaTeX
+        assert _sanitize_rich_text(r"$x \quad y$") == r"$x \quad y$"
+
+    def test_mixed_inside_and_outside(self):
+        # 题目自检样例：外面 \quad 清掉、$x \quad y$ 完整保留
+        out = _sanitize_rich_text(r"A. 37° \quad B. 53° $x \quad y$")
+        assert r"$x \quad y$" in out
+        # 段外的 \quad（B 后面那个）没了
+        before_math = out.split("$x")[0]
+        assert "\\quad" not in before_math
+
+    def test_all_spacing_commands(self):
+        out = _strip_bare_spacing_outside_math(r"a \quad b \qquad c \, d \; e \! f \: g")
+        for cmd in (r"\quad", r"\qquad", r"\,", r"\;", r"\!", r"\:"):
+            assert cmd not in out
+        assert all(ch in out for ch in "abcdefg")
+
+    def test_display_math_span_preserved(self):
+        # $$...$$ 段内 \quad 也不动
+        assert _strip_bare_spacing_outside_math(r"$$a \quad b$$ \quad c") == r"$$a \quad b$$   c"
+
+    def test_no_false_positive_on_word(self):
+        # \quadword 不是裸 \quad（后接字母）→ 不动
+        assert _strip_bare_spacing_outside_math(r"\quadword") == r"\quadword"
+
+
+class TestJoinSkeleton:
+    """P8：骨架逐行净化后拼接 → analyze 不裸露。"""
+
+    def test_each_line_sanitized(self):
+        out = join_skeleton([r"第一步 \(x=1\)", r"第二步 A \quad B"])
+        assert out == "第一步 $x=1$\n第二步 A   B"
+
+    def test_empty_and_none(self):
+        assert join_skeleton([]) == ""
+        assert join_skeleton(None) == ""
+
+    def test_non_str_lines(self):
+        assert join_skeleton([1, 2]) == "1\n2"
 
 
 if __name__ == "__main__":

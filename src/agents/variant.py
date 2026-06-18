@@ -885,14 +885,33 @@ _BRACKET_MATH_RE = re.compile(r"\\\[\s*(.+?)\s*\\\]", re.DOTALL)
 # 字面 \n 后跟小写字母 = 可能是 LaTeX 命令（\neq \nabla \newline \nu …），不动；其余视为换行
 _LITERAL_NL_RE = re.compile(r"\\n(?![a-z])")
 
+# 🔴 A1（2026-06-18）：opus 把选项写成一行 `A. 37° \quad B. 53° …`，\quad 在 $...$ **外**
+#   → KaTeX 不渲染、裸露。把出现在 $...$ 外的裸 LaTeX 间距命令替成普通空格；$...$ 内的不动
+#   （留给 KaTeX）。FE mathNormalize.ts 同口径，两边一致。
+# 切分 $$...$$ / $...$ 数学段：偶数下标 = 段外文本，奇数下标 = 数学段（含定界符）。
+_MATH_SPLIT_RE = re.compile(r"(\$\$[\s\S]+?\$\$|\$[^\n$]+?\$)")
+# 裸间距命令：\quad \qquad \, \; \! \:（后接非字母边界，防误伤 \quadword 之类）
+_BARE_SPACING_RE = re.compile(r"\\(?:qquad|quad)(?![a-zA-Z])|\\[,;!:]")
+
+
+def _strip_bare_spacing_outside_math(s: str) -> str:
+    """把 $...$ 外的裸 LaTeX 间距命令（\\quad \\qquad \\, \\; \\! \\:）替成普通空格；段内原样。"""
+    parts = _MATH_SPLIT_RE.split(s)
+    for i in range(0, len(parts), 2):  # 偶数下标 = 数学段外文本
+        if parts[i]:
+            parts[i] = _BARE_SPACING_RE.sub(" ", parts[i])
+    return "".join(parts)
+
 
 def _sanitize_rich_text(s: Any) -> Any:
-    """LLM 产出的 stem/answer/solution 净化：\\(..\\)→$..$、\\[..\\]→$$..$$、字面 \\n→换行。"""
+    """LLM 产出的 stem/answer/solution 净化：\\(..\\)→$..$、\\[..\\]→$$..$$、字面 \\n→换行、
+    $...$ 外裸间距命令(\\quad 等)→空格。"""
     if not isinstance(s, str) or not s:
         return s
     s = _BRACKET_MATH_RE.sub(lambda m: f"$${m.group(1)}$$", s)
     s = _PAREN_MATH_RE.sub(lambda m: f"${m.group(1)}$", s)
-    return _LITERAL_NL_RE.sub("\n", s)
+    s = _LITERAL_NL_RE.sub("\n", s)
+    return _strip_bare_spacing_outside_math(s)
 
 
 def _sanitize_item(it: dict[str, Any]) -> dict[str, Any]:
@@ -900,6 +919,15 @@ def _sanitize_item(it: dict[str, Any]) -> dict[str, Any]:
     for k in ("stem", "answer", "solution"):
         it[k] = _sanitize_rich_text(it.get(k))
     return it
+
+
+def join_skeleton(lines: Any) -> str:
+    """P8（2026-06-18）：骨架步骤序列逐行净化后换行拼接 → 落 solution_skeleton/analyze。
+    解决图母题入库 analyze = 未净化 skeleton（裸 \\(..\\)/裸间距命令）裸露。"""
+    out = []
+    for s in lines or []:
+        out.append(_sanitize_rich_text(str(s)))
+    return "\n".join(out)
 
 
 def _latest_human_text(messages: list[BaseMessage]) -> str:
@@ -1904,7 +1932,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     dna = mother_opus.opus_to_dna(opus_data)
     skeleton_lines = dna.get("skeleton") or []
     if skeleton_lines:
-        mother_dna["solution_skeleton"] = "\n".join(str(s) for s in skeleton_lines)
+        mother_dna["solution_skeleton"] = join_skeleton(skeleton_lines)  # P8 逐行净化
     solved = opus_data.get("solvedAnswer")
     if solved:
         mother_dna["solved_answer"] = _sanitize_rich_text(solved)
@@ -2230,6 +2258,8 @@ GENERATE_PROMPT = (
   **严禁** `$$...$$` / `\\[ \\]` / 任何 display 块级公式（会渲染成撑满整行的大号公式、强制换行，破坏阅读）。
 - **仅 solution 里多行分步推导**可用 $$...$$（一步一行的竖排演算）；其余单个等式仍优先行内 $...$。
 - **禁止**裸 LaTeX 命令、禁止 \\( \\) 定界符。
+- 🔴 选项间距禁用 `\\quad`/`\\qquad`/`\\,` 等 LaTeX 间距命令，**选项各自成项**（用换行或并列文本分隔），
+  绝不写成 `A. 37° \\quad B. 53°` 这种一行内 $...$ 外裸 \\quad（渲染层不认、会裸露）。
 - 换行用 JSON 标准转义 \\n（一个反斜杠），不要写成 \\\\n。
 
 """

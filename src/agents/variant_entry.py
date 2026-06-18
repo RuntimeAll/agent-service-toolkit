@@ -492,7 +492,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         prov_dna_obj = mother_opus.opus_to_dna(entry)
         prov_skeleton = prov_dna_obj.get("skeleton") or []
         if prov_skeleton:
-            prov_dna["solution_skeleton"] = "\n".join(str(s) for s in prov_skeleton)
+            prov_dna["solution_skeleton"] = V.join_skeleton(prov_skeleton)  # P8 逐行净化
         prov_solved = entry.get("solvedAnswer")
         if prov_solved:
             prov_dna["solved_answer"] = V._sanitize_rich_text(prov_solved)
@@ -578,7 +578,7 @@ async def _finalize_high_conf(
     dna = mother_opus.opus_to_dna(entry)
     skeleton_lines = dna.get("skeleton") or []
     if skeleton_lines:
-        mother_dna["solution_skeleton"] = "\n".join(str(s) for s in skeleton_lines)
+        mother_dna["solution_skeleton"] = V.join_skeleton(skeleton_lines)  # P8 逐行净化
     solved = entry.get("solvedAnswer")
     if solved:
         mother_dna["solved_answer"] = V._sanitize_rich_text(solved)
