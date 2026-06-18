@@ -1234,6 +1234,12 @@ def _artifact_payload(
             "verify": chk.get("verify") or chk.get("review") or None,
             # 4d 外显层级（FE 徽章唯一依据；旧线程恢复无 tier → FE 按「只说好」兜底）
             "tier": chk.get("tier") or None,
+            # 🔴 PRD-A-017 R1·验算可查真证据透传（FE 验算徽章展开层）：math_verify.verify() 纯 sympy
+            #   算出的逐步核对话术 detail（如 computed=46.0, claimed=46.0, tol=1e-6: within tolerance）
+            #   + 真算出的解集/真值 computed（如 [46]）。证明/开放/作图类只走 review、无 sympy 证据
+            #   → chk 无这俩键 → None（如实留空不伪造，禁假数据铁律 §0.5）。零核心逻辑改、零编造。
+            "verify_detail": chk.get("verify_detail") or None,
+            "verify_computed": chk.get("computed") or None,
             "gene": (it.get("gene") or {}).get("gate") or None,
             # persisted：flags 优先（persist 节点按回执现算）；否则读 item 簿记
             # （persist_to_bank 成功后回写 state.items[i].persisted → 后续编辑轮
@@ -4212,6 +4218,12 @@ async def _check_one_item(
             "solved_answer": None,
             "review": REVIEW_PROOF,
         }
+        # 🔴 PRD-A-017 R2·真值细颗粒播报（并修编排 BUG「难题/证明类程序验算静默无提示」）：
+        #   证明/作图/开放类不进 sympy，让老师可见「转人工复核」而非空白沉默。复用 verify key。
+        _emit_stage(
+            "verify", "程序验算", "running",
+            f"第 {idx + 1} 题为证明/作图类，转人工复核",
+        )
         _apply_visibility(item)
         return item, None
 
@@ -4238,6 +4250,13 @@ async def _check_one_item(
         item, degen_dropped = await _anti_degen_gate(item, facts, idx, total)
         if degen_dropped:
             return None, str(item.get("_dropped") or "退化构型已剔除")
+        # 🔴 PRD-A-017 R2·真值正向播报：本题 sympy 验算通过（带真算证据 computed）→ 让老师
+        #   看见「第 N 题验算通过」而非只在收尾看到一个总「done」。复用 verify key、单题号不带/总数。
+        _emit_stage(
+            "verify", "程序验算", "running",
+            f"第 {idx + 1} 题程序验算通过"
+            + (f"（算得 {res.get('computed')}）" if res.get("computed") else ""),
+        )
         _apply_visibility(item)
         return item, None
 
@@ -4325,6 +4344,11 @@ async def _check_one_item(
             "verify_detail": res.get("detail"),
             "self_check": "match",  # 4d：独立复算一致 → 轻正面（不再打 ⚠ 未经程序验算）
         }
+        # 🔴 PRD-A-017 R2·真值播报：sympy 吃不下载荷 → 独立复算与标答一致（轻正面）。
+        _emit_stage(
+            "verify", "程序验算", "running",
+            f"第 {idx + 1} 题独立复算与标答一致",
+        )
         _apply_visibility(item)
         return item, None
 
