@@ -174,6 +174,8 @@ async def ainvoke_failover(
     temperature: float | None = None,
     response_format: dict[str, Any] | None = None,
     timeout: float | None = None,
+    prefer_relay: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> tuple[Any, str, str, int, str | None]:
     """按主→备顺序调用，熔断转移。
 
@@ -198,8 +200,20 @@ async def ainvoke_failover(
     OpenAI-compatible json_schema 实测支持）；母题 opus 合并调用用它硬锁 10 维 schema。
     timeout：per-call 超时上限（秒，PRD-C-017 B1·H4）。仅在 model 覆盖时生效（重建 chat）；
     None = 不设上限（旧行为）。母题 opus 读图慢，须设 ≤180s 防挂死。
+    prefer_relay：本次调用优先中转站名（思考链开关用）。给了就把同名站提到候选首位（其余顺序不变），
+      熔断/failover 语义完全不变 —— 优先站不可用仍按序切下一站（graceful，绝不报错）。
+      None（默认）= 沿用 .env RELAY_POOL 原序（旧行为，默认路径不受影响）。
+    reasoning_effort：本次调用 extended-thinking 强度（"low"/"medium"/"high"，思考链开关用）。
+      给了就与 response_format 同位 bind 进请求；支持的站(aigeek)据此吐 reasoning_content → on_reasoning
+      外显；不支持的站(sui-xiang/kiro)静默忽略（OpenAI-compatible 丢未知字段，不报错）。None=不带（旧行为）。
     """
     relays = _relays()
+    # 🔴 思考链开关：把 prefer_relay 同名站提到候选首位（其余原序不变）。优先站不可用仍按序 failover
+    #   到下一站 —— prefer 只改尝试顺序，不改熔断/failover/默认行为；找不到该名则原序不动（graceful）。
+    if prefer_relay:
+        _pref = [r for r in relays if r.name == prefer_relay]
+        if _pref:
+            relays = _pref + [r for r in relays if r.name != prefer_relay]
     # 🔴 单站无备援时禁用熔断跳过：开闸 fail-fast 只降可用性（30s 内全灭且 last_exc=None
     #   只能抛笼统 RuntimeError），单站永远做真实尝试（旧版语义）。
     single = len(relays) == 1
@@ -231,6 +245,10 @@ async def ainvoke_failover(
             bind_kw: dict[str, Any] = {"max_tokens": max_tokens}
             if response_format is not None:
                 bind_kw["response_format"] = response_format
+            # 🔴 思考链开关：reasoning_effort 与 response_format 同位 bind（OpenAI-compatible 顶层参数）。
+            #   支持站(aigeek)开 extended-thinking → 吐 reasoning_content；不支持站静默忽略未知字段，不报错。
+            if reasoning_effort is not None:
+                bind_kw["reasoning_effort"] = reasoning_effort
             llm = chat.bind(**bind_kw)
             # 🔴 2026-06-17 v2：墙钟硬闸包整次调用（防逆向站慢吐 reasoning 永不收尾 = round0 真因）。
             #   read-gap 闸（httpx）管死寂、total_cap（asyncio）管慢吐，两层互补缺一不可。

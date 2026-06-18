@@ -216,8 +216,18 @@ class Settings(BaseSettings):
     #   死键返 None → _ainvoke_text(model=None) → relay 退站配 gpt-5.4，opus 静默不被调用，
     #   整卡核心价值蒸发。本档**默认值就是 opus**（不靠 .env 才生效），.env 可覆盖核中转真名。
     VARIANT_MODEL_MOTHER_SOLVE_LABEL: str = "claude-opus-4-8"
+    # 🔴 PRD-C-100 B3-perf：变式 generate 出题调用的【总时长墙钟闸】（秒，传 _ainvoke_text(timeout=)）。
+    #   relay_pool.ainvoke_failover 的 asyncio.timeout 按此 cap 包每次站点调用（不传 → _DEFAULT_TOTAL_S=150s）。
+    #   B3-perf 根因：generate 此前不传 timeout，多站熔断转移 × 空返重试 × shape 整组 retry 叠加可拖到 ~11min。
+    #   设 180s 与 §11「opus 带图 ≤180s」对齐；超时则上抛 → generate 兜底为有界降级（绝不无界）。.env 可覆盖。
+    VARIANT_TIMEOUT_GENERATE: float = 180.0
     RELAY_FAIL_THRESHOLD: int = 3  # 连续失败 N 次 → 熔断器 trip
     RELAY_COOLDOWN_S: float = 30.0  # 熔断冷却秒数（之后 half-open 探活）
+    # 🔴 思考链开关（老师手动开/关 extended-thinking）：开关开时把本轮调用优先路由到该中转站
+    #   （支持 extended-thinking 的站，实测 aigeek 支持、sui-xiang/kiro 不支持）+ bind reasoning_effort。
+    #   该站不可用仍正常 failover（参数被忽略、思考块不显示，不报错）。RELAY_POOL 改名时 .env 同步覆盖。
+    THINKING_RELAY: str = "aigeek"
+    THINKING_EFFORT: str = "low"  # extended-thinking 强度（low 最干净，实测有效）
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
     # 用于算 conv_trace.cost_yuan（实际消费）。留空 → cost 记 NULL（不瞎猜价）。
     RELAY_PRICES: str | None = None

@@ -783,6 +783,20 @@ async def _ainvoke_text(
     conf = (ensure_config() or {}).get("configurable", {}) or {}
     thread_id = conf.get("thread_id")
     teacher_id = conv_trace.teacher_id_from_token(conf.get("ruoyi_token"))
+    # 🔴 思考链开关（老师手动开/关 extended-thinking）：FE 经 agent_config.thinking_stream 回传 → 进
+    #   config.configurable.thinking_stream。开 → 本轮调用优先路由到 THINKING_RELAY(aigeek) +
+    #   bind reasoning_effort(THINKING_EFFORT)；该站吐 reasoning_content → on_reasoning 外显。
+    #   关/省略（默认）→ prefer_relay=None、reasoning_effort=None，一切维持现状（主站、不带 thinking）。
+    #   🔴 graceful：开了但优先站不可用 → relay_pool 正常 failover 回 kiro，参数被忽略、无 reasoning 帧，
+    #      思考块不显示、绝不报错/不中断（prefer 只改尝试顺序，不改 failover 语义）。
+    _thinking = bool(conf.get("thinking_stream"))
+    _prefer_relay = settings.THINKING_RELAY if _thinking else None
+    _reasoning_effort = settings.THINKING_EFFORT if _thinking else None
+    # 🔴 思考链开 + 调用点没显式挂 on_reasoning → 默认挂 _emit_reasoning，让本轮所有 LLM 调用的 reasoning
+    #   都外显（老师开了就想看思考；reasoning 走独立 custom 通道，不混 intent/outline 正文，判决永不采信）。
+    #   显式传了 on_reasoning（如 mother_opus_entry）则尊重原值。关时不动（on_reasoning 行为完全不变）。
+    if _thinking and on_reasoning is None:
+        on_reasoning = _emit_reasoning
     # 🔴 per-call max_tokens 覆盖（整改4·回炉瘦身用）：None → 默认 VARIANT_MAX_TOKENS（旧行为）。
     max_tokens = max_tokens if max_tokens and max_tokens > 0 else settings.VARIANT_MAX_TOKENS
     t0 = time.monotonic()
@@ -797,6 +811,7 @@ async def _ainvoke_text(
             messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta,
             on_reasoning=on_reasoning, model=model,
             temperature=temperature, response_format=response_format, timeout=timeout,
+            prefer_relay=_prefer_relay, reasoning_effort=_reasoning_effort,
         )
         text = _content_text(resp).strip()
         retried = False
@@ -805,6 +820,7 @@ async def _ainvoke_text(
             resp, relay, model_used, fb2, fbd2 = await relay_pool.ainvoke_failover(
                 messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
                 temperature=temperature, response_format=response_format, timeout=timeout,
+                prefer_relay=_prefer_relay, reasoning_effort=_reasoning_effort,
             )
             fallback += fb2
             fb_detail = "; ".join(x for x in (fb_detail, fbd2) if x) or None
