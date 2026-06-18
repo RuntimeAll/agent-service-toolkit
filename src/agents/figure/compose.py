@@ -64,6 +64,49 @@ def _png_to_b64(png_path: str) -> str | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# 配图人在回路「主动引导」信号（service 后处理 D14，不进四节点）
+# ---------------------------------------------------------------------------
+# 现状：配图画不准/画不出只被动等老师发修正词，不主动提示「补一句图形描述再画」；
+# 方向元素（旋转/箭头/镜像）自报成功、无人工确认。本单元在配图返回里**附加可选信号**：
+#   need_user_desc=True  → 引导老师补一句图形描述（说清要画哪些点/角/线/标注）。
+#   direction_review=True → 含方向元素（旋转/箭头/镜像），引导老师确认方向是否正确。
+# 🔴 信号为**可选附加字段**，FE 没读到也不崩；needs_figure 降级路径不破坏（题照常交付）。
+_FIGURE_KEYWORDS = (
+    "角", "三角形", "圆", "折叠", "垂直", "垂足", "平行", "旋转", "对称", "镜像",
+    "数轴", "坐标", "图象", "图像", "扇形", "弧", "象限", "网格", "立体", "三视图",
+    "正方体", "长方体", "棱", "梯形", "矩形", "菱形", "平行四边形", "抛物线",
+)
+# 方向元素关键词（命令/题面命中 → 标方向待确认）：旋转/箭头/向量/镜像/反射等含「朝向」语义。
+_DIRECTION_KEYWORDS = (
+    "旋转", "rotate", "角转向", "顺时针", "逆时针", "箭头", "向量", "vector",
+    "镜像", "对称", "reflect", "translate", "平移",
+)
+_DESC_HINT = "如需配图，请补一句图形描述（说清要画哪些点/角/线/标注），我再据此重画。"
+_DIRECTION_HINT = "本图含方向元素（旋转/箭头/镜像/平移），请确认方向是否正确；如不对，补一句说明我来重画。"
+
+
+def _has_keyword(text: str | None, keywords: tuple[str, ...]) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return any((kw.lower() in low) for kw in keywords)
+
+
+def _hit_direction(stem: str | None, answer: str | None, commands: Any) -> bool:
+    """方向元素命中：题面/答案含方向关键词，或 commands 里含 Rotate/Reflect/Translate/Vector。"""
+    if _has_keyword(stem, _DIRECTION_KEYWORDS) or _has_keyword(answer, _DIRECTION_KEYWORDS):
+        return True
+    if isinstance(commands, list):
+        joined = "\n".join(str(c) for c in commands)
+        return _has_keyword(joined, _DIRECTION_KEYWORDS)
+    return False
+
+
+def _append_reason(base: str | None, extra: str) -> str:
+    base = (base or "").strip()
+    return f"{base} {extra}".strip() if base else extra
+
 async def compose_variant_figure(
     *,
     stem: str,
@@ -124,9 +167,19 @@ async def compose_variant_figure(
 
     data = parse_json(text)
     if not isinstance(data, dict) or data.get("needs_figure") is True or not data.get("commands"):
-        return {"item_id": item_id, "ok": False, "needs_figure": True,
-                "reason": "opus 判定不适合配图或未给命令", "commands": (data or {}).get("commands", []),
-                "warnings": []}
+        # 🔴 主动引导（触发条件 1+2）：opus 自评 needs_figure / 给的 commands 为空。
+        #   只要题面/答案含图形关键词（说明该题本应有图）→ 标 need_user_desc + 引导老师补描述。
+        #   纯代数无几何意义题（无图形关键词）→ 不主动催（避免对不需配图的题误提示）。
+        cmds = (data or {}).get("commands", []) if isinstance(data, dict) else []
+        want_fig = _has_keyword(stem, _FIGURE_KEYWORDS) or _has_keyword(answer, _FIGURE_KEYWORDS)
+        out: dict[str, Any] = {
+            "item_id": item_id, "ok": False, "needs_figure": True,
+            "reason": "opus 判定不适合配图或未给命令", "commands": cmds, "warnings": [],
+        }
+        if want_fig:
+            out["need_user_desc"] = True
+            out["reason"] = _append_reason(out["reason"], _DESC_HINT)
+        return out
 
     r = mathfig_render.render(
         list(data.get("commands") or []),
@@ -134,18 +187,25 @@ async def compose_variant_figure(
         axes=bool(data.get("axes")), stem=f"variant_{item_id or 'fig'}",
     )
     if not r.get("ok") or not r.get("png_path"):
-        return {"item_id": item_id, "ok": False, "needs_figure": True,
-                "reason": r.get("error") or "渲染失败", "commands": data.get("commands"),
-                "warnings": r.get("warnings", [])}
+        # 触发条件 3·渲染失败 → 引导补描述/重试（need_user_desc）。
+        return {"item_id": item_id, "ok": False, "needs_figure": True, "need_user_desc": True,
+                "reason": _append_reason(r.get("error") or "渲染失败", _DESC_HINT),
+                "commands": data.get("commands"), "warnings": r.get("warnings", [])}
     b64 = _png_to_b64(r["png_path"])
     if not b64:
-        return {"item_id": item_id, "ok": False, "needs_figure": True,
-                "reason": "PNG 读取失败", "commands": data.get("commands"), "warnings": []}
-    return {
+        return {"item_id": item_id, "ok": False, "needs_figure": True, "need_user_desc": True,
+                "reason": _append_reason("PNG 读取失败", _DESC_HINT),
+                "commands": data.get("commands"), "warnings": []}
+    # 成功路径：触发条件 4·方向元素 → 标 direction_review + 引导老师确认方向（图照常交付）。
+    out: dict[str, Any] = {
         "item_id": item_id, "ok": True, "needs_figure": False, "png_base64": b64,
         "commands": data.get("commands"), "dashed": data.get("dashed"),
         "vals": r.get("vals", {}), "warnings": r.get("warnings", []),
     }
+    if _hit_direction(stem, answer, data.get("commands")):
+        out["direction_review"] = True
+        out["reason"] = _DIRECTION_HINT
+    return out
 
 
 async def crop_mother_figure(
