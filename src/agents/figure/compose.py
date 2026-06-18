@@ -243,14 +243,15 @@ async def compose_variant_figure(
 async def crop_mother_figure(
     image_url: str, *, conf: float = 0.2,
 ) -> dict[str, Any]:
-    """母题切图（B3.1）：下载母题图 → figure-crop 检测+裁 → 第一张 figure 的 PNG base64。
-       返回 {ok, png_base64?, n_figures, bbox?, needs_figure, reason?}。
+    """母题切图（B3.1）：下载母题图 → figure-crop 检测+裁 → 所有 figure 的 PNG base64。
+       返回 {ok, figures:[{png_base64,bbox,conf},...], png_base64?, bbox?, conf?, n_figures, needs_figure, reason?}。
     🔴 纯文字/公式题（figures=[]）→ needs_figure=False + ok=False（母题无图，正常，不降级告警）。
     🔴 任何 IO/模型失败 → needs_figure=True（降级，不抛）。
-    🔴 P4（B 家族·配图全覆盖，方案 b）：多图母题（n_figures>1）仍只回第 1 张切图（FE 母题展示单图），
-       但 n_figures 记真实张数 + reason 外显「本题含 N 图、已切第 1 张，如缺图可手动重切」——
-       绝不静默丢图（旧实现只取 figs[0]、n_figures 记了真实数量却无任何外显提示）。
-       不改 (a) 回多图：母题原图本就直贴展示、多图母题罕见，回多 base64 + FE 多图渲染收益不抵风险。
+    🔴 单元3（PRD-C-100 bug-002 三轮，升方案 a「真切全部图」）：多图母题不再只回 figs[0]——
+       遍历全部 figs 各转 base64，回 `figures` 数组（每项 {png_base64,bbox,conf}）。
+       **同时保留 `png_base64`/`bbox`/`conf` = figs[0]（兼容老 FE：未升多图渲染前老 FE 仍读这俩字段不崩）**，
+       并保留 `n_figures` 真实张数。新 FE 消费 `figures` 数组做 v-for 多图渲染。
+       某张读盘失败则该项跳过（不整体降级，只要至少 1 张成功就 ok=True）；全部读失败才 needs_figure。
     """
     tmp_path = None
     try:
@@ -264,23 +265,35 @@ async def crop_mother_figure(
         det = detect_and_crop(tmp_path, conf=conf)
         figs = det.get("figures") or []
         if not figs:
-            return {"ok": False, "needs_figure": False, "n_figures": 0,
+            return {"ok": False, "needs_figure": False, "n_figures": 0, "figures": [],
                     "reason": "母题无图形（纯文字/公式题）"}
-        first = figs[0]
-        b64 = _png_to_b64(first["crop_path"])
         n = len(figs)
-        if not b64:
-            return {"ok": False, "needs_figure": True, "n_figures": n,
+        # 单元3：遍历全部图各转 base64（某张读盘失败则跳过，不整体降级）。
+        out_figs: list[dict[str, Any]] = []
+        for f in figs:
+            b64 = _png_to_b64(f.get("crop_path"))
+            if not b64:
+                continue
+            out_figs.append({"png_base64": b64, "bbox": f.get("bbox"), "conf": f.get("conf")})
+        if not out_figs:  # 全部读失败才降级
+            return {"ok": False, "needs_figure": True, "n_figures": n, "figures": [],
                     "reason": "切图 PNG 读取失败"}
-        # P4：多图母题不静默丢图——回第 1 张 + reason 外显真实张数，提示老师可手动重切补图。
-        multi_hint = (
-            f"本题含 {n} 图，已切第 1 张；如缺图可手动重切" if n > 1 else None
+        # 部分图读失败时外显提示（切出张数 < 检出张数）。
+        n_ok = len(out_figs)
+        reason = (
+            f"本题检出 {n} 图、成功切出 {n_ok} 张；如缺图可手动重切"
+            if n_ok < n else None
         )
-        return {"ok": True, "needs_figure": False, "n_figures": n,
-                "png_base64": b64, "bbox": first.get("bbox"), "conf": first.get("conf"),
-                "reason": multi_hint}
+        first = out_figs[0]
+        return {
+            "ok": True, "needs_figure": False, "n_figures": n,
+            "figures": out_figs,                       # 新契约：多图数组（FE v-for）
+            "png_base64": first["png_base64"],         # 兼容老 FE：=figs[0]
+            "bbox": first.get("bbox"), "conf": first.get("conf"),
+            "reason": reason,
+        }
     except Exception as e:  # noqa: BLE001 — 下载/检测失败 → 降级
-        return {"ok": False, "needs_figure": True, "reason": f"母题切图失败: {str(e)[:80]}"}
+        return {"ok": False, "needs_figure": True, "figures": [], "reason": f"母题切图失败: {str(e)[:80]}"}
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
