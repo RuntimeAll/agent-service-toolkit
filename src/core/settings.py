@@ -190,7 +190,9 @@ class Settings(BaseSettings):
     # RELAY_POOL = JSON 数组（主→备有序）：[{"name","base_url","api_key","model"}]
     # 留空 → 从 COMPATIBLE_* 派生单中转站（名字取 RELAY_NAME）。
     RELAY_POOL: str | None = None
-    RELAY_NAME: str = "lk888"  # 单中转站时的展示名（也是 conv_trace.relay 列默认值）
+    # 单中转站（RELAY_POOL 为空）时的展示名（也是 conv_trace.relay 列默认值）。
+    # 中性默认 "compatible"，跟着 COMPATIBLE_* 派生站走。
+    RELAY_NAME: str = "compatible"
     # 轻活模型（S1.1）：难度总评等无识图、可降本的调用点经 per-call model 覆盖走它；
     # 留空 → 各调用点退回默认（relay 配置 model），行为不变。
     LLM_MODEL_LIGHT: str = "gpt-5.4-nano"
