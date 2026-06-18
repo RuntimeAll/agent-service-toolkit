@@ -25,6 +25,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.figure import geogebra_samples, mathfig_render
 
+# 🔴 单元2 标定（2026-06-18 实测）：配图默认 fig_scale=0.7（缩画布让标签相对放大；无头渲染下
+#   fontSize 参数无效，figScale 是唯一杠杆——见本地引擎 geogebra/render.js:81-92 注释）。
+#   标定对比（三角形/圆/坐标系各渲 1/0.7/0.6）：0.7 标签清晰可读、无碰撞且图形仍充满画布；
+#   0.6 标签再大一点但图形向中心缩、边距浪费；1 标签偏小。取 0.7 为甜点。
+_FIGURE_DEFAULT_SCALE = 0.7
+# 🔴 单元2：默认隐圆点标记（point_size=0 只留字母标签，贴合教材原图，去多余点）；
+#   非写死——若题目本要标实心点，opus 可在 spec 里显式给 point_size（>0）覆盖此默认。
+_FIGURE_DEFAULT_POINT_SIZE = 0
+
 # opus 翻 GeoGebra 命令 system 前缀（稳定，喂样例 + 命令语义坑）。画图链不挂缓存，但 prompt 仍分层清晰。
 _GEO_SYSTEM = (
     "你是中小学数学配图助手。把给定的「变式题面 + 解答」翻译成一组 GeoGebra evalCommand 命令"
@@ -44,6 +53,12 @@ _GEO_SYSTEM = (
     "三点定圆用 Circle(A,B,C)（过三点画圆）、圆心用 Center(c)、垂直平分线用 PerpendicularBisector(B,N)；"
     "③ **别在 commands 里写 SetLineStyle**（会把对象渲染没）——虚线走 dashed 字段；"
     "④ 变换题的「像」、立体隐藏棱放进 dashed；⑤ 关键点放进 vals 自核；"
+    "⑦ 🔴【多余点硬约束】**派生/中间点（Intersect/Midpoint/垂足 ClosestPoint/PerpendicularBisector "
+    "等构造出来、仅作中间计算、题面不要求标的点）默认必须放进 hide**——它们只是引擎算坐标的脚手架，"
+    "不是题目要展示的点，漏 hide 会画出题目不需要的多余点。只有题面/解答**明确要标注的点**（顶点、"
+    "圆上要点名的点、坐标系上要标的点）才留可见；其余派生点一律进 hide。"
+    "（注：圆点标记默认已隐藏、只留字母标签；若某点题目本要画成实心圆点，可在 JSON 顶层给 "
+    '"point_size":4 之类正值覆盖。）'
     "⑥ 🔴 标注角的点序坑：Angle(P,V,Q) 是**有向角**（V 是顶点，从 V→P 逆时针扫到 V→Q），"
     "点序须让扫角 ≤180°，否则画成反向优角（曾把直角渲成 270° 大半圆）——"
     "标 ∠BAC 写 Angle(B,A,C)（顶点 A 在中间），扫出来大于平角就把首尾两点调换。\n"
@@ -186,11 +201,18 @@ async def compose_variant_figure(
     #   本应自兜异常返 ok:False，但作为「造图后处理」最后一道闸，这里再加一层 try/except——任何
     #   渲染层冒泡（子进程崩/PNG IO/未预期异常）一律降级 needs_figure，绝不让带图变式整条 stream
     #   被一道图的渲染异常掐死（变式正文先出、图作后处理，图失败照常交付带⚠待补图）。
+    # 🔴 单元2：默认放大标签（fig_scale=0.7）+ 隐多余圆点（point_size=0，只留字母）；
+    #   二者均可被 opus 在 spec 显式给值覆盖（如题目本要标实心点 → point_size>0），不写死。
+    fig_scale = data.get("fig_scale")
+    fig_scale = float(fig_scale) if fig_scale else _FIGURE_DEFAULT_SCALE
+    point_size = data.get("point_size")
+    point_size = float(point_size) if point_size is not None else _FIGURE_DEFAULT_POINT_SIZE
     try:
         r = mathfig_render.render(
             list(data.get("commands") or []),
             dashed=data.get("dashed"), hide=data.get("hide"), vals=data.get("vals"),
             axes=bool(data.get("axes")), stem=f"variant_{item_id or 'fig'}",
+            fig_scale=fig_scale, point_size=point_size,
         )
     except Exception as e:  # noqa: BLE001 — 渲染冒泡 → needs_figure 降级（不抛、不卡流程）
         # 触发条件 3·渲染失败 → 引导补描述/重试（need_user_desc）。

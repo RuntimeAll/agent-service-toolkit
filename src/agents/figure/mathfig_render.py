@@ -36,10 +36,14 @@ def render(
     axes: bool = False,
     grid: bool = False,
     stem: str = "variant_fig",
+    fig_scale: float | None = None,
+    point_size: float | None = None,
 ) -> dict[str, Any]:
     """一轮直出渲染。返回归一 dict：
        {ok, png_path?, n_cmd, n_fail, commands:[{cmd,ok,err}], vals, warnings, view_final, error?}。
     🔴 任何异常（import 失败/node 缺/子进程崩/超时）→ {ok:False, error:...}，绝不抛。
+    🔴 fig_scale（<1 缩画布让标签相对放大；无头渲染下 fontSize 无效，figScale 是唯一杠杆）、
+       point_size（=0 隐圆点只留字母）—— 均透传本地 render_geogebra，None 走引擎默认（不传 = 字小、点全显）。
     """
     _ensure_env()
     try:
@@ -52,6 +56,7 @@ def render(
         r = render_geogebra(
             list(commands or []), dashed=dashed, hide=hide, vals=vals, styles=styles,
             axes=axes, grid=grid, mono=True, stem=stem, timeout=RENDER_TIMEOUT_S,
+            fig_scale=fig_scale, point_size=point_size,
         )
         # render_geogebra 失败（n_fail>0 / 无 png）→ ok 已为 False；原样透传 + 兜 png 存在性
         png = r.get("png_path")
