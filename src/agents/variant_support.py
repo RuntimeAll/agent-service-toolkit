@@ -17,6 +17,7 @@ import pymysql
 
 from agents import dna_extract
 from agents.qtype_format import (
+    _CHOICE_LETTERS,
     _CHOICE_SPLIT_LOOKAHEAD_RE,
     _FIRST_OPT_RE,
     format_by_qtype,
@@ -664,7 +665,12 @@ def _split_choice_blocks(stem: str) -> tuple[str, list[dict[str, Any]]] | None:
         return None
     head = stem[: m.start()].rstrip()
     region = stem[m.start():]
-    options: list[dict[str, Any]] = []
+    # A2 SSOT（与 FE normalize.ts / BE qtype_format 一字不差）：去重 label + 封顶 + 连续重排。
+    #   ① 同字母 label 只留首次出现（后续重复丢弃）；
+    #   ② 封顶到字母序长度（绝不落库 label=? 的项）；
+    #   ③ 去重封顶后按 A/B/C/D… 连续重排 label（原 label 跳号/乱序也规整成连续）。
+    seen: set[str] = set()
+    contents: list[str] = []
     for chunk in _CHOICE_SPLIT_LOOKAHEAD_RE.split(region):
         chunk = chunk.strip()
         if not chunk:
@@ -673,11 +679,19 @@ def _split_choice_blocks(stem: str) -> tuple[str, list[dict[str, Any]]] | None:
         if not lm:
             continue
         label, content = lm.group(1), (lm.group(2) or "").strip()
-        options.append({
+        if label in seen:
+            continue  # 重复 label → 丢弃（保留首次）
+        seen.add(label)
+        contents.append(content)
+    contents = contents[: len(_CHOICE_LETTERS)]  # 封顶，绝不产出 ? 标签
+    options: list[dict[str, Any]] = [
+        {
             "type": "option",
-            "label": label,
+            "label": _CHOICE_LETTERS[i],  # 连续重排：A/B/C/D…
             "content": [{"type": "text", "md": content}],
-        })
+        }
+        for i, content in enumerate(contents)
+    ]
     if not options:
         return None
     return head, options

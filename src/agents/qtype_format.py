@@ -49,6 +49,43 @@ _CHOICE_SPLIT_LOOKAHEAD_RE = re.compile(r"(?=[A-H]\s*[.．、:：)）]\s*\S)")
 # 行首选项标记（去空行收口时判一行是不是选项行）。
 _OPTION_LINE_RE = re.compile(r"^[A-H]\s*[.．、:：)）]")
 
+# 选项块抠「标签字母 + 正文」（去重/封顶/规整用）。镜像 variant_support._OPT_LABEL_RE。
+_OPT_CHUNK_RE = re.compile(r"^\s*[（(]?\s*([A-H])\s*[）).．、:：]\s*(.*)$", re.DOTALL)
+# 规整后重排用的字母序（A-H，最多 8 项；绝不产出 ? 标签）。
+_CHOICE_LETTERS = "ABCDEFGH"
+
+
+def dedup_cap_reorder_choice(chunks: list[str]) -> list[str]:
+    """A2 SSOT：选项块去重 + 封顶 + 顺序规整（FE/BE/入库 一字不差）。
+
+    输入 = 切出的各选项原文块（每块含「A. 甲」式标记 + 正文）。规则：
+      ① 按 label 去重：同一字母 label 只保留**第一次**出现，后续重复 label 丢弃；
+      ② 封顶：去重后最多取前 len(_CHOICE_LETTERS)=8 项（绝不产出/落库 label=? 的项）；
+      ③ 顺序规整：去重封顶后按 A/B/C/D… **连续重排** label（原 label 跳号/乱序也规整成连续）。
+    返回规整后的选项块列表（每块形如 "A. 正文"，正文原样不动·cosmetic-only）。
+    解析不出 label 的块按出现顺序保留正文，分配下一个连续字母（降级不丢内容）。
+    幂等：已是连续合法 A.B.C.D 的入参再跑结果不变。
+    """
+    seen: set[str] = set()
+    contents: list[str] = []
+    for chunk in chunks:
+        c = chunk.strip()
+        if not c:
+            continue
+        m = _OPT_CHUNK_RE.match(c)
+        if m:
+            label = m.group(1)
+            if label in seen:
+                continue  # 重复 label → 丢弃（保留首次）
+            seen.add(label)
+            contents.append((m.group(2) or "").strip())
+        else:
+            # 抠不出 label（罕见）→ 正文原样留，占下一个连续字母位（降级不丢内容）。
+            contents.append(c)
+    # 封顶到字母序长度，按连续字母重排 label。
+    contents = contents[: len(_CHOICE_LETTERS)]
+    return [f"{_CHOICE_LETTERS[i]}. {content}" for i, content in enumerate(contents)]
+
 # normalizeJudge：题干尾已含判断括号（半/全角空括号或带对错符）→ 不重复补。
 _JUDGE_EMPTY_PAREN_RE = re.compile(r"[（(]\s*[）)]\s*$")
 _JUDGE_FILLED_PAREN_RE = re.compile(r"[（(].{0,3}[）)]\s*$")
@@ -96,7 +133,11 @@ def _normalize_choice(text: str) -> str:
         return text  # 没找到选项标记 → 原样（降级，不臆断）
     head = text[: m.start()].rstrip()
     region = text[m.start() :]
-    opts = [p.strip() for p in _CHOICE_SPLIT_LOOKAHEAD_RE.split(region) if p.strip()]
+    raw = [p for p in _CHOICE_SPLIT_LOOKAHEAD_RE.split(region) if p.strip()]
+    if not raw:
+        return text
+    # A2 SSOT：去重 label + 封顶到合法字母序 + 连续重排（与 FE/入库 一字不差）。
+    opts = dedup_cap_reorder_choice(raw)
     if not opts:
         return text
     body = "\n\n".join(opts)

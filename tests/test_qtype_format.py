@@ -36,11 +36,12 @@ class TestChoice:
         assert "\nB. 错" in out
 
     def test_various_separators(self):
-        # 分隔符 . 、 ： ) 都算选项标记。
+        # 分隔符 . 、 ： ) 都算选项标记；A2 去重/重排会把 label 分隔符规整成 canonical「. 」
+        #   （label 重写是去重+连续重排的必然结果，content 原样不动）。
         stem = "题（）A、一 B：二 C) 三 D. 四"
         out = format_by_qtype(stem, "单选")
         opt_lines = [ln for ln in out.split("\n") if ln and ln[0] in "ABCD"]
-        assert opt_lines == ["A、一", "B：二", "C) 三", "D. 四"]
+        assert opt_lines == ["A. 一", "B. 二", "C. 三", "D. 四"]
 
     def test_choice_idempotent(self):
         stem = "题干（  ）A. 甲 B. 乙 C. 丙 D. 丁"
@@ -156,3 +157,89 @@ class TestQtypePriorityOverText:
         out = format_by_qtype(stem, "判断题")
         assert out.endswith("（  ）")
         assert BLANK in out
+
+
+def _opt_lines(out: str) -> list[str]:
+    return [ln for ln in out.split("\n") if ln and ln[0] in "ABCDEFGH"]
+
+
+class TestChoiceDedupCap:
+    """A2 SSOT：选项去重 + 封顶 + 顺序规整（FE/BE/入库 一字不差）。
+
+    根因：选项解析无去重 + 无封顶 → opus 多吐 / 把答案混进 stem 时切出 >合法项 + label=?。
+    本类守住：① 同 label 只留首次；② 绝不产出 label=? 的项（封顶到字母序 A-H）；
+              ③ 去重封顶后 A/B/C/D… 连续重排；④ 已合法 4 选项幂等无副作用。
+    """
+
+    def test_duplicate_label_dropped(self):
+        # 重复 label（D 出现两次）→ 只留首次，输出连续 A/B/C/D，无重复无 ?
+        stem = "下列哪个正确（  ）A. 甲 B. 乙 C. 丙 D. 丁 D. 丁"
+        out = format_by_qtype(stem, "选择题")
+        assert _opt_lines(out) == ["A. 甲", "B. 乙", "C. 丙", "D. 丁"]
+        assert "?" not in out
+
+    def test_no_question_mark_placeholder(self):
+        # 多吐选项混入 → 绝不产出 label=? 的项（合法字母 A-H 内连续）。
+        stem = "题（  ）A. 一 B. 二 C. 三 D. 四 D. 四 D. 四"
+        out = format_by_qtype(stem, "选择题")
+        assert "?" not in out
+        assert _opt_lines(out) == ["A. 一", "B. 二", "C. 三", "D. 四"]
+
+    def test_cap_at_letter_sequence_H(self):
+        # 封顶到 A-H：超 8 项也不产出 ? 标签（罕见，守边界）。
+        stem = "题（ ）" + " ".join(f"{c}. v{c}" for c in "ABCDEFGHIJ" if c <= "H")
+        out = format_by_qtype(stem, "选择题")
+        labels = [ln[0] for ln in _opt_lines(out)]
+        assert labels == list("ABCDEFGH")
+        assert "?" not in out
+
+    def test_jumbled_labels_reordered_consecutive(self):
+        # 乱序/跳号 label → 按出现顺序去重后连续重排成 A/B/C…（content 原样不动）。
+        stem = "题（ ）B. 乙 A. 甲 D. 丁"
+        out = format_by_qtype(stem, "选择题")
+        assert _opt_lines(out) == ["A. 乙", "B. 甲", "C. 丁"]
+
+    def test_clean_four_options_idempotent(self):
+        # 净化幂等：已合法 4 选项再跑结果不变、无副作用。
+        clean = "题（  ）\n\nA. 甲\n\nB. 乙\n\nC. 丙\n\nD. 丁"
+        once = format_by_qtype(clean, "选择题")
+        assert once == clean
+        assert format_by_qtype(once, "选择题") == clean
+
+    def test_latex_content_untouched_during_dedup(self):
+        # 去重/重排只动 label，$...$ 内 LaTeX 一字不动。
+        stem = r"解（  ）A. $x=1$ B. $x=2$ C. $x=3$ D. $x=4$ D. $x=4$"
+        out = format_by_qtype(stem, "选择题")
+        assert _opt_lines(out) == ["A. $x=1$", "B. $x=2$", "C. $x=3$", "D. $x=4$"]
+
+
+class TestSplitChoiceBlocksDedupCap:
+    """入库切块（_split_choice_blocks / build_block_json）与 formatter 同口径去重封顶。"""
+
+    def test_split_blocks_dedup_cap_reorder(self):
+        from agents.variant_support import _split_choice_blocks
+
+        canonical = "题（  ）\n\nA. 甲\n\nB. 乙\n\nC. 丙\n\nD. 丁\n\nD. 丁\n\nE. 戊"
+        res = _split_choice_blocks(canonical)
+        assert res is not None
+        _head, opts = res
+        # 重复 D 丢弃 → A/B/C/D/E 连续，无重复无 ?
+        labels = [o["label"] for o in opts]
+        assert labels == ["A", "B", "C", "D", "E"]
+        assert all(o["label"] != "?" for o in opts)
+
+    def test_build_block_json_no_dup_no_questionmark(self):
+        import json
+
+        from agents.variant_support import build_block_json
+
+        stem = "下列哪个正确（  ）A. 甲 B. 乙 C. 丙 D. 丁 D. 丁 E. 戊 F. 己"
+        bj = build_block_json(stem, "选择题")
+        assert bj is not None
+        d = json.loads(bj)
+        opt_blocks = [c for r in d["rows"] for c in r["cells"] if c.get("type") == "option"]
+        labels = [o["label"] for o in opt_blocks]
+        # 去重 D + 连续重排，全部合法字母无 ?
+        assert labels == sorted(set(labels))
+        assert "?" not in labels
+        assert len(labels) == len(set(labels))
