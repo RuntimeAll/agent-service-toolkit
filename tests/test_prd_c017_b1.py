@@ -65,6 +65,12 @@ def _patch_classify(monkeypatch, *, pool, opus_text, capture=None):
     monkeypatch.setattr(variant_mod, "RuoyiClient", _FakeClient)
     monkeypatch.setattr(variant_mod, "_emit_stage", lambda *a, **k: None)
     monkeypatch.setattr(variant_mod, "_emit_error", lambda *a, **k: None)
+    monkeypatch.setattr(variant_mod, "_emit_need_confirm", lambda *a, **k: None)
+
+    async def _no_llm(messages, **kw):  # B2 自愈网 LLM 修复兜底层断网（坏 JSON 用例触达，返回仍坏）
+        return "still not json"
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", _no_llm)
 
     async def fake_leaf_pool(grade_code, client, **kw):
         return pool
@@ -104,26 +110,30 @@ def test_g3_classify_calls_opus_model(monkeypatch):
     assert out["mother_confirmed"] is True
 
 
-def test_g3_opus_failure_emits_error_not_silent_fallback(monkeypatch):
-    """opus 超时/异常 → 走 SSE error 事件 + clarify，绝不静默退 gpt-5.4。"""
-    errs = []
+def test_g3_opus_failure_routes_to_needs_confirm_not_silent_fallback(monkeypatch):
+    """🔴 PRD-C-100 B2 改契约：opus 超时/异常 → 自愈网（重试≤2）耗尽后**不静默退 gpt-5.4**，
+    且**不卡 clarify 死胡同**，而是导向 needs_confirm（弹真章树 picker，老师定章后重锚再来）。
+    保留不变量：mother_confirmed=False + _mother_opus_error 记录 + awaiting_mother_confirm=True。"""
+    needs = []
     _patch_classify(monkeypatch, pool=_POOL, opus_text=TimeoutError("opus 超时"))
-    monkeypatch.setattr(variant_mod, "_emit_error",
-                        lambda reason, msg: errs.append((reason, msg)))
+    monkeypatch.setattr(variant_mod, "_emit_need_confirm", lambda p: needs.append(p))
     out = asyncio.run(classify(dict(_BASE), {}))
     assert out["mother_confirmed"] is False
-    assert "_mother_opus_error" in out["analysis"]
-    assert errs and errs[0][0] == "mother_opus_failed"
+    assert "_mother_opus_error" in out["analysis"]          # 记录错因，不静默
+    assert out["awaiting_mother_confirm"] is True           # 可前进的确认态，非死胡同
+    assert out.get("awaiting_mother_review") is False       # 清 stale review
+    assert len(needs) == 1                                  # 真发了 picker（needConfirm）
 
 
-def test_g3_opus_returns_non_json_emits_error(monkeypatch):
-    errs = []
+def test_g3_opus_returns_non_json_routes_to_needs_confirm(monkeypatch):
+    """坏 JSON：确定性引号修复 + LLM 兜底 + 重读一次都救不活 → 自愈耗尽 → needs_confirm（不死循环）。"""
+    needs = []
     _patch_classify(monkeypatch, pool=_POOL, opus_text="这不是 JSON，是一段废话")
-    monkeypatch.setattr(variant_mod, "_emit_error",
-                        lambda reason, msg: errs.append((reason, msg)))
+    monkeypatch.setattr(variant_mod, "_emit_need_confirm", lambda p: needs.append(p))
     out = asyncio.run(classify(dict(_BASE), {}))
     assert out["mother_confirmed"] is False
-    assert errs and errs[0][0] == "mother_opus_parse_fail"
+    assert out["awaiting_mother_confirm"] is True
+    assert len(needs) == 1
 
 
 # ===========================================================================

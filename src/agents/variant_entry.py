@@ -228,18 +228,25 @@ def _repair_json_quotes(text: str) -> str:
     return "".join(out)
 
 
-async def _repair_entry_json(broken: str) -> Any:
+async def _repair_entry_json(broken: str, V: Any = None) -> Any:
     """母题 opus 非法 JSON 两级修复：① 确定性修未转义引号（覆盖 id=1399 失败模式，无副作用、不花钱）；
-    ② 仍失败 → 文本级 LLM 修复兜底（C-010 §② 失败带反馈 retry，不重读图）。返回解析对象（失败→None）。"""
+    ② 仍失败 → 文本级 LLM 修复兜底（C-010 §② 失败带反馈 retry，不重读图）。返回解析对象（失败→None）。
+
+    🔴 V = variant 模块句柄（懒导入注入，防循环 + 修原模块全局 `V` 未定义 NameError 隐患——
+       原实现里 _repair_json_via_llm 引用模块级 `V` 但 variant_entry 从不在模块级 import variant，
+       LLM 兜底层一直静默 NameError→None=死档；显式传 V 后 LLM 兜底真正生效）。
+    """
     import json as _json
     try:
         return _json.loads(_repair_json_quotes(broken))
     except Exception:  # noqa: BLE001 — 确定性修不了 → LLM 兜底
         pass
-    return await _repair_json_via_llm(broken)
+    if V is None:
+        from agents import variant as V  # 懒导入防循环（仅 LLM 兜底层需要）
+    return await _repair_json_via_llm(broken, V)
 
 
-async def _repair_json_via_llm(broken: str) -> Any:
+async def _repair_json_via_llm(broken: str, V: Any) -> Any:
     """文本级 LLM 修复兜底：喂坏文本让模型只修语法、内容一字不改。返回解析后的对象（失败→None）。"""
     from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
 
@@ -257,6 +264,74 @@ async def _repair_json_via_llm(broken: str) -> Any:
         return V._parse_json(fixed)
     except Exception:  # noqa: BLE001 — 修复失败 → 上层走原 parse_fail
         return None
+
+
+def _unwrap_obj(parsed: Any) -> Any:
+    """opus 偶吐数组（id=1383/1384）→ 取首个 dict 元素；否则原样返回。"""
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        return parsed[0]
+    return parsed
+
+
+async def parse_or_repair_entry(opus_text: str, V: Any) -> Any:
+    """母题 opus 文本 → dict 的「解析 + 自愈」单一口径（B2 抽取，入口/classify 重锚共用）。
+    ① _parse_json（含数组解包）→ ② 失败则 _repair_entry_json（确定性引号修复 + LLM 兜底）→ 数组解包。
+    返回 dict（成功）或 None（彻底解不出）。**只修解析、不重调 opus**（重调由调用方循环管）。"""
+    parsed = _unwrap_obj(V._parse_json(opus_text))
+    if isinstance(parsed, dict):
+        return parsed
+    parsed = _unwrap_obj(await _repair_entry_json(opus_text, V))
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def solve_and_label_resilient(
+    *, image_url: str, prompt: str, V: Any, model: str, max_tokens: int | None = None,
+    on_progress: Any = None,
+) -> Any:
+    """classify 重锚路径的 opus 调用 + 解析自愈网（B2：复用入口 mother_opus_entry 的「重试≤2 +
+    parse_or_repair_entry」同口径，根治『重锚 opus 坏 JSON 单次 _parse_json 早退 → 死循环』不对称）。
+
+    🔴 与入口 mother_opus_entry（variant_entry.py:383-426）逐项同口径：
+       - 至多 2 次尝试（调用异常重试 / 解析+修复仍失败重读母题一次）；
+       - 每次返回先走 parse_or_repair_entry（确定性引号修复 + LLM 兜底）；
+       - 调用走 mother_opus.solve_and_label（落 conv_trace + relay 熔断），不静默退 gpt。
+
+    返回 dict（成功）；彻底失败抛 _SolveLabelError（携带 last_exc / 是否纯解析失败），
+    由 classify 接住走可前进的 needs_confirm 降级（不卡死、不无限回环）。
+    on_progress(stage_text) 可选：用于喂阶段灯文案（与入口 _emit_stage 同节奏）。
+    """
+    from agents import mother_opus  # 局部 import（与 variant_entry 顶层一致风格）
+
+    last_exc: Exception | None = None
+    for _attempt in range(2):
+        try:
+            opus_text = await mother_opus.solve_and_label(
+                image_url=image_url or "", prompt=prompt, invoke=V._ainvoke_text,
+                model=model, max_tokens=max_tokens,
+            )
+        except Exception as e:  # noqa: BLE001 — opus 调用异常（超时/全站失败）→ 重试一次
+            last_exc = e
+            if _attempt == 0:
+                if on_progress:
+                    on_progress("母题重锚读图重试中…")
+                continue
+            raise _SolveLabelError(parse_only=False, last_exc=e) from e
+        parsed = await parse_or_repair_entry(opus_text, V)
+        if isinstance(parsed, dict):
+            return parsed
+        if _attempt == 0:  # 解析+修复仍失败 → 重读母题一次（截断/坏 JSON 多为瞬时）
+            if on_progress:
+                on_progress("重锚解析失败，重读母题…")
+    raise _SolveLabelError(parse_only=(last_exc is None), last_exc=last_exc)
+
+
+class _SolveLabelError(Exception):
+    """solve_and_label_resilient 自愈网全耗尽后的可控失败信号（携带是否纯解析失败 + 原异常）。"""
+
+    def __init__(self, *, parse_only: bool, last_exc: Exception | None = None) -> None:
+        self.parse_only = parse_only
+        self.last_exc = last_exc
+        super().__init__("mother opus solve+label exhausted self-heal")
 
 
 def build_entry_prompt(*, utterance: str | None = None) -> str:
@@ -398,15 +473,14 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 V._emit_stage("classify", "锚定考点", "running", "母题读图重试中…")
                 continue
             break
-        # 解析：数组解包（id=1383/1384）→ 引号修复兜底（id=1399）
+        # 解析自愈（B2 共用口径 parse_or_repair_entry）：数组解包（id=1383/1384）→ 引号修复 +
+        #   LLM 兜底（id=1399）。🔴 传 V 修原 _repair_json_via_llm 引用未定义模块级 V 的 NameError 隐患。
         parsed = V._parse_json(opus_text)
         if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
             parsed = parsed[0]
         if not isinstance(parsed, dict):
             V._emit_stage("classify", "锚定考点", "running", "解析修复中…")
-            parsed = await _repair_entry_json(opus_text)
-            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-                parsed = parsed[0]
+            parsed = await parse_or_repair_entry(opus_text, V)
         if isinstance(parsed, dict):
             entry, opus_exc = parsed, None
             break
@@ -658,6 +732,49 @@ async def _finalize_high_conf(
                   f"考点「{kp_name}」·年级「{grade_name}」")
     recipe = V.knobs_desc(base_out.get("knobs")) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
     V._emit_stage("knobs", "解析配方", "done" if confirmed else "warn", recipe)
+
+    # 🔴 PRD-C-100 B1·锚不到叶子 → 弹真章树 picker，不走 clarify 死胡同：
+    #   高置信路径若主考点 opus 给的是开集名、_match_kp_in_pool/闸B 都锚不到年级章内真叶子
+    #   （need_anchor_review）→ confirmed=False。旧实现此时仍走 awaiting_mother_confirm=False →
+    #   after_mother_entry→gate_after_classify 返 clarify、不置 awaiting_mother_review →「开始举一反三」
+    #   静默回 parse、永不出变式（HANDOFF 待校准 #3 的真实后果）。
+    #   对齐 D1（置信低/章歧义→弹窗确认年级章）：confirmed 不成立 → 导向 needs_confirm（弹真章树
+    #   picker，await 老师确认章），老师选定章 → route_entry 见 confirmed_chapter_id → classify 按
+    #   确认章重锚（B2 自愈网兜底）→ 正常出变式。**绝不为出变式强凑错章**（闸B 宁空不凑精神保留），
+    #   是「问老师定章」不是「瞎锚」。母题卡照出（卡先出不变），只是把死胡同换成可前进的确认面。
+    if not confirmed:
+        decision_l = dict(decision)
+        decision_l["grade_book"] = decision.get("grade_book") or grade_name or ""
+        chap_text = (analysis.get("chapter") or {}).get("value") if isinstance(
+            analysis.get("chapter"), dict
+        ) else None
+        picker_payload = {
+            "grade_book": {"id": grade_code or "", "name": decision_l["grade_book"]},
+            "chapter": {"id": "", "name": chap_text or decision.get("chapter") or ""},
+            "grade_candidates": [{"id": grade_code or "", "name": decision_l["grade_book"]}]
+                                if decision_l["grade_book"] else [],
+            "chapter_candidates": [{"id": "", "name": n}
+                                   for n in (decision.get("chapter_candidates") or []) if n],
+            "confidence": float(decision.get("confidence") or 0.0),
+        }
+        V._emit_need_confirm(picker_payload)
+        out_nc: dict[str, Any] = {
+            **base_out,
+            "analysis": analysis,
+            "mother_dna": mother_dna,
+            "mother_confirmed": False,
+            "facts_locked": False,
+            "awaiting_mother_confirm": True,   # resume → route_entry → classify 重锚（带确认章）
+            "awaiting_mother_review": False,    # 清 stale review，防「开始举一反三」误路由回 parse
+            "messages": [AIMessage(content=(
+                f"母题考点「{kp_name}」我没能锚到题库里的具体章节叶子（{grade_name} 范围内未命中）。"
+                "为避免锚错章串题，**请确认母题所属的年级与章**，我再据此重新锚定考点、出变式（"
+                "确认无误回复「确认」，需要修改请直接告诉我正确的年级/章）。"
+            ))],
+        }
+        out_nc["mother_confirm"] = V.build_mother_confirm({**state, **out_nc})
+        V._emit_mother_card({**state, **out_nc})  # 母题卡仍先出（卡出了但未定死，等老师定章）
+        return out_nc
 
     out: dict[str, Any] = {
         **base_out,

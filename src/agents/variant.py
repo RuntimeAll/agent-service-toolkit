@@ -14,7 +14,7 @@
 LLM 层（§9）：toolkit 原生 get_model（COMPATIBLE=LangChain ChatOpenAI）→ model.ainvoke；
   多模态走 HumanMessage(content=[{type:text},{type:image_url,image_url:{url:OSS_URL}}])；
   思考型只取 content（先 reasoning_content 后 content）；max_tokens≥4096；
-  LLM 外呼 lk888 走默认（别套 trust_env=False，那是治本地 localhost 的）。
+  LLM 外呼中转走默认（别套 trust_env=False，那是治本地 localhost 的）。
 
 checkpointer 不在此 compile（service lifespan 注入 saver；多轮 state 按 thread_id 持久）。
 """
@@ -22,12 +22,14 @@ checkpointer 不在此 compile（service lifespan 注入 saver；多轮 state �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import copy
 import difflib
 import json
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -805,26 +807,42 @@ async def _ainvoke_text(
     fallback = 0
     fb_detail: str | None = None  # 🔴 熔断回溯：每站失败原因（成功且 0 转移=None）
     try:
-        # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数 + 失败原因串
-        #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
-        resp, relay, model_used, fallback, fb_detail = await relay_pool.ainvoke_failover(
-            messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta,
-            on_reasoning=on_reasoning, model=model,
-            temperature=temperature, response_format=response_format, timeout=timeout,
-            prefer_relay=_prefer_relay, reasoning_effort=_reasoning_effort,
+        # 🔴 PRD-C-100 B-converge roundE·节点级单一墙钟（修 perf 长尾根因）：
+        #   relay_pool.ainvoke_failover 内的 asyncio.timeout 是【每站】预算（包在 for relay 循环内），
+        #   叠上本函数空返重试（再调一次 failover）→ 节点级有效上限 ≈ timeout × 站数 × (1+重试)，
+        #   无单一墙钟 → generate 的降级分支（_runtime_generate 的 except TimeoutError）触发不到，
+        #   压轴几何变式 generate 拖到 9-11min 不收尾。
+        #   这里用【一个】asyncio.timeout 把「全部站点轮询 + 全部空返重试」整体包成节点级总预算，
+        #   到点抛 TimeoutError → 上层 generate 既有降级分支接住（eager 已出题先出 / 零题给可读文案）。
+        #   inner failover 仍收到 timeout（其【每站】慢吐墙钟语义不变，原测全绿）；外层这层才是
+        #   节点级总墙钟，二者同值 → 节点 wall-clock ≤ timeout（不再 ×站数×重试）。
+        #   timeout=None（绝大多数调用）→ 不包，保留旧无界行为（contextlib.nullcontext）。
+        _node_cap: Any = (
+            asyncio.timeout(timeout)
+            if (timeout is not None and timeout > 0)
+            else contextlib.nullcontext()
         )
-        text = _content_text(resp).strip()
-        retried = False
-        if not text and retry:
-            retried = True
-            resp, relay, model_used, fb2, fbd2 = await relay_pool.ainvoke_failover(
-                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
+        async with _node_cap:
+            # 🔴 走中转站熔断转移池（Block B）：返回实际成交中转站 + 该站 model + 转移次数 + 失败原因串
+            #   （RELAY_POOL 各站可配不同模型，trace/计费必须按成交站归因）
+            resp, relay, model_used, fallback, fb_detail = await relay_pool.ainvoke_failover(
+                messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta,
+                on_reasoning=on_reasoning, model=model,
                 temperature=temperature, response_format=response_format, timeout=timeout,
                 prefer_relay=_prefer_relay, reasoning_effort=_reasoning_effort,
             )
-            fallback += fb2
-            fb_detail = "; ".join(x for x in (fb_detail, fbd2) if x) or None
             text = _content_text(resp).strip()
+            retried = False
+            if not text and retry:
+                retried = True
+                resp, relay, model_used, fb2, fbd2 = await relay_pool.ainvoke_failover(
+                    messages, max_tokens=max_tokens, tags=tags, on_delta=on_delta, model=model,
+                    temperature=temperature, response_format=response_format, timeout=timeout,
+                    prefer_relay=_prefer_relay, reasoning_effort=_reasoning_effort,
+                )
+                fallback += fb2
+                fb_detail = "; ".join(x for x in (fb_detail, fbd2) if x) or None
+                text = _content_text(resp).strip()
     except Exception as e:  # noqa: BLE001 — 记下失败往返后照常抛
         dur = int((time.monotonic() - t0) * 1000)
         _trace_llm(label, messages, "", None, dur, error=str(e), model=model_used)
@@ -1891,6 +1909,38 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             _emit_stage("classify", "锚定考点", "warn",
                         f"「{chap_name}」是聚合/复习章，已按年级册范围锚定（防跨章串题）")
 
+    # --- 🔴 PRD-C-100 B2·重锚复用母题首解（root cause 根治 niche 考点重锚反复解析失败死循环） ---
+    #   现象：niche 考点母题（如韦达定理）首解（mother_opus_entry）opus **已成功**解题+10维打标
+    #   （母题卡显示了解题/骨架/DNA），但 _match_kp_in_pool/闸B 锚不到年级章内叶子（need_anchor_review）
+    #   → confirmed=False → 弹真章树 picker、停 awaiting_mother_confirm。老师选定章确认后 route 回
+    #   classify 重锚——旧实现这里**无条件重调 opus 解题打标**（solve_and_label_resilient），把已
+    #   成功的首解产物（state.mother_dna 里的 stem/answer/analysis/solved_answer/skeleton/dna）整个丢掉、
+    #   对同一道难图重新读图解题。opus 对该 niche 几何/压轴母题二次读图偶发坏 JSON（自愈网耗尽）→
+    #   _SolveLabelError → 退回 picker → 老师再确认 → 又重 solve → 又失败 = 反复（Round B PARTIAL）。
+    #   根因 = **重锚不该重 solve**：母题首解一次性成功就该一次性定稿，重锚只是「换锚定章」=
+    #   纯代码重跑闸B（anchor_to_chapter）+ 模型锚，不碰 opus。这样 niche 考点首解成功过 → 重锚必成。
+    #   复用前置（全满足才走）：① 有确认章（confirmed_chapter_id，= 重锚语境，非首图首解）；
+    #   ② 首解来源是 opus（mother_solve_source=="opus"，排除 analyze 抄图骨架）；③ 首解富文本/DNA 还在
+    #   state（stem 非空 + dna 是 dict + dna.main_kp 有 name）。任一不满足 → 落回原 opus 重 solve 路径
+    #   （首解产物已丢/库内母题/异常态——此时重 solve 是唯一选项，仍吃下方自愈网 + graceful 降级）。
+    _prev_dna = (mother_dna.get("dna") if isinstance(mother_dna.get("dna"), dict) else None) or {}
+    _prev_main_kp = _prev_dna.get("main_kp") if isinstance(_prev_dna.get("main_kp"), dict) else None
+    _reuse_ok = bool(
+        confirmed_chapter_id
+        and mother_dna.get("mother_solve_source") == "opus"
+        and str(mother_dna.get("stem") or "").strip()
+        and _prev_dna
+        and _prev_main_kp
+        and str(_prev_main_kp.get("name") or "").strip()
+    )
+    if _reuse_ok:
+        return await _reanchor_reuse_first_solve(
+            state=state, analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
+            grade_code=grade_code, chapter_id=chapter_id, leaf_pool=leaf_pool,
+            confirmed_chapter_id=confirmed_chapter_id, include_review_books=include_review_books,
+            knobs=state.get("knobs"),
+        )
+
     image_url = state.get("image_url")
     opus_model = settings.variant_model("mother_solve_label")  # G3：母题必命中 opus（fail-fast 已锁）
     prompt = mother_opus.build_mother_prompt(
@@ -1899,40 +1949,48 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         leaf_pool=leaf_pool,
         model_vocab=None,  # 模型词库快照（只读命名参考）；现阶段缺省，model_anchor 步另锚正式 M-id
     )
+    # 🔴 PRD-C-100 B2·重锚自愈网（复用入口 mother_opus_entry 同口径，根治死循环）：旧实现这里只
+    #   做「单次 solve_and_label + 单次 _parse_json」——opus 偶发坏 JSON（markdown fence/截断/未转义
+    #   引号）即早退「没解析出来」，且不清确认态 → 老师再点开始仍走 parse 兜底 = 死循环。入口节点对
+    #   同一 opus 有「重试≤2 + parse_or_repair_entry（确定性引号修复 + LLM 兜底）」自愈网，重锚没有 =
+    #   不对称。此处复用 variant_entry.solve_and_label_resilient（与入口逐项同口径），不另造。
+    from agents import variant_entry as _VE  # 懒导入防循环（variant_entry 顶层 import 本模块挂图）
     try:
-        opus_text = await mother_opus.solve_and_label(
-            image_url=image_url or "",
-            prompt=prompt,
-            invoke=_ainvoke_text,  # 落 trace/conv_trace + 走 relay 池（label=opus 母题解题打标）
+        opus_data = await _VE.solve_and_label_resilient(
+            image_url=image_url or "", prompt=prompt, V=sys.modules[__name__],
             model=opus_model,
+            on_progress=lambda t: _emit_stage("classify", "锚定考点", "running", t),
         )
-    except Exception as e:  # noqa: BLE001 — opus 超时/失败 → SSE error，绝不静默退 gpt-5.4（母题侧唯一安全网）
+    except _VE._SolveLabelError as se:  # 自愈网耗尽（超时/全站失败 或 坏 JSON 重读仍解不出）
         await client.aclose()
-        analysis["_mother_opus_error"] = str(e)
-        _emit_stage("classify", "锚定考点", "error", "母题解题打标失败（opus 超时/异常）")
-        _emit_stage("knobs", "解析配方", "warn", "母题未解出，请重试")
-        _emit_error("mother_opus_failed", f"母题解题打标失败（{str(e)[:80]}），请重试或换一张更清晰的图。")
+        # 🔴 不卡死、不无限回环：导向可前进的 needs_confirm（弹真章树 picker，让老师重定章后再来），
+        #   而非保留 stale unconfirmed 态让「开始举一反三」静默回 parse。清在途 review 态防误路由。
+        reason = "opus 超时/异常" if not se.parse_only else "结果反复解析失败"
+        analysis["_mother_opus_error"] = (str(se.last_exc)[:120] if se.last_exc else "opus 返回非 JSON（自愈仍失败）")
+        _emit_stage("classify", "锚定考点", "warn", f"母题解题打标{reason}，请确认年级章后重试")
+        _emit_stage("knobs", "解析配方", "warn", "待确认年级章后再定配方")
+        grade_name = (analysis.get("grade") or {}).get("value") or grade_code or ""
+        chap_name = chapter_text or ""
+        _emit_need_confirm({
+            "grade_book": {"id": grade_code or "", "name": grade_name},
+            "chapter": {"id": confirmed_chapter_id or "", "name": chap_name},
+            "grade_candidates": [{"id": grade_code or "", "name": grade_name}] if grade_name else [],
+            "chapter_candidates": [{"id": confirmed_chapter_id or "", "name": chap_name}] if chap_name else [],
+            "confidence": 0.0,
+        })
         early: VariantState = {
-            "analysis": analysis, "mother_confirmed": False, "messages": [
-                AIMessage(content="母题解题打标失败了（opus 调用超时或异常），请重试或换一张更清晰的题目图。")
-            ],
+            "analysis": analysis,
+            "mother_confirmed": False,
+            "facts_locked": False,
+            "awaiting_mother_confirm": True,   # resume 走 route_entry → classify 重锚（新一次 opus）
+            "awaiting_mother_review": False,    # 清 stale review，防「开始举一反三」误路由
+            "messages": [AIMessage(content=(
+                f"母题解题打标{reason}了。我已读出年级章范围，**请确认年级与章**后我再重试一次解题打标（"
+                "确认无误回复「确认」，需要修改请直接告诉我正确的年级/章）。"
+            ))],
         }
         early["mother_confirm"] = build_mother_confirm({**state, **early})
         return early
-
-    opus_data = _parse_json(opus_text)
-    if not isinstance(opus_data, dict):
-        await client.aclose()
-        analysis["_mother_opus_error"] = "opus 返回非 JSON"
-        _emit_stage("classify", "锚定考点", "error", "母题解题打标解析失败")
-        _emit_error("mother_opus_parse_fail", "母题解题打标结果解析失败，请重试。")
-        early2: VariantState = {
-            "analysis": analysis, "mother_confirmed": False, "messages": [
-                AIMessage(content="母题解题打标结果没解析出来，请重试。")
-            ],
-        }
-        early2["mother_confirm"] = build_mother_confirm({**state, **early2})
-        return early2
 
     # opus 富文本回填 mother_dna（题面/答案/解析 + 解答骨架进 _mother_facts 的来源·G4）
     rich = opus_data.get("richText") or {}
@@ -2071,6 +2129,142 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     #   渲染、且携全字段（stem/solved_answer/副考点 id/anchor 章 id/need_anchor_review）供入库。
     #   复用 mother_dna（绝不重调 opus）；{**state,**out} 让组卡读到本轮最终 mother_dna/confirmed_chapter_id。
     _emit_mother_card({**state, **out})
+    return out
+
+
+async def _reanchor_reuse_first_solve(
+    *,
+    state: VariantState,
+    analysis: dict[str, Any],
+    mother_dna: dict[str, Any],
+    prev_dna: dict[str, Any],
+    grade_code: str | None,
+    chapter_id: str | None,
+    leaf_pool: list[tuple[str, str]],
+    confirmed_chapter_id: str | None,
+    include_review_books: bool,
+    knobs: Any,
+) -> VariantState:
+    """🔴 PRD-C-100 B2·重锚复用母题首解（不重调 opus）：母题首解（mother_opus_entry）opus 已
+    成功产出题面富文本 + 解答 + 10 维 DNA（都在 state.mother_dna），但当时锚不到年级章内叶子 →
+    弹 picker。老师确认章后本函数**只换锚定章**：拿已有 DNA 的 main_kp **名**在确认章收窄后的
+    leaf_pool 内重锚（_match_kp_in_pool + 闸B anchor_to_chapter）+ 重跑模型锚 → 抬置信 → 母题卡。
+    **绝不重读图/重解题**——niche 考点首解成功过就不会在重锚再失败（根治 Round B 反复解析失败）。
+
+    graceful 降级（铁律④·闸门必有降级路径）：老师已**显式确认章**，若该确认章收窄池里仍无贴切
+    叶子（极端 niche），不再退回 picker 卡死，而是把 main_kp 锚到**确认章节点本身**（chapter_id，
+    = 老师亲选范围，非凭空造叶子）+ need_anchor_review=True（标待人审）→ confirmed=True → 照常出
+    变式（守恒注入用 kp 名 + 确认章范围，仍不超纲）。这是「问过老师后按其选定范围出题」，不是「瞎锚」。
+    """
+    from agents import model_anchor
+    from agents import variant_entry as _VE
+
+    mother_dna = dict(mother_dna)
+    analysis = dict(analysis)
+    kp_node = dict(analysis.get("kp") or {})
+
+    # 复用首解 DNA（深拷一份再改锚定字段，不污染 state 原对象）。
+    dna = dict(prev_dna)
+    main_kp_name = str((dna.get("main_kp") or {}).get("name") or "").strip()
+
+    # ① 名 → 确认章收窄池重锚 id（首解 main_kp.id 可能空/越界，按名在新池重找）。
+    matched = _VE._match_kp_in_pool(main_kp_name, leaf_pool) if main_kp_name else None
+    if matched:
+        dna["main_kp"] = {"id": matched, "name": main_kp_name}
+    # 副 kp 同理按名在新池补 id（锚不到留原样，闸B 会逐项校验丢越界）。
+    for s in dna.get("secondary_kps") or []:
+        if isinstance(s, dict) and not str(s.get("id") or "").strip() and s.get("name"):
+            mid = _VE._match_kp_in_pool(str(s["name"]).strip(), leaf_pool)
+            if mid:
+                s["id"] = mid
+
+    # ② 闸B 锚定·宁空不凑（与 classify 同一纯函数，逻辑一致）。
+    dna = mother_opus.anchor_to_chapter(
+        dna, chapter_id=chapter_id, leaf_pool=leaf_pool,
+        include_review_books=include_review_books,
+    )
+    main_kp = dna.get("main_kp") if (dna.get("main_kp") or {}).get("id") else None
+
+    # ③ graceful 降级：老师已确认章，仍锚不到叶子（极端 niche）→ 锚到确认章节点本身 + 待人审，
+    #    不退回 picker 卡死（铁律④）。chapter_id 优先用确认章 id（老师亲选范围）。
+    degraded = False
+    if main_kp is None and main_kp_name:
+        fallback_chap = str(confirmed_chapter_id or chapter_id or grade_code or "").strip()
+        if fallback_chap:
+            dna["main_kp"] = {"id": fallback_chap, "name": main_kp_name}
+            dna["need_anchor_review"] = True
+            main_kp = dna["main_kp"]
+            degraded = True
+
+    if dna.get("need_anchor_review"):
+        mother_dna["need_anchor_review"] = True
+
+    # ④ 模型锚（双轴·与 classify 同口径）：M00 兜底，故障不空维。
+    try:
+        m_ref = str((main_kp or {}).get("id") or "") or None
+        m_res = await model_anchor.anchor_models(
+            dna,
+            stem=mother_dna.get("stem") or "",
+            answer=mother_dna.get("answer") or mother_dna.get("solution_skeleton") or "",
+            invoke=_ainvoke_text,
+            model=settings.variant_model("model_confirm"),
+            record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
+                name, mm, question_ref=m_ref
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底）
+        analysis.setdefault("_model_anchor_error", str(e))
+        m_res = {"models": [dict(model_anchor.M00)], "model_overflow": [], "model_warn": True,
+                 "model_flag": "lookup_unavailable"}
+    dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
+    dna["model_overflow"] = m_res.get("model_overflow") or []
+    if m_res.get("model_warn"):
+        dna["model_warn"] = True
+    mother_dna["dna"] = dna
+
+    # ⑤ 锚到 kp（真叶子 或 降级锚到确认章节点）→ 抬三锚置信（与 classify 同口径）。
+    if main_kp and main_kp.get("id"):
+        kp_node["anchored"] = {
+            "id": main_kp["id"],
+            "code": str(main_kp["id"]),
+            "name": main_kp.get("name"),
+        }
+        if main_kp.get("name"):
+            kp_node["value"] = main_kp["name"]
+        kp_node["confidence"] = max(float(kp_node.get("confidence", 0) or 0), CONF_GATE)
+        analysis["kp"] = kp_node
+        grade_node = dict(analysis.get("grade") or {})
+        if grade_code:
+            grade_node["code"] = grade_code
+        grade_node["confidence"] = max(float(grade_node.get("confidence", 0) or 0), CONF_GATE)
+        analysis["grade"] = grade_node
+        if dna.get("qtype"):
+            qn = dict(analysis.get("qtype") or {})
+            qn["value"] = dna["qtype"]
+            qn["confidence"] = max(float(qn.get("confidence", 0) or 0), CONF_GATE)
+            analysis["qtype"] = qn
+
+    confirmed = _conf_ok(analysis) and bool(kp_node.get("anchored"))
+    kp_name = (analysis.get("kp") or {}).get("value") or main_kp_name or "?"
+    grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
+    _detail = f"考点「{kp_name}」·年级「{grade_name}」（复用母题首解，未重解）"
+    if degraded:
+        _detail += "·锚定待人审"
+    _emit_stage("classify", "锚定考点", "done" if confirmed else "warn", _detail)
+    recipe = knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
+    _emit_stage("knobs", "解析配方", "done" if confirmed else "warn", recipe)
+
+    out: VariantState = {
+        "analysis": analysis,
+        "mother_dna": mother_dna,
+        "mother_confirmed": bool(confirmed),
+        "facts_locked": bool(confirmed),
+        "awaiting_mother_confirm": False,
+        "confirmed_chapter_id": confirmed_chapter_id,
+        "messages": [],
+    }
+    out["mother_confirm"] = build_mother_confirm({**state, **out})
+    _emit_mother_card({**state, **out})  # 母题卡仍先出（复用首解的全字段）
     return out
 
 
@@ -3242,7 +3436,36 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             [HumanMessage(content=prompt)],
             on_delta=_gen_progress,
             model=settings.variant_model("generate"),
+            # 🔴 PRD-C-100 B3-perf：套总时长墙钟闸（默认 180s，与 §11「opus 带图 ≤180s」对齐）。
+            #   此前不传 → 各站默认 150s × 多站熔断转移 × 空返重试可叠加拖到 ~11min（长尾根因）。
+            #   超时由 relay_pool 的 asyncio.timeout 抛 TimeoutError，下面分两路有界收口。
+            timeout=settings.VARIANT_TIMEOUT_GENERATE,
         )
+    except (TimeoutError, asyncio.TimeoutError):
+        # 🔴 B3-perf 有界降级（绝不拖到 11min / 绝不无界）：generate 超时——
+        #   ① 已流内稳收完整题（eager_raw 非空）→ 用它有界收尾，「先出的先出」(D14)，
+        #      不让长尾埋掉已产出的变式正文；
+        #   ② 一道都没出 → 标可读「超时降级」文案（建议简化/重试），不裸 error 不卡死。
+        _cancel_eager()
+        if eager_tasks:
+            await asyncio.gather(*eager_tasks, return_exceptions=True)
+        if eager_raw:
+            text = ""  # 走下方 len(items) < len(eager_raw) 兜底 → items=eager_raw
+            _emit_stage("generate", "生成题目", "warn",
+                        f"生成超时（>{int(settings.VARIANT_TIMEOUT_GENERATE)}s），已收已出的 {len(eager_raw)} 道")
+        else:
+            _emit_stage("generate", "生成题目", "warn",
+                        f"生成超时（>{int(settings.VARIANT_TIMEOUT_GENERATE)}s）")
+            return {
+                "items": [],
+                "knobs": knobs,
+                "llm_call_budget": budget,
+                "messages": [
+                    AIMessage(
+                        content="这道题过于复杂，变式生成超时了，建议把母题拆简单些或换一道再试。"
+                    )
+                ],
+            }
     except BaseException:
         # 🔴 孤儿收口（对抗审修复）：全中转站熔断耗尽等按设计外抛时，已 spawn 的 eager
         # task 必须 cancel + 等待退场——否则每条链最多还有 4-5 次 LLM 调用在后台静默烧完，
@@ -3273,9 +3496,11 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             retry_text = await _ainvoke_text(
                 [HumanMessage(content=prompt + feedback)],
                 model=settings.variant_model("generate"),
+                # 🔴 B3-perf：整组 retry 也套同一墙钟闸（这是第二次全量出题，不套则又是一条长尾）。
+                timeout=settings.VARIANT_TIMEOUT_GENERATE,
             )
             retry_items = _parse_generated_items(retry_text, facts)
-        except Exception:  # noqa: BLE001 — 重试失败保留首稿（绝不卡死）
+        except Exception:  # noqa: BLE001 — 重试失败/超时保留首稿（绝不卡死）
             retry_items = []
         if retry_items:
             items = retry_items

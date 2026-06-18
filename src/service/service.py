@@ -22,7 +22,7 @@ from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
 from langsmith import uuid7
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
 from agents import conv_trace
@@ -324,10 +324,30 @@ async def message_generator(
                     # So we only print non-empty content.
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
     except Exception as e:
+        # 🔴 PRD-C-100 B3·异常兜住（绝不裸 500）：变式图（generate opus 对压轴几何母题偶发慢吐
+        #   reasoning 不收尾 → relay 池逐站墙钟超时耗尽 → RuntimeError 冒出 astream）等任何节点
+        #   异常，旧实现一律吐笼统 'Internal server error'（FE 阶段灯只能显示「已中断·Internal
+        #   server error」，老师不知发生了什么）。这里把**真实原因短摘**透出（墙钟超时/全站失败
+        #   等），让 FE 渲染可读的有界 warn；HTTP 早已 200（SSE 已开流），此处只补一条 error 帧 +
+        #   收尾 [DONE]，已先期 eager 上屏的变式卡保留不丢。绝不再发生「无限卡死」或「裸 500」。
         logger.error(f"Error in message generator: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
+        reason = _stream_error_reason(e)
+        yield f"data: {json.dumps({'type': 'error', 'content': reason})}\n\n"
     finally:
         yield "data: [DONE]\n\n"
+
+
+def _stream_error_reason(e: Exception) -> str:
+    """SSE error 帧文案：把底层异常翻成老师能看懂的短句（B3·异常兜住）。
+    relay 池全站墙钟超时/失败 → 「生成超时，请重试或换更简单的题」；其余 → 通用重试提示。
+    绝不外泄堆栈/站名/密钥；保持有界（FE 阶段灯直接显示这句）。"""
+    msg = str(e or "")
+    low = msg.lower()
+    if "wallclock" in low or "timeout" in low or "timed out" in low:
+        return "生成超时了（模型对这道题响应过慢）。请重试，或换一道更简单/更清晰的题。"
+    if "no relay available" in low or "blank relay" in low or "truncated" in low:
+        return "AI 出口暂时不稳定，本轮没能生成完整变式。请稍后重试。"
+    return "本轮生成中断了，请重试（如多次失败可换种说法或换题）。"
 
 
 def _create_ai_message(parts: dict) -> AIMessage:
@@ -474,7 +494,15 @@ class VariantFigureInput(BaseModel):
     # 🔴 PRD-C-100 C·图片重生带上下文：上一版 GeoGebra commands（FE 存住每图上一版透传）。
     #   correction_prompt + prev_commands 都在 → compose 走增量修改分支（在上一版基础上改，不从零重画）。
     prev_commands: list[str] | None = None
-    item_id: str | None = None
+    # 🔴 PRD-C-100 B3-配图：兼容 int/str（FE 传 item.seq/item.index 为 number）。
+    #   此前死锁 str → pydantic v2 在请求校验层拒 int = 422（走不到 handler 内的降级兜底，
+    #   配图全挡）。coerce 成 str 落地（compose 仅用作 stem 后缀 + 回显，str 安全）。
+    item_id: int | str | None = None
+
+    @field_validator("item_id", mode="before")
+    @classmethod
+    def _coerce_item_id(cls, v: Any) -> str | None:
+        return None if v is None else str(v)
 
 
 async def _exp_write(token: str, **kw: Any) -> None:

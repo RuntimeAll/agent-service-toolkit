@@ -107,6 +107,7 @@ def _append_reason(base: str | None, extra: str) -> str:
     base = (base or "").strip()
     return f"{base} {extra}".strip() if base else extra
 
+
 async def compose_variant_figure(
     *,
     stem: str,
@@ -181,13 +182,22 @@ async def compose_variant_figure(
             out["reason"] = _append_reason(out["reason"], _DESC_HINT)
         return out
 
-    r = mathfig_render.render(
-        list(data.get("commands") or []),
-        dashed=data.get("dashed"), hide=data.get("hide"), vals=data.get("vals"),
-        axes=bool(data.get("axes")), stem=f"variant_{item_id or 'fig'}",
-    )
-    if not r.get("ok") or not r.get("png_path"):
+    # 🔴 PRD-C-100 B3·渲染异常兜住（D9 图失败照常交付 / G11 不卡流程）：mathfig_render.render
+    #   本应自兜异常返 ok:False，但作为「造图后处理」最后一道闸，这里再加一层 try/except——任何
+    #   渲染层冒泡（子进程崩/PNG IO/未预期异常）一律降级 needs_figure，绝不让带图变式整条 stream
+    #   被一道图的渲染异常掐死（变式正文先出、图作后处理，图失败照常交付带⚠待补图）。
+    try:
+        r = mathfig_render.render(
+            list(data.get("commands") or []),
+            dashed=data.get("dashed"), hide=data.get("hide"), vals=data.get("vals"),
+            axes=bool(data.get("axes")), stem=f"variant_{item_id or 'fig'}",
+        )
+    except Exception as e:  # noqa: BLE001 — 渲染冒泡 → needs_figure 降级（不抛、不卡流程）
         # 触发条件 3·渲染失败 → 引导补描述/重试（need_user_desc）。
+        return {"item_id": item_id, "ok": False, "needs_figure": True, "need_user_desc": True,
+                "reason": _append_reason(f"造图异常: {str(e)[:80]}", _DESC_HINT),
+                "commands": data.get("commands"), "warnings": []}
+    if not r.get("ok") or not r.get("png_path"):
         return {"item_id": item_id, "ok": False, "needs_figure": True, "need_user_desc": True,
                 "reason": _append_reason(r.get("error") or "渲染失败", _DESC_HINT),
                 "commands": data.get("commands"), "warnings": r.get("warnings", [])}
