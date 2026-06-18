@@ -1,0 +1,242 @@
+[
+  {
+    "mode": "non-stream",
+    "variant": "anthropic-style-thinking",
+    "desc": "extra_body={\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 271,
+    "content_sample": " For the quadratic equation x²-5x+6=0, I can use Vieta's formulas to find that the sum of the roots equals 5 (which is -b/a where b=-5 and a=1).两根之和是 5。  依据韦达定理，对于一元二次方程 ax²+bx+c=0，两根之和为 -b/a。这里 a=1，b...<271字>",
+    "finish_reason": "stop",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "stream",
+    "variant": "anthropic-style-thinking",
+    "desc": "extra_body={\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 275,
+    "content_sample": " For the quadratic equation x²-5x+6=0, I can use Vieta's formulas to find that the sum of the roots equals 5 (which is -b/a where b=-5 and a=1).两根之和是 5。  根据韦达定理，对于一元二次方程 ax²+bx+c=0，两根之和等于 -b/a。这里 a=1，...<275字>",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "openai-reasoning_effort",
+    "desc": "reasoning_effort=\"low\"",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 314,
+    "content_sample": " For the quadratic equation, I can find the sum of roots using Vieta's formulas—it's the negative coefficient of x divided by the leading coefficient, which gives me 5.两根之和是 5。  根据韦达定理，对于一元二次方程 ax² + ...<314字>",
+    "finish_reason": "stop",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "stream",
+    "variant": "openai-reasoning_effort",
+    "desc": "reasoning_effort=\"low\"",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 192,
+    "content_sample": " Using Vieta's formulas, the sum of the roots equals 5.两根之和是 5。  由韦达定理，对于方程 x² + bx + c = 0，两根之和等于 −b。这里 b = −5，所以两根之和为 −(−5) = 5。  也可以直接解出来验证：x² − 5x + 6 = (x − 2)(x − 3) = 0，两根为 2 和 3，相加得 5。",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "extra_body-reasoning-effort",
+    "desc": "extra_body={\"reasoning\":{\"effort\":\"low\"}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 268,
+    "content_sample": " For the quadratic equation x²-5x+6=0, I can use Vieta's formulas to find that the sum of the roots equals 5 (which is -b/a where b=-5 and a=1).两根之和是 5。  依据韦达定理，对于方程 ax²+bx+c=0，两根之和等于 -b/a。这里 a=1，b=-5...<268字>",
+    "finish_reason": "stop",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "stream",
+    "variant": "extra_body-reasoning-effort",
+    "desc": "extra_body={\"reasoning\":{\"effort\":\"low\"}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 177,
+    "content_sample": " The sum of the roots equals negative b divided by a, which gives us 5.一元二次方程的两根之和等于 -b/a（韦达定理）。  这里 a=1，b=-5，所以两根之和 = -(-5)/1 = 5。  验证一下：方程可因式分解为 (x-2)(x-3)=0，两根为 2 和 3，和确实是 5。",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "baseline-no-thinking",
+    "desc": "对照组：完全不带 thinking 参数",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 171,
+    "content_sample": " Using Vieta's formulas, the sum of the roots equals 5.一元二次方程 ax²+bx+c=0 的两根之和等于 -b/a（韦达定理）。  这里 a=1，b=-5，所以两根之和为 -(-5)/1 = 5。  验证：方程可因式分解为 (x-2)(x-3)=0，两根是 2 和 3，相加正好是 5。",
+    "finish_reason": "stop",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "stream",
+    "variant": "baseline-no-thinking",
+    "desc": "对照组：完全不带 thinking 参数",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 226,
+    "content_sample": " Using Vieta's formulas, I can see that for this quadratic equation, the sum of the roots equals 5.两根之和是 5。  根据韦达定理，对于一元二次方程 ax²+bx+c=0，两根之和为 -b/a。这里 a=1，b=-5，所以两根之和为 -(-5)/1 = 5。  验证一下：方程可因式分解为 (x-2)...<226字>",
+    "station": "sui-xiang"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "anthropic-style-thinking",
+    "desc": "extra_body={\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": true,
+    "reasoning_keys": [
+      "attr.reasoning_content",
+      "extra.reasoning_content"
+    ],
+    "reasoning_sample": {
+      "attr.reasoning_content": " By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a.  Here a=1, b=-5, c=6, so sum = -(-5)/1 = 5.  Can also verify: roots are x=2 and x=3, sum = 5. ",
+      "extra.reasoning_content": " By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a.  Here a=1, b=-5, c=6, so sum = -(-5)/1 = 5.  Can also verify: roots are x=2 and x=3, sum = 5. "
+    },
+    "content_len": 110,
+    "content_sample": "  由韦达定理，对于 ax² + bx + c = 0，两根之和 = -b/a。  这里 a=1，b=-5，所以两根之和 = **5**。  验证：方程分解为 (x-2)(x-3)=0，两根为 2 和 3，2+3=5 ✓",
+    "finish_reason": "stop",
+    "station": "aigeek"
+  },
+  {
+    "mode": "stream",
+    "variant": "anthropic-style-thinking",
+    "desc": "extra_body={\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": true,
+    "reasoning_keys": [
+      "attr.reasoning_content",
+      "extra.reasoning_content"
+    ],
+    "reasoning_sample": {
+      "attr.reasoning_content": " By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a.  Here a=1, b=-5, c=6, so sum = -(-5)/1 = 5.  Verification: roots are x=2 and x=3 (since (x-2)(x-3)=0), and 2+3=5. ✓ ",
+      "extra.reasoning_content": " By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a.  Here a=1, b=-5, c=6, so sum = -(-5)/1 = 5.  Verification: roots are x=2 and x=3 (since (x-2)(x-3)=0), and 2+3=5. ✓ "
+    },
+    "content_len": 119,
+    "content_sample": "根据韦达定理，对于 ax² + bx + c = 0，两根之和 = -b/a。  本题 a=1，b=-5，所以两根之和 = **5**。  验证：x² - 5x + 6 = (x-2)(x-3) = 0，两根为 2 和 3，2+3=5 ✓",
+    "station": "aigeek"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "openai-reasoning_effort",
+    "desc": "reasoning_effort=\"low\"",
+    "ok": true,
+    "error": null,
+    "has_reasoning": true,
+    "reasoning_keys": [
+      "attr.reasoning_content",
+      "extra.reasoning_content"
+    ],
+    "reasoning_sample": {
+      "attr.reasoning_content": " The question asks for the sum of the roots of x² - 5x + 6 = 0.  By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a = 5/1 = 5.  Or directly: the roots are x = 2 and x = 3 (since (x-2)(...<225字>",
+      "extra.reasoning_content": " The question asks for the sum of the roots of x² - 5x + 6 = 0.  By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a = 5/1 = 5.  Or directly: the roots are x = 2 and x = 3 (since (x-2)(...<225字>"
+    },
+    "content_len": 141,
+    "content_sample": "  由韦达定理，对于 $ax^2 + bx + c = 0$，两根之和 $= -b/a$。  这里 $a=1, b=-5$，所以两根之和 $= -(-5)/1 = \\mathbf{5}$。  验证：方程因式分解为 $(x-2)(x-3)=0$，两根为 2 和 3，$2+3=5$。✓",
+    "finish_reason": "stop",
+    "station": "aigeek"
+  },
+  {
+    "mode": "stream",
+    "variant": "openai-reasoning_effort",
+    "desc": "reasoning_effort=\"low\"",
+    "ok": true,
+    "error": null,
+    "has_reasoning": true,
+    "reasoning_keys": [
+      "attr.reasoning_content",
+      "extra.reasoning_content"
+    ],
+    "reasoning_sample": {
+      "attr.reasoning_content": " By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a.  Here a=1, b=-5, c=6, so sum = -(-5)/1 = 5.  We can verify: roots are x=2 and x=3, and 2+3=5. ",
+      "extra.reasoning_content": " By Vieta's formulas, for ax² + bx + c = 0, the sum of roots = -b/a.  Here a=1, b=-5, c=6, so sum = -(-5)/1 = 5.  We can verify: roots are x=2 and x=3, and 2+3=5. "
+    },
+    "content_len": 124,
+    "content_sample": "由韦达定理，对于 ax² + bx + c = 0，两根之和 = **-b/a**。  本题 a=1，b=-5，所以两根之和 = **-(-5)/1 = 5**。  验证：方程因式分解为 (x-2)(x-3)=0，两根为 2 和 3，2+3=5 ✓",
+    "station": "aigeek"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "extra_body-reasoning-effort",
+    "desc": "extra_body={\"reasoning\":{\"effort\":\"low\"}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 96,
+    "content_sample": "由韦达定理，对于 ax² + bx + c = 0，两根之和 = -b/a。  这里 a=1，b=-5，所以两根之和 = **5**。  验证：方程的两根为 x=2 和 x=3，2+3=5 ✓",
+    "finish_reason": "stop",
+    "station": "aigeek"
+  },
+  {
+    "mode": "stream",
+    "variant": "extra_body-reasoning-effort",
+    "desc": "extra_body={\"reasoning\":{\"effort\":\"low\"}}",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 146,
+    "content_sample": "两根之和为 **5**。  根据韦达定理，对于 $ax^2 + bx + c = 0$，两根之和 $= -b/a$。  这里 $a=1, b=-5$，所以两根之和 $= -(-5)/1 = 5$。  （验证：方程因式分解为 $(x-2)(x-3)=0$，两根为 2 和 3，之和确实为 5。）",
+    "station": "aigeek"
+  },
+  {
+    "mode": "non-stream",
+    "variant": "baseline-no-thinking",
+    "desc": "对照组：完全不带 thinking 参数",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 122,
+    "content_sample": "由韦达定理，对于方程 x² + bx + c = 0，两根之和等于 **-b**。  本题方程 x² - 5x + 6 = 0 中，b = -5，因此两根之和 = **5**。  验证：两根为 x = 2 和 x = 3，2 + 3 = 5 ✓",
+    "finish_reason": "stop",
+    "station": "aigeek"
+  },
+  {
+    "mode": "stream",
+    "variant": "baseline-no-thinking",
+    "desc": "对照组：完全不带 thinking 参数",
+    "ok": true,
+    "error": null,
+    "has_reasoning": false,
+    "reasoning_keys": [],
+    "reasoning_sample": {},
+    "content_len": 122,
+    "content_sample": "由韦达定理，对于 $ax^2 + bx + c = 0$，两根之和 $= -b/a$。  本题 $a=1, b=-5$，所以两根之和 $= -(-5)/1 = **5**$。  验证：方程的两根为 $x=2$ 和 $x=3$，$2+3=5$ ✓",
+    "station": "aigeek"
+  }
+]
