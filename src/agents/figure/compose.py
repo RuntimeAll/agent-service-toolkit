@@ -126,6 +126,10 @@ async def crop_mother_figure(
        返回 {ok, png_base64?, n_figures, bbox?, needs_figure, reason?}。
     🔴 纯文字/公式题（figures=[]）→ needs_figure=False + ok=False（母题无图，正常，不降级告警）。
     🔴 任何 IO/模型失败 → needs_figure=True（降级，不抛）。
+    🔴 P4（B 家族·配图全覆盖，方案 b）：多图母题（n_figures>1）仍只回第 1 张切图（FE 母题展示单图），
+       但 n_figures 记真实张数 + reason 外显「本题含 N 图、已切第 1 张，如缺图可手动重切」——
+       绝不静默丢图（旧实现只取 figs[0]、n_figures 记了真实数量却无任何外显提示）。
+       不改 (a) 回多图：母题原图本就直贴展示、多图母题罕见，回多 base64 + FE 多图渲染收益不抵风险。
     """
     tmp_path = None
     try:
@@ -143,11 +147,17 @@ async def crop_mother_figure(
                     "reason": "母题无图形（纯文字/公式题）"}
         first = figs[0]
         b64 = _png_to_b64(first["crop_path"])
+        n = len(figs)
         if not b64:
-            return {"ok": False, "needs_figure": True, "n_figures": len(figs),
+            return {"ok": False, "needs_figure": True, "n_figures": n,
                     "reason": "切图 PNG 读取失败"}
-        return {"ok": True, "needs_figure": False, "n_figures": len(figs),
-                "png_base64": b64, "bbox": first.get("bbox"), "conf": first.get("conf")}
+        # P4：多图母题不静默丢图——回第 1 张 + reason 外显真实张数，提示老师可手动重切补图。
+        multi_hint = (
+            f"本题含 {n} 图，已切第 1 张；如缺图可手动重切" if n > 1 else None
+        )
+        return {"ok": True, "needs_figure": False, "n_figures": n,
+                "png_base64": b64, "bbox": first.get("bbox"), "conf": first.get("conf"),
+                "reason": multi_hint}
     except Exception as e:  # noqa: BLE001 — 下载/检测失败 → 降级
         return {"ok": False, "needs_figure": True, "reason": f"母题切图失败: {str(e)[:80]}"}
     finally:
