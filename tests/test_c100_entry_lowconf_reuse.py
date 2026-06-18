@@ -68,6 +68,7 @@ def _make_fake_V():
         _emit_error=lambda *a, **k: emitted["errors"].append(a),
         _emit_reasoning=lambda *a, **k: None,
         _sanitize_rich_text=lambda s: s,
+        join_skeleton=lambda lines: "\n".join(str(s) for s in (lines or [])),
         _parse_json=lambda t: __import__("json").loads(t),
         _extract_knobs=_extract_knobs,
         _ainvoke_text=_ainvoke_text,
