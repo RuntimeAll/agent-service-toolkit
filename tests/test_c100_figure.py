@@ -11,12 +11,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 def test_geogebra_samples_cover_6_kinds() -> None:
     from agents.figure import geogebra_samples as gs
     kinds = {s["kind"] for s in gs.SAMPLES}
-    assert len(gs.SAMPLES) == 6
+    # 6 变换骨架 + 1 标注角范式（治「首次造图漏标角」补的标注 few-shot）= 7
+    assert len(gs.SAMPLES) == 7
     for k in ("旋转", "平移", "对称", "折叠"):
         assert k in kinds
     # 立体/三视图两条（名字带前缀）
     assert any("立体" in k for k in kinds)
     assert any("三视图" in k for k in kinds)
+    # 标注角范式：含 Angle 标注命令的样例（名字带「标注角」前缀）
+    annot = [s for s in gs.SAMPLES if "标注角" in s["kind"]]
+    assert annot, "缺标注角 few-shot"
+    assert any("Angle(" in c for c in annot[0]["commands"])
 
 
 def test_samples_prompt_block_renders_commands_and_dashed() -> None:
