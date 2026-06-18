@@ -483,6 +483,19 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 prov_dna["answer"] = V._sanitize_rich_text(rich.get("answer"))
             if rich.get("analysis"):
                 prov_dna["analysis"] = V._sanitize_rich_text(rich.get("analysis"))
+        # 🔴 PRD-C-100 B2 死循环根治：低置信暂存与高置信路径对齐——补 mother_solve_source="opus"
+        #   + 完整 dna（含 main_kp/skeleton）。否则 confirm 后 classify 的 _reuse_ok（variant.py:1879）
+        #   判 False → 重锚不复用首解 → 重调 opus 二次读图、niche 题偶发坏 JSON → 退回 needs_confirm
+        #   → 又弹确认框 = 死循环。dna 归一走与高置信路径同一函数 mother_opus.opus_to_dna(entry)。
+        prov_dna_obj = mother_opus.opus_to_dna(entry)
+        prov_skeleton = prov_dna_obj.get("skeleton") or []
+        if prov_skeleton:
+            prov_dna["solution_skeleton"] = "\n".join(str(s) for s in prov_skeleton)
+        prov_solved = entry.get("solvedAnswer")
+        if prov_solved:
+            prov_dna["solved_answer"] = V._sanitize_rich_text(prov_solved)
+        prov_dna["dna"] = prov_dna_obj
+        prov_dna["mother_solve_source"] = "opus"
         return {
             **base_out,
             "analysis": {
