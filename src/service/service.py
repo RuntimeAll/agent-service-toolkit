@@ -48,6 +48,32 @@ warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-A-018 F12·进程内 per-thread 读改写互斥锁
+# ---------------------------------------------------------------------------
+# 变式题组的结构化端点都是「aget_state → compute → aupdate_state」无原子保护：双击「全部入库」
+# / 连点 edit-dna 等并发请求会读到同一旧快照、各自算 update、后写覆盖前写 → 重复落库 / 丢更新。
+# 解法 = 同一 thread_id 的读改写整段串行（不同 thread 互不阻塞，并发不退化）。
+# 进程内锁（dict[thread_id]→asyncio.Lock）：单实例够用；多实例分布式锁列 A-020（按需 Redis）。
+# 配合库端 sourceHash 幂等键（variant_support.build_create_bo）= 双保险。
+import asyncio as _asyncio  # noqa: E402
+
+_THREAD_LOCKS: dict[str, _asyncio.Lock] = {}
+_THREAD_LOCKS_GUARD = _asyncio.Lock()
+
+
+async def _get_thread_lock(thread_id: str) -> _asyncio.Lock:
+    """取/建某 thread_id 的进程内读改写锁（同 thread 串行；建锁本身用 guard 锁防竞态建两把）。"""
+    lock = _THREAD_LOCKS.get(thread_id)
+    if lock is None:
+        async with _THREAD_LOCKS_GUARD:
+            lock = _THREAD_LOCKS.get(thread_id)
+            if lock is None:
+                lock = _asyncio.Lock()
+                _THREAD_LOCKS[thread_id] = lock
+    return lock
+
+
 def custom_generate_unique_id(route: APIRoute) -> str:
     """Generate idiomatic operation IDs for OpenAPI client generation."""
     return route.name
@@ -463,21 +489,25 @@ async def variant_persist(input: VariantPersistInput) -> dict[str, Any]:
     cfg = RunnableConfig(
         configurable={"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
     )
+    # 🔴 F12·最常踩：双击「全部入库」并发 → per-thread 锁串行化读改写，第二次进来读到已写回的
+    #   persisted 标记 → pending 为空 → 不重复落库。配合库端 sourceHash 幂等键双保险。
+    lock = await _get_thread_lock(input.thread_id)
     try:
-        snapshot = await agent.aget_state(config=cfg)
-        values: dict[str, Any] = snapshot.values or {}
-        update = await persist_to_bank(values, cfg)  # type: ignore[arg-type]
-        # 回写 checkpointer（as_node=persist_to_bank：簿记/回执与 chat 通道入库完全一致，
-        # 后续编辑轮 assemble 快照「已收录」不回退、二次入库不重复落行）
-        await agent.aupdate_state(cfg, update, as_node="persist_to_bank")
-        merged = {**values, **{k: v for k, v in update.items() if k != "messages"}}
-        msgs = update.get("messages") or []
-        reply = str(msgs[-1].content) if msgs else ""
-        # 🔴 B4 入库 → 写偏好记忆（确定性 D10）：常教年级册 + 常出题型。best-effort。
-        _gb = ((merged.get("analysis") or {}).get("grade") or {}).get("value")
-        _qt = ((merged.get("mother_dna") or {}).get("dna") or {}).get("qtype")
-        await _mem_write_preference(input.ruoyi_token, grade_book=_gb, qtype=_qt)
-        return {"ok": True, "reply": reply, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
+        async with lock:
+            snapshot = await agent.aget_state(config=cfg)
+            values: dict[str, Any] = snapshot.values or {}
+            update = await persist_to_bank(values, cfg)  # type: ignore[arg-type]
+            # 回写 checkpointer（as_node=persist_to_bank：簿记/回执与 chat 通道入库完全一致，
+            # 后续编辑轮 assemble 快照「已收录」不回退、二次入库不重复落行）
+            await agent.aupdate_state(cfg, update, as_node="persist_to_bank")
+            merged = {**values, **{k: v for k, v in update.items() if k != "messages"}}
+            msgs = update.get("messages") or []
+            reply = str(msgs[-1].content) if msgs else ""
+            # 🔴 B4 入库 → 写偏好记忆（确定性 D10）：常教年级册 + 常出题型。best-effort。
+            _gb = ((merged.get("analysis") or {}).get("grade") or {}).get("value")
+            _qt = ((merged.get("mother_dna") or {}).get("dna") or {}).get("qtype")
+            await _mem_write_preference(input.ruoyi_token, grade_book=_gb, qtype=_qt)
+            return {"ok": True, "reply": reply, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
     except HTTPException:
         raise
     except Exception as e:
@@ -616,25 +646,28 @@ async def variant_persist_one(input: VariantPersistOneInput) -> dict[str, Any]:
     cfg = RunnableConfig(
         configurable={"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
     )
+    # 🔴 F12：per-thread 锁（连点「单题入库」并发去重；与全部入库共用同一把 thread 锁互斥）。
+    lock = await _get_thread_lock(input.thread_id)
     try:
-        snapshot = await agent.aget_state(config=cfg)
-        values: dict[str, Any] = snapshot.values or {}
-        update, result, error = await persist_one_to_bank(
-            values, input.index, token=input.ruoyi_token
-        )
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-        # 有 state 变更（成功落库/回填血缘）才回写 checkpointer（防重簿记不丢）。
-        if update:
-            await agent.aupdate_state(cfg, update, as_node="persist_to_bank")
-        merged = {**values, **update}
-        return {
-            "ok": bool(result.get("ok")),
-            "id": result.get("id"),
-            "skipped": bool(result.get("skipped")),
-            "error": result.get("error"),
-            "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
-        }
+        async with lock:
+            snapshot = await agent.aget_state(config=cfg)
+            values: dict[str, Any] = snapshot.values or {}
+            update, result, error = await persist_one_to_bank(
+                values, input.index, token=input.ruoyi_token
+            )
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+            # 有 state 变更（成功落库/回填血缘）才回写 checkpointer（防重簿记不丢）。
+            if update:
+                await agent.aupdate_state(cfg, update, as_node="persist_to_bank")
+            merged = {**values, **update}
+            return {
+                "ok": bool(result.get("ok")),
+                "id": result.get("id"),
+                "skipped": bool(result.get("skipped")),
+                "error": result.get("error"),
+                "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -704,20 +737,23 @@ async def _variant_apply(thread_id: str, fn) -> dict[str, Any]:
 
     agent: AgentGraph = get_agent("variant")
     cfg = RunnableConfig(configurable={"thread_id": thread_id})
+    # 🔴 F12：per-thread 锁包住「读改写」整段（同 thread 串行，防连点 edit-dna 等丢更新）。
+    lock = await _get_thread_lock(thread_id)
     try:
-        snapshot = await agent.aget_state(config=cfg)
-        values: dict[str, Any] = snapshot.values or {}
-        result = fn(values)
-        if inspect.isawaitable(result):
-            result = await result
-        update, error = result
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-        # 回写 checkpointer（as_node 任取一个图内节点名：编辑只覆盖 items/manual_order，
-        # 后续轮 assemble/persist 读到的就是编辑后的题组；不触发图继续跑）
-        await agent.aupdate_state(cfg, update, as_node="exec_reorder")
-        merged = {**values, **update}
-        return {"ok": True, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
+        async with lock:
+            snapshot = await agent.aget_state(config=cfg)
+            values: dict[str, Any] = snapshot.values or {}
+            result = fn(values)
+            if inspect.isawaitable(result):
+                result = await result
+            update, error = result
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+            # 回写 checkpointer（as_node 任取一个图内节点名：编辑只覆盖 items/manual_order，
+            # 后续轮 assemble/persist 读到的就是编辑后的题组；不触发图继续跑）
+            await agent.aupdate_state(cfg, update, as_node="exec_reorder")
+            merged = {**values, **update}
+            return {"ok": True, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
     except HTTPException:
         raise
     except Exception as e:
@@ -937,22 +973,25 @@ async def variant_revise(input: VariantReviseInput) -> dict[str, Any]:
     cfg = RunnableConfig(
         configurable={"thread_id": input.thread_id, "ruoyi_token": input.ruoyi_token}
     )
+    # 🔴 F12：per-thread 锁（revise 改 items → 与并发编辑/入库串行，防丢更新）。
+    lock = await _get_thread_lock(input.thread_id)
     try:
-        snapshot = await agent.aget_state(config=cfg)
-        values: dict[str, Any] = snapshot.values or {}
-        update, result, error = await revise_item(
-            values, input.index, input.target, input.instruction, cfg
-        )
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-        if update:
-            await agent.aupdate_state(cfg, update, as_node="exec_regenerate")
-        merged = {**values, **update}
-        return {
-            "ok": bool(result.get("ok")),
-            "error": result.get("error"),
-            "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
-        }
+        async with lock:
+            snapshot = await agent.aget_state(config=cfg)
+            values: dict[str, Any] = snapshot.values or {}
+            update, result, error = await revise_item(
+                values, input.index, input.target, input.instruction, cfg
+            )
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+            if update:
+                await agent.aupdate_state(cfg, update, as_node="exec_regenerate")
+            merged = {**values, **update}
+            return {
+                "ok": bool(result.get("ok")),
+                "error": result.get("error"),
+                "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -992,21 +1031,24 @@ async def variant_regen(input: VariantRegenInput) -> dict[str, Any]:
 
     agent: AgentGraph = get_agent("variant")
     cfg = RunnableConfig(configurable={"thread_id": input.thread_id})
+    # 🔴 F12：per-thread 锁（重生改 items → 与并发编辑/入库串行，防丢更新/重复落库）。
+    lock = await _get_thread_lock(input.thread_id)
     try:
-        snapshot = await agent.aget_state(config=cfg)
-        values: dict[str, Any] = snapshot.values or {}
-        update, result, error = await regen_dirty_items(values, input.indexes)
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-        if update:
-            await agent.aupdate_state(cfg, update, as_node="exec_regenerate")
-        merged = {**values, **update}
-        return {
-            "ok": True,
-            "regenerated": result.get("regenerated") or [],
-            "failed": result.get("failed") or [],
-            "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
-        }
+        async with lock:
+            snapshot = await agent.aget_state(config=cfg)
+            values: dict[str, Any] = snapshot.values or {}
+            update, result, error = await regen_dirty_items(values, input.indexes)
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+            if update:
+                await agent.aupdate_state(cfg, update, as_node="exec_regenerate")
+            merged = {**values, **update}
+            return {
+                "ok": True,
+                "regenerated": result.get("regenerated") or [],
+                "failed": result.get("failed") or [],
+                "artifact": _artifact_payload(merged),  # type: ignore[arg-type]
+            }
     except HTTPException:
         raise
     except Exception as e:

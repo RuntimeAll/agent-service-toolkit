@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
@@ -790,6 +791,25 @@ def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     return bo
 
 
+def compute_source_hash(item: dict[str, Any], facts: dict[str, Any]) -> str:
+    """🔴 PRD-A-018 M1④/F12：内容派生的入库幂等键（库端去重兜底）。
+
+    防「双击全部入库 / 进程内锁失效」并发把同一道题落两行：BO 带稳定 sourceHash（题面+答案+
+    母题血缘 id 的 sha256），库端可据它认同一道题幂等（已存在则覆盖/跳过，不再新落一行）。
+    内容变（重生/编辑）→ hash 变 → 视作新内容（配合 _persist_id 覆盖原行，互不冲突）。
+    纯确定性，无网络、无随机。库端未消费该键也无害（多带一字段，不污染既有列）。
+    """
+    basis = "".join(
+        [
+            str(item.get("stem") or ""),
+            str(item.get("answer") or ""),
+            str(facts.get("mother_question_id") or ""),
+            str(item.get("variant_relation") or REL_VARIANT),
+        ]
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
 def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """单道变式 item + 母题 facts → CreateQuestionBo camelCase body。
 
@@ -843,6 +863,8 @@ def build_create_bo(item: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
     )
     if block_json:
         bo["blockJson"] = block_json
+    # 🔴 PRD-A-018 M1④/F12：带内容派生幂等键，库端去重兜底（双击入库/并发不重复落行）。
+    bo["sourceHash"] = compute_source_hash(item, facts)
     return bo
 
 

@@ -574,6 +574,19 @@ def clear_item_dirty(item: dict[str, Any]) -> None:
     item.pop("mother_baseline", None)
 
 
+def mark_content_dirty_if_persisted(item: dict[str, Any]) -> None:
+    """🔴 PRD-A-018 M1③/F16：已入库题(persisted)的内容(题面/答案/解析)被编辑/重生/重写解析后，
+    标 `_content_dirty=True` → 让 persist_to_bank / persist_one_to_bank 不再「已入库就跳过」，
+    而是放行走「覆盖原行 update by _persist_id」（库行内容同步更新，不重复落行）。
+
+    - 仅对**已入库**题打标（未入库题首次入库本就走 create，无需标；避免污染未入库流）。
+    - 与 dna_dirty 解耦：dna_dirty=改维待重生→拒入库；_content_dirty=内容已编辑待覆盖→允许覆盖入库。
+    - `_content_dirty` 是内部键，不入库（build_create_bo/build_update_bo 白名单挡）；落库时清。
+    """
+    if item.get("persisted"):
+        item["_content_dirty"] = True
+
+
 def has_dirty(state: VariantState) -> bool:
     """致命①：会话内是否存在 dna_dirty 的变式 或 mother_dna.dirty。"""
     if (state.get("mother_dna") or {}).get("dirty"):
@@ -5427,10 +5440,14 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
             # 4a：重出稿自带的验算载荷随新题走（REGEN_PROMPT 契约产出）
             if isinstance(regen.get("verify_payload"), dict):
                 new_item["verify_payload"] = regen["verify_payload"]
-            # 配方印记跟题走（与 difficulty 同理：重出仍占原计划槽位，闸A 改判段不丢）
-            for k in ("from_recipe", "expected_difficulty"):
+            # 配方印记 + 入库簿记跟题走（PRD-A-018 M1②：比照 exec_solution_only:5763 /
+            #   regen_dirty_items:6871，carry _seq/persisted/_persist_id；不 carry → 重出后该题
+            #   persisted/_persist_id 丢失 → 再入库走 create 重复落行）。
+            for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id", "level"):
                 if old.get(k) is not None:
                     new_item[k] = old[k]
+            # 已入库题被改造重出 → 内容已变 → 标「内容已编辑待覆盖」，入库走 _persist_id 覆盖原行。
+            mark_content_dirty_if_persisted(new_item)
             # 🔴 RC2（PRD-C-013）：编辑轮产物打 from_edit 印记 → 重入 gene_gate 时只判不回炉
             # （老师已点名改造，基因闸判不过只标 warn，不重出覆盖老师意志）；老师 note 存 edit_note，
             # 任何下游 REGEN（闸B 验算回炉）都注回，不被失败原因冲掉。
@@ -5738,8 +5755,14 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
             new_it["from_edit"] = True  # 闸B 见 from_edit：FAIL 不回炉换题、保留打 ⚠ 交人审
             new_it["edit_note"] = f"解题方法约束：{method_constraint}"
             new_it.pop("check", None)
+            # 🔴 PRD-A-018 F16：已入库题重写解析后内容已变 → 标「内容已编辑待覆盖」，
+            #   否则 persist_to_bank「已入库就跳过」→ 新解析永不落库（F16 根）。
+            mark_content_dirty_if_persisted(new_it)
             rechecked, _dropped = await _check_one_item(new_it, facts, i, len(items))
-            return rechecked if rechecked is not None else new_it
+            out_it = rechecked if rechecked is not None else new_it
+            # _check_one_item 可能返回新 dict（复制 new_it）→ 重申标记不被冲掉。
+            mark_content_dirty_if_persisted(out_it)
+            return out_it
         # 不可解 → 仅此单题重出题面（_regen_once 注 edit_note 守新约束）→ 重跑闸B
         if _budget_exhausted():
             # 预算耗尽 → 不单题重出，保留原题打 ⚠ 注记（降级，不卡死）
@@ -5764,8 +5787,12 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
             if it.get(k) is not None:
                 draft[k] = it[k]
         draft.pop("check", None)
+        # 🔴 F16：已入库题在新方法约束下重出题面 → 内容已变 → 标待覆盖（入库走 _persist_id 覆盖）。
+        mark_content_dirty_if_persisted(draft)
         rechecked, _dropped = await _check_one_item(draft, facts, i, len(items))
-        return rechecked if rechecked is not None else draft
+        out_it = rechecked if rechecked is not None else draft
+        mark_content_dirty_if_persisted(out_it)
+        return out_it
 
     sem = asyncio.Semaphore(GATE_CONCURRENCY)
 
@@ -5909,12 +5936,19 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     if dirty_msg:
         return {"messages": [AIMessage(content="⚠ 暂不能入库：" + dirty_msg)]}
 
-    # 🔴 入库簿记（PRD-C-011 G5 + 批4 缺口10）：防重判据从「persisted 跳过」改成
-    #   「persisted 且 not dirty 才跳过」。dirty 已被上面硬闸拦掉 → 此处 pending = 未入库的题；
-    #   重生后再入库走「覆盖原行 update by _persist_id」（persist_items 据 _persist_id 走 update）。
+    # 🔴 入库簿记（PRD-C-011 G5 + 批4 缺口10 + PRD-A-018 M1③）：跳过判据 =
+    #   「已入库(persisted) 且 非 DNA脏(dna_dirty) 且 非内容已编辑待覆盖(_content_dirty)」。
+    #   - dna_dirty（改维待重生）已被上面硬闸拦掉，本就不入库；
+    #   - _content_dirty（已入库题内容被编辑/重生/重写解析过）= 放行入 pending，走「覆盖原行
+    #     update by _persist_id」（persist_items 据 _persist_id 走 update_question，幂等覆盖、不重复落行）。
+    #   两者区分：DNA脏→拒入库（先重生）；内容已编辑→允许覆盖入库（F16/M1③）。
     pending_idx = [
         i for i, it in enumerate(items)
-        if not (it.get("persisted") and not it.get("dna_dirty"))
+        if not (
+            it.get("persisted")
+            and not it.get("dna_dirty")
+            and not it.get("_content_dirty")
+        )
     ]
     if not pending_idx:
         return {
@@ -5954,7 +5988,17 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     # 「全部入库」重新可点 → 二次入库整组重复落行（G5 破）；图母题也会再落一份（双份血缘）。
     new_items = [dict(it) for it in items]
     for j, r in zip(pending_idx, var_receipts):
-        new_items[j]["persisted"] = bool(r.get("ok"))
+        if r.get("ok"):
+            new_items[j]["persisted"] = True
+            # 🔴 M1①（PRD-A-018 簇1）：回写 _persist_id（对齐 persist_one_to_bank:6033-6035）。
+            #   不回写 → 重生/编辑后再入库时 item 无 _persist_id → persist_items 走 create 而非
+            #   update → 整组重复落行（M1 根）。create 回执无 id 时保留旧 _persist_id（覆盖入库已有）。
+            if r.get("id") is not None:
+                new_items[j]["_persist_id"] = r.get("id")
+            # 落库即清「内容已编辑待覆盖」标记（已覆盖入库，本轮内容已同步到库行）。
+            new_items[j].pop("_content_dirty", None)
+        else:
+            new_items[j]["persisted"] = bool(r.get("ok"))
     update: VariantState = {"items": new_items}
     if mother and mother.get("ok") and mother.get("id") is not None:
         # persist_items 的 mother_question_id 回填发生在局部 facts 副本上 → 这里落回 state，
@@ -6013,9 +6057,14 @@ async def persist_one_to_bank(
             {"ok": False, "error": f"第 {index} 题改了还没重生，先点「重生」或「撤销重生」再入库。"},
             None,
         )
-    # item 级防重（缺口10）：persisted 且 not dirty → 跳过（已收录、未改过）；
-    #   dirty 已被上面拦掉，故走到这里的 persisted 题就是干净的已收录题。
-    if target.get("persisted") and not target.get("dna_dirty"):
+    # item 级防重（缺口10 + PRD-A-018 M1③）：persisted 且 not dna_dirty 且 not _content_dirty
+    #   → 跳过（已收录、未改过）。_content_dirty（已入库题内容已编辑/重生待覆盖）→ 不跳过，
+    #   往下走 persist_items 据 _persist_id 覆盖原行（与「全部入库」同口径）。
+    if (
+        target.get("persisted")
+        and not target.get("dna_dirty")
+        and not target.get("_content_dirty")
+    ):
         return (
             {},
             {"ok": True, "id": target.get("_persist_id"), "role": "variant", "skipped": True},
@@ -6033,6 +6082,8 @@ async def persist_one_to_bank(
         new_items[index - 1]["persisted"] = True
         if var.get("id") is not None:
             new_items[index - 1]["_persist_id"] = var.get("id")  # 防重回查用（内部键，不入库）
+        # 落库即清「内容已编辑待覆盖」标记（M1③：覆盖入库后库行已与本地内容一致）。
+        new_items[index - 1].pop("_content_dirty", None)
         update["items"] = new_items
         if mother and mother.get("ok") and mother.get("id") is not None:
             update["mother_dna"] = dict(
@@ -6084,14 +6135,22 @@ def edit_item_state(
         return {}, None, f"index 越界（须 1..{len(items)}），收到 {index}"
     new_items = [dict(it) for it in items]
     it = new_items[index - 1]
+    content_changed = False
     if stem is not None:
         it["stem"] = _sanitize_rich_text(stem)
+        content_changed = True
     if answer is not None:
         it["answer"] = _sanitize_rich_text(answer)
+        content_changed = True
     if solution is not None:
         it["solution"] = _sanitize_rich_text(solution)
+        content_changed = True
     it["manual_edited"] = True
     it["from_edit"] = True
+    # 🔴 PRD-A-018 M1③：已入库题手动改了题面/答案/解析 → 标「内容已编辑待覆盖」，
+    #   再入库走 _persist_id 覆盖原行（否则「已入库就跳过」→ 改后内容静默不写回库）。
+    if content_changed:
+        mark_content_dirty_if_persisted(it)
     # 🔴 题型模版自动规范（PRD-C-009·BE）：手动编辑回写后顺手规范 stem（净化之后）。
     #   edit-item 本身不跑 sympy 判决（check 置 manual 中性），此处规范无判决可影响——让老师
     #   手改的题立刻是 canonical 上屏，即便未点 reverify 也吃规范文本。cosmetic-only、幂等。
@@ -6659,6 +6718,8 @@ async def revise_item(
         ):
             final["level"] = "hard"
         final["manual_edited"] = True  # 重申 manual 印记（rechecked 可能复制过 dict）
+        # 🔴 PRD-A-018 M1③：已入库题 whole 重做后内容已变 → 标待覆盖（入库走 _persist_id 覆盖原行）。
+        mark_content_dirty_if_persisted(final)
         new_items[index - 1] = final
         return {"items": new_items}, {"ok": True}, None
 
@@ -6711,6 +6772,8 @@ async def revise_item(
     it["manual_edited"] = True
     it["from_edit"] = True
     it["check"] = {"tier": TIER_MANUAL}
+    # 🔴 PRD-A-018 M1③：已入库题 skeleton/scene 改写后内容(解析/场景)已变 → 标待覆盖。
+    mark_content_dirty_if_persisted(it)
     update["items"] = new_items
     return update, {"ok": True}, None
 
@@ -6895,6 +6958,9 @@ async def regen_dirty_items(
         final["regen_snapshot"] = snapshot
         final["manual_edited"] = True
         clear_item_dirty(final)
+        # 🔴 PRD-A-018 M1③：已入库题重生后内容已变 → 标「内容已编辑待覆盖」（dna_dirty 已被
+        #   clear_item_dirty 清掉，仅靠它 persist 会「已入库就跳过」漏掉新内容）→ 入库走 _persist_id 覆盖。
+        mark_content_dirty_if_persisted(final)
         new_items[n - 1] = final
         regenerated.append(n)
 
