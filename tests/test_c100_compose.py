@@ -35,11 +35,23 @@ class TestComposeVariantFigure:
 
     @pytest.mark.asyncio
     async def test_opus_says_needs_figure_degrades(self):
+        # 🔴 PRD-A-018 RED#1：几何题(含图形关键词)opus 说需图却没给命令 → 降级(ok=False)
+        #   且 needs_figure=True（本应有图·待补图，want_fig=True）。
         async def invoke(messages, **kw):
             return '{"commands":[],"needs_figure":true}'
         r = await compose.compose_variant_figure(
-            stem="纯代数题", invoke=invoke, parse_json=_parse_json)
+            stem="如图，三角形 ABC 中 ∠BAC=90°，求斜边长", invoke=invoke, parse_json=_parse_json)
         assert r["ok"] is False and r["needs_figure"] is True
+
+    @pytest.mark.asyncio
+    async def test_pure_algebra_needs_figure_false(self):
+        # 🔴 PRD-A-018 RED#1：纯代数题(无几何关键词)opus 说不适合配图 → needs_figure=False
+        #   （= 无需配图，非待补图）。FE 据此把配图灯跳过(done)、不卡题组就绪。
+        async def invoke(messages, **kw):
+            return '{"commands":[],"needs_figure":true}'
+        r = await compose.compose_variant_figure(
+            stem="下列各式中是二次根式的有几个", invoke=invoke, parse_json=_parse_json)
+        assert r["ok"] is False and r["needs_figure"] is False
 
     @pytest.mark.asyncio
     async def test_render_failure_degrades(self, monkeypatch):

@@ -75,7 +75,9 @@ def test_trigger2_pure_algebra_empty_commands_does_not_nag(monkeypatch) -> None:
             item_id="2",
         )
     )
-    assert r["ok"] is False and r["needs_figure"] is True
+    # 🔴 PRD-A-018 RED#1：纯代数题(无图形关键词)→ needs_figure=False（无需配图，非待补图），
+    #   且不置 need_user_desc（不误催）。FE 据此把配图灯跳过(done)、不卡题组就绪。
+    assert r["ok"] is False and r["needs_figure"] is False
     assert r.get("need_user_desc") is not True
 
 
