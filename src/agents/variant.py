@@ -1536,6 +1536,13 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         #   （/variant/compose-figure mode=crop_mother，传 mother_image_url）显示母题切图（AC4）。
         "mother_has_figure": bool(state.get("mother_has_figure")),
         "mother_image_url": str(state.get("image_url") or "") or None,
+        # 🔴 PRD-A-018 A-22：透传母题入库态（恢复历史会话据此重建，免显「未入库」/可重复入库）。
+        #   雪花 id 发 string 防 JS Number 精度丢失（FE pickMotherCard 读 mother_question_id/persisted）。
+        #   未入库 → None/False（禁假数据，FE 防御性兜 null）。
+        "mother_question_id": (
+            str(mdna.get("mother_question_id")) if mdna.get("mother_question_id") else None
+        ),
+        "persisted": bool(mdna.get("mother_question_id")),
         # 10 维 DNA（FE pickDna 解析；键名对齐 _item_dna）
         "dna": {
             "main_kp": main_kp_name,
