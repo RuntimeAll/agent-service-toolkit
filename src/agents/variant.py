@@ -255,6 +255,10 @@ class VariantState(MessagesState, total=False):
     knobs: dict[str, Any] | None
     # generate 的代码级配方校验缺陷清单（整组 retry 1 次后仍不符 → assemble 头部外显 ⚠）
     shape_defects: list[str]
+    # 🔴 BUG-01（2026-06-19）·改主考点可回退：edit-dna 改 main_kp 前的旧考点快照
+    #   {"main_kp": {id,name}|None, "kp": analysis.kp 旧值|None}，FE 据它给「撤销改考点」入口。
+    #   不破坏 items（改主考点不再清 items）→ 撤销 = 把主考点改回旧值即可，变式都还在。
+    main_kp_prev: dict[str, Any] | None
     # 4d 方案A（PRD-C-012）：本轮被剔除题的叙事（sympy 证实标答错且重生未果 → 不外发），
     # solve_explain 每轮重写（非累计），assemble 摘要外显「本组少 N 道」
     dropped_notes: list[str]
@@ -5010,10 +5014,19 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
    - 🔴 祈使式也算答疑（常见漏判）：「第2题讲一遍」「给学生讲」「按给学生讲的方式讲讲」「再讲讲第1题」「这道题展开说说」——都是要讲解，不是改题。
    - 🔴 承接上一轮 AI 主动提议时尤其要认（见末尾「上一轮 AI 说了什么」）：若 AI 上一句提议「我可以把第N题完整讲一遍」，老师回「好/可以/讲/给学生讲」= 承接该提议 → 答疑（讲第N题），别判 clarify。
 2. "编辑"+remove —— 判别：点名删掉某道题，且能给出 1~{n} 内的题号。例：「第2题删掉」→ ops=[{{"action":"remove","index":2}}]
-3. "编辑"+regenerate —— 判别：点名**改造/重出某道题**（换数字 / 换一道新题 / **改题型 / 换题型 / 加情境/换场景**），且能给出 1~{n} 内的题号。**改题型与换场景都归这里**（题型、场景都不在硬守恒里，可以改）。把目标题型/场景要求写进 note。
-   - 例（换题）：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
-   - 例（改题型）：「第1题改成选择题」/「这题改填空」→ ops=[{{"action":"regenerate","index":1,"note":"改成选择题"}}]
-   - 例（换场景）：「第2题加入杭州元素」/「换成行程问题的情境」→ ops=[{{"action":"regenerate","index":2,"note":"加入杭州元素场景"}}]
+3. "编辑"+regenerate —— 判别：点名**改造/重出某道题**（换数字 / 换一道新题 / **改题型 / 换题型 / 加情境/换场景 / 难一点 / 简单点 / 改某属性**），把目标要求写进 note。**改题型与换场景都归这里**（题型、场景都不在硬守恒里，可以改）。
+   🔴 **作用范围三态（最关键，默认单题、不污染全组）——每道题上下文独立，老师对某题的调整默认不共享给其它题**：
+   (a) **单题（默认）**：老师点名或语境明确指向**某一道**（「第1题」「这道」「这个」「它」「上面那道」），或老师只是泛泛说一句改造要求（如「换数字」「难一点」「换个场景」）——一律只作用**那一道**。
+       · 给了明确题号 → ops=[{{"action":"regenerate","index":N,"note":"..."}}]。
+       · 没给题号但语境明确是"当前/这一道"（如紧接着某题在聊）→ 取那一道的题号。
+       · 真说不清是哪一道（既没题号、也没"这道/当前"指向，无法定位）→ 留空 ops、intent 取 "clarify" 反问"是哪一道？"——**绝不默认广播到全组，绝不随便挑一道**。
+   (b) **显式全组**：老师**明确说了「所有 / 全部 / 每一道 / 每道 / 整组 / 都」**等覆盖词（如「所有题都换成选择题」「每道题数字都简单点」「全部难一点」）→ 对 1~{n} **每一道各发一条** regenerate op（同一 note）：ops=[{{"action":"regenerate","index":1,"note":"..."}},{{"action":"regenerate","index":2,"note":"..."}},…直到第{n}题]。
+   (c) **点名多题**：老师**点名几道具体题号**（「第1、3题」「第2和第4题」「2到4题」）→ 只对**点到的那几道各发一条** regenerate op（同 note），别的题不动。例（点 1、3）：ops=[{{"action":"regenerate","index":1,"note":"..."}},{{"action":"regenerate","index":3,"note":"..."}}]。
+   - 例（单题·换题）：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
+   - 例（单题·改题型）：「第1题改成选择题」/「这题改填空」→ ops=[{{"action":"regenerate","index":1,"note":"改成选择题"}}]
+   - 例（单题·换场景）：「第2题加入杭州元素」/「换成行程问题的情境」→ ops=[{{"action":"regenerate","index":2,"note":"加入杭州元素场景"}}]
+   - 例（全组，共3道）：「所有题都改成选择题」→ ops=[{{"action":"regenerate","index":1,"note":"改成选择题"}},{{"action":"regenerate","index":2,"note":"改成选择题"}},{{"action":"regenerate","index":3,"note":"改成选择题"}}]
+   - 例（点名多题）：「第1题和第3题都难一点」→ ops=[{{"action":"regenerate","index":1,"note":"难一点"}},{{"action":"regenerate","index":3,"note":"难一点"}}]
 4. "编辑"+add —— 判别：要求再加 N 道题（N 为正整数，单轮最多 5）。例：「再来2道难的」→ ops=[{{"action":"add","count":2,"note":"难的"}}]
 4b. "编辑"+reorder —— 判别：只调整题目**顺序**（不改题/不增删），且能给出一个**覆盖全部 {n} 道**的新次序。例（共3道）：「把顺序换成 3 1 2」→ ops=[{{"action":"reorder","order":[3,1,2]}}]。order 必须是 1~{n} 的**全排列**（每个题号恰出现一次）；只说「按难度排」「倒过来」这种没给出明确全排列的，**不要自己编 order**，留空 ops、intent 取 "clarify" 让老师给次序。
 5. "解法修正" —— 判别：老师**约束解题方法**、或**纠正年级/进度从而限定能用的解法**，但**不要求换题**（题面保留，只改解析/解法）。例：「这里是7年级的题目，没学二元方程，只能用一元一次去解题」→ intent=解法修正，method_constraint=「只能用一元一次方程，不用二元方程」，grade_correction=「七年级」。又例：「解析别用因式分解，改用配方法」→ 解法修正，method_constraint=「改用配方法，不用因式分解」。🔴 关键区分：老师明确改的是**怎么解**（解析/方法），不是**换一道题**——别误判成"修正(整组重锚重做)"或"编辑+regenerate(换题)"。
@@ -5042,6 +5055,7 @@ PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类�
 - add 的 count 必须是正整数；intent=答疑/确认/修正/解法修正/clarify 时 ops 必须为空数组。
 - intent=解法修正 时 method_constraint 必须非空（说清不能用什么/必须用什么）；说不清就 clarify。
 - 同一句里不要混多类操作（如又删又排）；混了 → intent 取 "clarify" 请老师分句说。
+- 🔴 regenerate 作用范围**默认单题、绝不广播全组**：只有老师明确说「所有/全部/每一道/都」才对每道各发一条 op；点名几道就只发那几道；既没题号也没"这道/当前"指向、定位不到 → clarify 反问，**绝不把单题改造默认成改全组、也绝不随便挑一道**。
 - 解析不出来 = "clarify"，绝不猜成删题。
 
 母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
@@ -6307,6 +6321,11 @@ def edit_dna_state(
         kp, err = _coerce_kp(value)
         if err:
             return {}, None, f"main_kp 非法：{err}"
+        # 🔴 BUG-01（2026-06-19）：改主考点「可回退」—— 改前留一份旧考点快照（mother_dna.dna.main_kp
+        #   + analysis.kp），FE 据它给「撤销改考点」入口；不破坏 items（旧改主考点=清 items 整组重出
+        #   不可回退，已废，见下方 hard_anchor 分流注释）。
+        _prev_main_kp = copy.deepcopy(dna.get("main_kp")) if dna.get("main_kp") is not None else None
+        _prev_kp_node = copy.deepcopy(analysis.get("kp")) if analysis.get("kp") is not None else None
         dna["main_kp"] = kp
         mother_dna["dna"] = dna
         kp_node = dict(analysis.get("kp") or {})
@@ -6476,12 +6495,45 @@ def edit_dna_state(
     it["from_edit"] = True
     it["check"] = {"tier": TIER_MANUAL}
 
+    if rclass == "hard_anchor" and field == "main_kp":
+        # 🔴 BUG-01（2026-06-19）·改主考点「不强制重出、可回退」（拆掉旧「改主考点=清 items 整组
+        #   重出」自动级联）：
+        #   旧行为：清 items + mother_confirmed=False + facts_locked=False → 立即整组重锚重出
+        #           （未经老师同意烧 token + 旧绑定不可回退）。
+        #   新行为：① 只更新主考点本身（main_kp/analysis.kp 已在上面写好）+ 守恒维留痕；
+        #           ② 不清 items、不解冻（mother_confirmed/facts_locked 不动）→ 不触发任何自动重出；
+        #           ③ 把下游变式标 mother_dirty（母题脏，进待重生集合）——要据新考点重生变式必须
+        #              老师**显式点「重生」**（regen_dirty_items 走 facts 的新 kp_name 重出，token 受控）；
+        #           ④ 可回退：旧考点快照（main_kp_prev）随 update 外发，FE 给「撤销改考点」入口；
+        #              即便不撤销，items 仍在（没被清），老师可直接把主考点改回旧值复原。
+        if len(audit) > _audit_n0:
+            update["facts_audit"] = audit
+        # 母题脏（致命① 拦入库）+ 下游变式标 dirty 不自动重出（点「重生」才据新考点重出）
+        mother_dna["dirty"] = True
+        mark_mother_dirty(mother_dna, new_items, "main_kp")
+        update["mother_dna"] = mother_dna
+        update["items"] = new_items
+        # 旧考点快照（FE「撤销改考点」用；不破坏 items → 撤销=把主考点改回旧值即可）
+        update["main_kp_prev"] = {"main_kp": _prev_main_kp, "kp": _prev_kp_node}
+        update["messages"] = [
+            AIMessage(
+                content=(
+                    f"已把主考点改为「{kp.get('name') or kp.get('id')}」。"
+                    "我**没有自动重出**已有变式（不擅自烧 token）——如需据新考点重生这些变式，"
+                    "请点「重生」；若是改错了，点「撤销改考点」或把主考点改回原值即可（变式都还在）。"
+                )
+            )
+        ]
+        return update, it, None
+
     if rclass == "hard_anchor":
-        # 🔴 缺口7·硬锚【主考点/年级】改 = 解冻 + 重锚（立即，走既有 patch/classify 路径）：
+        # 🔴 缺口7·硬锚【年级】改 = 解冻 + 重锚（立即，走既有 patch/classify 路径）：
         #   清 items + mother_confirmed=False + facts_locked=False → after_patch/after_classify
         #   触发重锚重造。不进 dirty 攒批（与软重生维分路）。
         #   ⚠ 注意：硬锚立即重锚是「整组重出」语义，本道的 manual 改动已写进 analysis/dna 留痕，
         #   classify 会按新锚重抽 → 此处不保留旧 items。
+        #   ⚠ BUG-01 只拆「改主考点」的级联（见上分支）；年级改通常意味着学段/进度变 = 整组失效，
+        #     语义上确实该重锚，故年级保持立即解冻重锚（用户本次只要求主考点不级联）。
         if len(audit) > _audit_n0:
             update["facts_audit"] = audit
         update["items"] = []

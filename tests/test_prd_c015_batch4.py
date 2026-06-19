@@ -170,17 +170,21 @@ def test_scene_soft_regen_marks_dirty(monkeypatch):
 # ===========================================================================
 
 
-def test_hard_anchor_main_kp_unfreezes_and_clears_items(monkeypatch):
+def test_hard_anchor_main_kp_marks_dirty_not_clears_items(monkeypatch):
+    # 🔴 BUG-01（2026-06-19）·改主考点「不强制重出、可回退」（旧名 *_unfreezes_and_clears_items，
+    #   旧行为=清 items 立即整组重出，已废）：
+    #   ① 不清 items（变式都还在）；② 不解冻；③ 下游变式标 dirty + 母题脏（点「重生」才据新考点重出）；
+    #   ④ 旧考点快照外发可回退。
     _no_llm(monkeypatch)
     state = _state([{"stem": "q1"}, {"stem": "q2"}])
     update, _i, err = edit_dna_state(state, 1, "main_kp", {"code": "30710202", "name": "二元一次方程"})
     assert err is None
-    # 硬锚改 = 立即解冻重锚：清 items + mother_confirmed=False + facts_locked=False
-    assert update["items"] == []
-    assert update["mother_confirmed"] is False
-    assert update["facts_locked"] is False
-    # 不进 dirty（攒批语义不适用硬锚）
-    assert "regen_dirty" not in update or not update.get("regen_dirty")
+    assert len(update["items"]) == 2  # 不清
+    assert all(it.get("dna_dirty") for it in update["items"])  # 下游变式标脏待重生
+    assert update["mother_dna"]["dirty"] is True
+    assert "mother_confirmed" not in update  # 不解冻 → 不触发自动重锚重出
+    assert "facts_locked" not in update
+    assert update["main_kp_prev"]["main_kp"] == {"id": "30710101", "name": "一元一次方程"}  # 可回退
 
 
 def test_hard_anchor_grade_unfreezes(monkeypatch):

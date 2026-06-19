@@ -90,12 +90,21 @@ def test_edit_dna_main_kp_updates_dna_and_analysis(monkeypatch):
     assert kp["value"] == "二元一次方程"
     assert kp["anchored"] == {"id": "30710202", "code": "30710202", "name": "二元一次方程"}
     assert kp["confidence"] == 1.0  # 老师手动锚定最高优先
-    # 🔴 PRD-C-015 批4·缺口7·硬锚【主考点】改 = 立即解冻重锚（走既有 patch 路径）：
-    #   清 items + mother_confirmed=False + facts_locked=False（不进 dirty 攒批）。
-    assert update["items"] == []
-    assert update["mother_confirmed"] is False
-    assert update["facts_locked"] is False
-    # BO dim1 落到新 kp（重锚后下一轮 classify→generate 据新 analysis.kp 出题）
+    # 🔴 BUG-01（2026-06-19）·改主考点「不强制重出、可回退」（拆掉旧「改主考点=清 items 整组重出」级联）：
+    #   ① 不清 items（变式都还在）；② 不解冻 mother_confirmed/facts_locked（不触发自动重锚重出）；
+    #   ③ 下游变式标 dna_dirty + 母题脏（点「重生」才据新考点重出，token 受控）；
+    #   ④ 旧考点快照 main_kp_prev 外发（FE「撤销改考点」用）。
+    assert update["items"] != []  # 旧行为是 []，BUG-01 后不清
+    assert len(update["items"]) == 1
+    assert update["items"][0].get("dna_dirty") is True  # 标脏待重生，不自动重出
+    assert update["mother_dna"]["dirty"] is True
+    assert "mother_confirmed" not in update  # 不解冻
+    assert "facts_locked" not in update
+    # 可回退：旧考点快照外发
+    assert update["main_kp_prev"]["main_kp"] == {"id": "30710101", "name": "一元一次方程"}
+    # 给老师的引导消息（说清「没自动重出 / 撤销可回退」）
+    assert update.get("messages")
+    # BO dim1 落到新 kp（老师点「重生」后据新 analysis.kp 出题）
     facts = _mother_facts({**state, **update})
     assert facts["dim1_kp_id"] == "30710202"
 
