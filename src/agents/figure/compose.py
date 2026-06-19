@@ -188,8 +188,13 @@ async def compose_variant_figure(
         #   纯代数无几何意义题（无图形关键词）→ 不主动催（避免对不需配图的题误提示）。
         cmds = (data or {}).get("commands", []) if isinstance(data, dict) else []
         want_fig = _has_keyword(stem, _FIGURE_KEYWORDS) or _has_keyword(answer, _FIGURE_KEYWORDS)
+        # 🔴 PRD-A-018 RED#1：needs_figure 真值 = 本题「本应有图」(含几何关键词 want_fig)。
+        #   纯代数/无几何意义题 opus 判「不适合配图」→ want_fig=False → needs_figure=False
+        #   （= 无需配图，非「待补图」）。FE 据此把该题配图灯跳过(done)、不污染配图节点成「异常·待补图」、
+        #   不挂住题组就绪（治 A-018 C2 把就绪绑配图后纯代数题就绪被假阳性配图卡死的回归）。
+        #   仅 want_fig=True（本应有图却没画出）才 needs_figure=True + need_user_desc 引导补描述。
         out: dict[str, Any] = {
-            "item_id": item_id, "ok": False, "needs_figure": True,
+            "item_id": item_id, "ok": False, "needs_figure": bool(want_fig),
             "reason": "opus 判定不适合配图或未给命令", "commands": cmds, "warnings": [],
         }
         if want_fig:
