@@ -527,6 +527,16 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         "mother_rejected": False,
         "confirmed_chapter_id": None,
         "confirmed_grade_book_id": None,
+        # 🔴 M4/PRD-A-018·新母题入口必清旧轮残留 items（与 mother_dna 被本轮覆盖对齐）：
+        #   同一 thread（会话级，贴新图不换 thread——PF-1 实测）先对图A 出过变式（items 非空）后直接贴图B
+        #   时，旧实现 base_out 从不清 items → 点「开始举一反三」时 route_entry 守卫 `not items` 为 False →
+        #   落 parse 把「开始」当编辑指令乱分诊 → 新母题永不出变式。此处统一清，所有入口分支（needs_confirm/
+        #   空池 early/not-confirmed picker/confirmed）spread base_out 都吃到。连带清手排标记/剔除叙事/
+        #   改主考点撤销快照（都属上一母题轮的残留，不得泄漏到新母题）。
+        "items": [],
+        "manual_order": False,
+        "dropped_notes": [],
+        "main_kp_prev": None,
         # B1a：暂存 opus 一把判定（has_figure 给 B3 切图判定；entry_opus 给 confirm-resume 兜底）
         "mother_has_figure": has_figure,
         "entry_decision": decision,
@@ -658,8 +668,58 @@ async def _finalize_high_conf(
         analysis.setdefault("_anchor_error", "知识点叶子池不可用（库未起/年级未识别）")
         V._emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
         V._emit_stage("knobs", "解析配方", "warn", "待老师确认母题后再定配方")
-        early: dict[str, Any] = {**base_out, "analysis": analysis, "mother_confirmed": False, "messages": []}
+        # 🔴 M3/PRD-A-018·高置信 + 叶子池空 = 静默死态修复：对齐 not-confirmed picker 分支（769-802）。
+        #   旧实现这里只发 mother_confirm 数据、不置 awaiting_mother_confirm → BE 路由态没置 → 下一轮老师
+        #   打字补年级/章时 route_entry（awaiting_mother_confirm=False + items 空 + mother_dna 空）落兜底
+        #   'ask' → 催「请先贴图」吞掉老师的话、整道母题丢失。修法：① 置 awaiting_mother_confirm=True +
+        #   emit need_confirm（FE 弹章 picker），让老师经「确认年级章/文本纠正」前进；② 把已解出的 opus 富文本
+        #   /DNA 回填进 mother_dna（即便锚不到叶子，stem/answer/skeleton/dna 仍保留供 confirm 后 classify
+        #   走 parse/重锚复用首解，不白丢这次解题）。
+        early_dna = dict(state.get("mother_dna") or {})
+        _rich = entry.get("richText") or {}
+        if isinstance(_rich, dict):
+            if _rich.get("stem"):
+                early_dna["stem"] = V._sanitize_rich_text(_rich.get("stem"))
+            if _rich.get("answer"):
+                early_dna["answer"] = V._sanitize_rich_text(_rich.get("answer"))
+            if _rich.get("analysis"):
+                early_dna["analysis"] = V._sanitize_rich_text(_rich.get("analysis"))
+        _early_dna_obj = mother_opus.opus_to_dna(entry)
+        _early_skeleton = _early_dna_obj.get("skeleton") or []
+        if _early_skeleton:
+            early_dna["solution_skeleton"] = V.join_skeleton(_early_skeleton)
+        _early_solved = entry.get("solvedAnswer")
+        if _early_solved:
+            early_dna["solved_answer"] = V._sanitize_rich_text(_early_solved)
+        early_dna["dna"] = _early_dna_obj
+        early_dna["mother_solve_source"] = "opus"
+        picker_payload = {
+            "grade_book": {"id": grade_code or "", "name": decision.get("grade_book") or ""},
+            "chapter": {"id": "", "name": str(decision.get("chapter") or "").strip()},
+            "grade_candidates": [{"id": grade_code or "", "name": decision.get("grade_book")}]
+                                if decision.get("grade_book") else [],
+            "chapter_candidates": [{"id": "", "name": n}
+                                   for n in (decision.get("chapter_candidates") or []) if n],
+            "confidence": float(decision.get("confidence") or 0.0),
+        }
+        V._emit_need_confirm(picker_payload)
+        early: dict[str, Any] = {
+            **base_out,
+            "analysis": analysis,
+            "mother_dna": early_dna,
+            "mother_confirmed": False,
+            "facts_locked": False,
+            "awaiting_mother_confirm": True,   # resume → route_entry → classify 重锚（带确认章），不再死态
+            "awaiting_mother_review": False,    # 清 stale review，防「开始举一反三」误路由回 parse
+            "messages": [AIMessage(content=(
+                "我读出了这道母题，但暂时没能连到题库的知识点章节（库可能没起，或年级没识别出来）。"
+                "**请确认母题所属的年级与章**，我再据此锚定考点、出变式（确认无误回复「确认」，"
+                "需要修改请直接告诉我正确的年级/章）。"
+            ))],
+        }
         early["mother_confirm"] = V.build_mother_confirm({**state, **early})
+        V._emit_mother_card({**state, **early})  # 母题卡仍先出（卡出了但未定死，等老师定章）
+        V._emit_figure_stage({**state, **early})
         return early
 
     # opus 富文本回填 mother_dna（题面/答案/解析）

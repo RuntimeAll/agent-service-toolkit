@@ -93,7 +93,8 @@ def _no_llm(monkeypatch):
 
 
 def test_regen_class_mapping_covers_all_four_streams():
-    assert regen_class_of("main_kp") == "hard_anchor"
+    # 🔴 A-2/契约C4（PRD-A-018）：main_kp 由 hard_anchor → soft_regen（单一真相，与 FE 逐字一致）。
+    assert regen_class_of("main_kp") == "soft_regen"
     assert regen_class_of("grade") == "hard_anchor"
     assert regen_class_of("qtype") == "soft_regen"
     assert regen_class_of("difficulty") == "soft_regen"
@@ -170,11 +171,11 @@ def test_scene_soft_regen_marks_dirty(monkeypatch):
 # ===========================================================================
 
 
-def test_hard_anchor_main_kp_marks_dirty_not_clears_items(monkeypatch):
-    # 🔴 BUG-01（2026-06-19）·改主考点「不强制重出、可回退」（旧名 *_unfreezes_and_clears_items，
-    #   旧行为=清 items 立即整组重出，已废）：
+def test_main_kp_soft_regen_marks_dirty_not_clears_items(monkeypatch):
+    # 🔴 A-2/契约C4（PRD-A-018）：main_kp 现为 soft_regen 母题级守恒维（不再 hard_anchor 特例分支）。
+    #   承接 BUG-01（2026-06-19）·改主考点「不强制重出、可回退」：
     #   ① 不清 items（变式都还在）；② 不解冻；③ 下游变式标 dirty + 母题脏（点「重生」才据新考点重出）；
-    #   ④ 旧考点快照外发可回退。
+    #   ④ 旧考点快照外发可回退。行为不变，只是路由由常量直驱、无 hard_anchor 特判。
     _no_llm(monkeypatch)
     state = _state([{"stem": "q1"}, {"stem": "q2"}])
     update, _i, err = edit_dna_state(state, 1, "main_kp", {"code": "30710202", "name": "二元一次方程"})

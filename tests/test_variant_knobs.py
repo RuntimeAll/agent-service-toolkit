@@ -72,9 +72,14 @@ def test_normalize_alias_duplicates_merge_and_unknown_dropped():
     assert "qtype_dist" not in out2
 
 
-def test_normalize_dist_total_wins_over_conflicting_count():
+def test_normalize_explicit_count_gt_dist_keeps_count_partial():
+    # 🔴 A-1/M6（PRD-A-018）态②：老师显式 count > sum(dist) → 以 count 为准（不压成 dist 总和），
+    #   dist 当部分约束（各题型最小值，缺额其余题型自由补）。
     out = normalize_knobs({"count": 5, "qtype_dist": {"选择": 2, "填空": 1}})
-    assert out["count"] == 3  # dist total is authoritative
+    assert out["count"] == 5  # 显式 count 为准（不再被 dist 总和吞成 3）
+    assert out["qtype_partial"] is True
+    assert out["qtype_dist"] == {"选择": 2, "填空": 1}
+    assert "按 5 道出" in out["note"]
 
 
 def test_normalize_all_empty_returns_empty_dict():
@@ -110,14 +115,40 @@ def test_normalize_dist_total_clamped_to_count_max_with_visible_note():
     assert sum(out2["qtype_dist"].values()) == 8
 
 
-def test_normalize_count_dist_conflict_is_externalized_in_note():
-    """「出5道, 2选择1填空」: dist total wins, but the adjustment must be visible."""
-    out = normalize_knobs({"count": 5, "qtype_dist": {"选择": 2, "填空": 1}})
+def test_normalize_count_eq_dist_no_adjustment_note():
+    """态③ count==sum(dist)：无冲突 → 无调整 note，dist 作完整配比（非 partial）。"""
+    out = normalize_knobs({"count": 3, "qtype_dist": {"选择": 2, "填空": 1}})
     assert out["count"] == 3
-    assert "从 5 调整为 3" in out["note"]
-    # no conflict -> no adjustment note
-    out2 = normalize_knobs({"count": 3, "qtype_dist": {"选择": 2, "填空": 1}})
-    assert "调整" not in out2.get("note", "")
+    assert "调整" not in out.get("note", "")
+    assert not out.get("qtype_partial")
+
+
+def test_normalize_single_qtype_no_count_falls_back_to_default():
+    """🔴 A-1/M6 态①：单题型隐含1（『改成选择题』→ {选择:1}）且老师没显式给 count →
+    不压成 1 道，回落默认 3 道，把单题型作约束铺满 3 道（dist 改写成 {选择: 3}）。"""
+    out = normalize_knobs({"qtype_dist": {"选择": 1}})
+    assert out["count"] == 3  # 不被压成 1 道
+    assert out["qtype_dist"] == {"选择": 3}  # 单题型铺满默认道数
+    assert not out.get("qtype_partial")  # 完整配比（全 3 道都是选择）
+    # 含别名归一：『改成证明题』→ {解答:1} 同样回落 3 道全解答
+    out2 = normalize_knobs({"qtype_dist": {"证明题": 1}})
+    assert out2["count"] == 3 and out2["qtype_dist"] == {"解答": 3}
+
+
+def test_normalize_single_qtype_with_explicit_count_not_inflated():
+    """态②边界：单题型但老师显式给了 count（『出2道选择题』→ count=2, {选择:1}）→
+    count 为准（2）、partial（dist 当最小约束），不回落默认 3。"""
+    out = normalize_knobs({"count": 2, "qtype_dist": {"选择": 1}})
+    assert out["count"] == 2
+    assert out.get("qtype_partial") is True
+    assert out["qtype_dist"] == {"选择": 1}
+
+
+def test_normalize_two_qtypes_sum_gt_one_no_count_uses_dist_total():
+    """态③ count 缺失但 dist 非单题型隐含1（{选择:2,填空:1} sum=3）→ dist 总和为准（旧行为）。"""
+    out = normalize_knobs({"qtype_dist": {"选择": 2, "填空": 1}})
+    assert out["count"] == 3
+    assert not out.get("qtype_partial")
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +175,18 @@ def test_shape_check_qtype_dist_mismatch():
     knobs = {"count": 2, "qtype_dist": {"选择": 1, "填空": 1}}
     defects = shape_check(_items(("选择", 3), ("解答", 3)), knobs)
     assert any("题型分布不符" in d for d in defects)
+
+
+def test_shape_check_partial_dist_uses_minimum_not_exact():
+    """🔴 A-1/M6 态②：qtype_partial 时 dist 是部分约束（≥），缺额其余题型自由 → 不算缺陷。"""
+    knobs = {"count": 5, "qtype_dist": {"选择": 2, "填空": 1}, "qtype_partial": True}
+    # 实出 2选择1填空 + 2 道自由解答 = 满足「至少 2选择1填空」→ 无缺陷
+    items = _items(("选择", 3), ("选择", 3), ("填空", 3), ("解答", 4), ("解答", 4))
+    assert shape_check(items, knobs) == []
+    # 实出只 1 道选择（< 最小 2）→ 缺陷
+    bad = _items(("选择", 3), ("填空", 3), ("解答", 4), ("解答", 4), ("解答", 4))
+    defects = shape_check(bad, knobs)
+    assert any("题型分布不符" in d and "≥" in d for d in defects)
 
 
 def test_shape_check_qtype_dist_normalizes_item_aliases():

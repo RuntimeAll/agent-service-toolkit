@@ -167,7 +167,8 @@ def test_confirm_异常与没定死合并一道():
 
 
 def test_regen_class_四分流映射():
-    assert REGEN_CLASS["main_kp"] == "hard_anchor"
+    # 🔴 A-2/契约C4（PRD-A-018）：main_kp 由 hard_anchor → soft_regen（单一真相，与 FE 逐字一致）。
+    assert REGEN_CLASS["main_kp"] == "soft_regen"
     assert REGEN_CLASS["grade"] == "hard_anchor"
     assert REGEN_CLASS["qtype"] == "soft_regen"
     assert REGEN_CLASS["difficulty"] == "soft_regen"

@@ -244,10 +244,12 @@ def test_classify_emits_done_with_kp_and_grade(monkeypatch):
     # 🔴 改动2：首灯 running 已由 analyze 点亮 → classify 不重发 running（防绿→running 回闪），
     #   只发首灯终态 done；并补发次灯「解析配方」done（带道数，knobs 缺 → 默认配方文案）。
     # 🔴 BUG-02（2026-06-19）：classify 末尾经 _emit_figure_stage 补发「母题切图」done（纯文本母题）。
+    # 🔴 C2/A-11（PRD-A-018）：纯文本母题的「母题切图」跳过态改发 key=figure-mother（FE 唯一切图灯 key），
+    #   detail「无图可切」，不再发裸 figure「无需切图」（避免压过宿主真实 figure-mother 切图帧）。
     assert calls == [
         ("classify", "锚定考点", "done", "考点「一元一次方程」·年级「七年级上学期」"),
         ("knobs", "解析配方", "done", "未指定，走默认配方（3 道 = 2 普通 + 1 难）"),
-        ("figure", "母题切图", "done", "纯文本母题，无需切图"),
+        ("figure-mother", "母题切图", "done", "纯文本母题，无图可切"),
     ]
 
 
@@ -294,7 +296,9 @@ def test_generate_emits_knobs_summary_and_running_done_counts(monkeypatch):
     )
     out = asyncio.run(generate(state, {}))
     assert len(out["items"]) == 2
+    # 🔴 C3/A-24（PRD-A-018）：generate 起跑补发一帧 review=done（确认母题善终），先于 knobs 帧。
     assert calls == [
+        ("review", "确认母题", "done", "母题已确认，开始生成变式"),
         ("knobs", "解析配方", "done", "2 道"),
         ("generate", "生成题目", "running", "2 道"),
         ("generate", "生成题目", "done", "2 道"),
@@ -310,8 +314,10 @@ def test_generate_without_teacher_text_reports_default_recipe(monkeypatch):
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
     state = dict(_FACTS_STATE, messages=[HumanMessage(content="https://o.ss/q.png")])
     asyncio.run(generate(state, {}))
-    assert calls[0] == ("knobs", "解析配方", "done", "未指定，走默认配方（3 道 = 2 普通 + 1 难）")
-    assert calls[1:] == [
+    # 🔴 C3/A-24（PRD-A-018）：generate 起跑补发 review=done，先于 knobs 帧。
+    assert calls[0] == ("review", "确认母题", "done", "母题已确认，开始生成变式")
+    assert calls[1] == ("knobs", "解析配方", "done", "未指定，走默认配方（3 道 = 2 普通 + 1 难）")
+    assert calls[2:] == [
         ("generate", "生成题目", "running", "3 道"),
         ("generate", "生成题目", "done", "3 道"),
     ]

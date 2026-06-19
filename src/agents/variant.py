@@ -370,14 +370,18 @@ def _fact_edit(
 #    + 守恒维事实源冻结 setter（_dna_fact_edit）
 # ===========================================================================
 # DNA 改→重生四分流（regen_class）：前后端共用常量、不逐题落库（§10.1(c)）。
-#   hard_anchor  【主考点/年级】→ 改 = 立即解冻重锚（不进 dirty，缺口7）
-#   soft_regen   【题型/难度/考察类型/场景】→ 改 = 标 dirty，点「重生」_regen_once 重出
+#   hard_anchor  【年级】→ 改 = 立即解冻重锚（不进 dirty，缺口7）
+#   soft_regen   【主考点/题型/难度/考察类型/场景】→ 改 = 标 dirty，点「重生」_regen_once 重出
+#                （main_kp 见 A-2/契约C4：母题级守恒维，改 = 标全组 dirty + 可回退，不自动重出）
 #   rewrite_solve【解法骨架/models】→ 改 = 重写解析过闸B，置 dirty 直到重写完（D-merge9）
 #   meta         【标签/副考点】→ 改 = 只标注即时生效，不进 dirty
 # 🔴 维名用 edit-dna 契约维 key（main_kp/grade/qtype/difficulty/exam_type/scene/skeleton/
 #    models/tags/secondary_kps）。批1 仅建映射；批4 据此驱动 dirty/重生。
 REGEN_CLASS: dict[str, str] = {
-    "main_kp": "hard_anchor",
+    # 🔴 A-2/契约C4（PRD-A-018）：main_kp 由 hard_anchor → soft_regen（单一真相，前后端逐字一致）。
+    #   改主考点 = 标 dirty + await 显式重生 + 可回退（与其余 soft_regen 维一致），不再走「清 items
+    #   立即整组重锚」的 hard_anchor 语义，也不靠 BE 特判补丁（旧 main_kp 特例分支已删）。
+    "main_kp": "soft_regen",
     "grade": "hard_anchor",
     "qtype": "soft_regen",
     "difficulty": "soft_regen",
@@ -1031,12 +1035,35 @@ def _latest_ai_text(messages: list[BaseMessage]) -> str:
 
 
 _URL_RE = re.compile(r"https?://[^\s)>'\"]+", re.IGNORECASE)
+# 🔴 F14/PRD-A-018：route_entry 用 _extract_image_url 当「跨轮新图=新母题」优先级最高的判据。
+#   若裸认任意 http(s) 串，老师在编辑指令里夹一条普通参考链接（『第2题参考 https://example.com 改难点』）
+#   就会被劫持成新母题、整组题被清。收紧成只认**图片 URL**：① 路径以图片后缀结尾（允许 ?query），
+#   或 ② 来自图床白名单域名（OSS/对象存储——这些 URL 常无扩展名却是题图）。普通参考链接（无图片后缀、
+#   非图床域名）不再被当题图，落 parse 让老师正常编辑，不清组。
+_IMG_SUFFIX_RE = re.compile(
+    r"https?://[^\s)>'\"]+\.(?:png|jpg|jpeg|webp)(?:\?[^\s)>'\"]*)?",
+    re.IGNORECASE,
+)
+# 图床/对象存储域名白名单（无扩展名的题图 URL 兜底，如 OSS 签名直链）。新增图床在此加。
+_IMG_HOST_HINTS = ("aliyuncs.com", "myqcloud.com", "qiniucdn.com", "oss")
 
 
 def _extract_image_url(text: str) -> str | None:
-    """从用户消息抽 OSS 题图 URL（MVP 贴 URL，file_uploader future）。"""
-    m = _URL_RE.search(text or "")
-    return m.group(0) if m else None
+    """从用户消息抽 OSS 题图 URL（MVP 贴 URL，file_uploader future）。
+
+    🔴 F14：只认图片 URL —— 图片后缀（.png/.jpg/.jpeg/.webp，允许 ?query）优先；其次图床白名单域名。
+    普通 http 链接（编辑指令里夹的参考链接）一律不认，避免被路由劫持成新母题清整组。
+    """
+    t = text or ""
+    m = _IMG_SUFFIX_RE.search(t)
+    if m:
+        return m.group(0)
+    # 无图片后缀 → 仅当 URL 域名命中图床白名单才认（OSS 签名直链常无扩展名）。
+    for cand in _URL_RE.findall(t):
+        host = cand.split("//", 1)[-1].split("/", 1)[0].lower()
+        if any(hint in host for hint in _IMG_HOST_HINTS):
+            return cand
+    return None
 
 
 def _strip_urls(text: str) -> str:
@@ -1565,16 +1592,22 @@ def _emit_mother_card(state: VariantState) -> None:
 
 def _emit_figure_stage(state: VariantState) -> None:
     """🔴 BUG-01/02（2026-06-19）·「母题切图」节点专帧（key="figure"）：母题就绪、figure 判定之后发。
-    判定纯文本 vs 带图复用既有 mother_has_figure（opus 一把判定，不另判）：
-      - 纯文本/无图母题 → done「无需切图·纯文本」（= 不适用即完成，不让前端恒「待完成」）。
-      - 带图母题 → done「已切出母题图形」（FE 据 mother_has_figure 自动调 crop_mother_figure 实际切图，
-        切图失败属 infra 不挂起本节点——本节点只表「母题侧已判定有图、可切」，不阻塞流程）。
-    🔴 独立于 classify 三锚帧（不与「锚定考点」共 key），让三节点（读图锚定/母题切图/确认母题）各有专 key。
-    同 _emit_stage 双层静默吞：无 runtime context → no-op，绝不炸节点。"""
+
+    🔴 C2/A-11（PRD-A-018）·figure key 三义拆开（治标·不入 graph）：母题切图灯的**唯一真值 key =
+       `figure-mother`**，由宿主（FE）在真实调 crop_mother_figure 切图后 push。本图内节点**不得**抢发
+       一帧 done 压过真实切图：
+      - 带图母题（mother_has_figure=True）：真切图还没发生（那是宿主 POST crop 的事）→ **不发** done
+        「已切出」（旧实现这帧是假完成，会让状态条母题切图灯先绿、压过随后宿主推的 figure-mother 真值）。
+        本节点只在 state 里有 mother_has_figure 钩子，FE 据它自动发起切图，灯由 figure-mother 帧驱动。
+      - 纯文本/无图母题（mother_has_figure=False）：确实无图可切 → 发 STAGE_DONE 跳过态，且落在
+        `figure-mother` key（与 FE 唯一切图灯 key 对齐），detail「无图可切」。**绝不**在 mother_has_figure
+        误判 false 时显「无需切图」压过真实切图——故只在确无图钩子时发跳过，发于唯一 key 不再产生矛盾帧。
+    🔴 独立于 classify 三锚帧（不与「锚定考点」共 key）。同 _emit_stage 双层静默吞：无 runtime context → no-op。"""
     if bool(state.get("mother_has_figure")):
-        _emit_stage("figure", "母题切图", STAGE_DONE, "母题含图形，已切出母题图供变式参照")
-    else:
-        _emit_stage("figure", "母题切图", STAGE_DONE, "纯文本母题，无需切图")
+        # 带图 → 切图是宿主真活，本节点不抢发假 done；灯等宿主 figure-mother 真值帧。
+        return
+    # 纯文本 → 无图可切，发跳过态于唯一切图灯 key（figure-mother），不压真实切图。
+    _emit_stage("figure-mother", "母题切图", STAGE_DONE, "纯文本母题，无图可切")
 
 
 # ---------------------------------------------------------------------------
@@ -1789,6 +1822,12 @@ async def analyze(state: VariantState, config: RunnableConfig) -> VariantState:
         "mother_rejected": False,
         "confirmed_chapter_id": None,
         "confirmed_grade_book_id": None,
+        # 🔴 M4/PRD-A-018·退役 analyze 入口同步清旧轮 items（与 mother_opus_entry.base_out 对齐）：
+        #   回退旧入口时同 thread 第二张图也不得带旧变式，否则「开始举一反三」误落 parse 不出题。
+        "items": [],
+        "manual_order": False,
+        "dropped_notes": [],
+        "main_kp_prev": None,
         "messages": [],
     }
 
@@ -3037,12 +3076,41 @@ def normalize_knobs(parsed: Any) -> dict[str, Any]:
                 )
                 dist = clipped
                 total = KNOBS_COUNT_MAX
-            out["qtype_dist"] = dist
-            if out.get("count") != total:
-                if out.get("count") is not None:
-                    # count 与配比总和冲突 → dist 为准，但调整必须外显（不静默吞老师的数）
-                    note_bits.append(f"按题型配比把数量从 {out['count']} 调整为 {total}")
-                out["count"] = total  # dist 总和为准（含 count 缺失时补齐）
+            # 🔴 A-1/M6：dist 总和不再无条件压 count。三态分流（cnt = 老师显式给的 count）：
+            #   ① 单题型隐含1（total==1 且唯一键）且老师没显式给 count
+            #      → 不压成1道，回落默认道数，把该题型作约束施加到全部默认道数
+            #        （dist 改写成 {该题型: 默认道数}，shape_check 仍逐项相等可过）。
+            #   ② 老师显式 count > sum(dist)
+            #      → 以 count 为准、dist 当"部分约束"（各题型最小值，缺额其余题型自由）。
+            #        标 qtype_partial，shape_check 用 ≥ 判、generate 提示缺额自由。
+            #   ③ 其余（count 缺失但 dist 非单题型隐含1 / count==sum(dist)）
+            #      → dist 总和为准（保持旧行为）。
+            default_count = DEFAULT_SHAPE["normal"] + DEFAULT_SHAPE["hard"]
+            single_implicit_one = total == 1 and len(dist) == 1
+            if cnt is None and single_implicit_one:
+                # 态①：单题型无显式数量 → 不压1道，回落默认并把题型铺满默认道数
+                only_qt = next(iter(dist.keys()))
+                dist = {only_qt: default_count}
+                out["qtype_dist"] = dist
+                out["count"] = default_count
+            elif cnt is not None and out.get("count", 0) > total:
+                # 态②：显式 count 大于配比总和 → count 为准，dist 当部分约束
+                out["qtype_dist"] = dist
+                out["qtype_partial"] = True
+                note_bits.append(
+                    f"按 {out['count']} 道出，其中 "
+                    + "、".join(f"{k}×{v}" for k, v in dist.items())
+                    + "，缺额由其余题型自由补"
+                )
+                # out['count'] 保持老师显式值（已在 cnt 钳制时写入）
+            else:
+                # 态③：dist 总和为准（含 count 缺失非单题型隐含1、或 count==sum(dist)）
+                out["qtype_dist"] = dist
+                if out.get("count") != total:
+                    if out.get("count") is not None:
+                        # count 与配比总和冲突 → dist 为准，但调整必须外显（不静默吞老师的数）
+                        note_bits.append(f"按题型配比把数量从 {out['count']} 调整为 {total}")
+                    out["count"] = total  # dist 总和为准（含 count 缺失时补齐）
 
     plan = str(parsed.get("difficulty_plan") or "").strip()
     if plan and plan.lower() != "default":
@@ -3090,7 +3158,13 @@ def recipe_from_knobs(knobs: dict[str, Any] | None, mother_difficulty: Any = Non
     lines = [f"- 共 {n} 道（必须恰好 {n} 道，不多不少）。"]
     if dist:
         dist_s = "、".join(f"{k}×{v}" for k, v in dist.items())
-        lines.append(f"- 题型配比：{dist_s}（每道题的 qtype 严格按此配比给）。")
+        if knobs.get("qtype_partial"):
+            # 🔴 A-1/M6 态②：部分约束 —— 这些题型是最低道数，缺额其余题型自由补
+            lines.append(
+                f"- 题型要求（至少）：{dist_s}；其余 {n - sum(dist.values())} 道题型自由（选择/填空/解答均可）。"
+            )
+        else:
+            lines.append(f"- 题型配比：{dist_s}（每道题的 qtype 严格按此配比给）。")
     if plan == PLAN_INCREASING:
         expected = [min(md + i, DIFFICULTY_CAP) for i in range(n)]
         d_s = ",".join(str(d) for d in expected)
@@ -3142,12 +3216,19 @@ def shape_check(
 
     dist = knobs.get("qtype_dist") or {}
     if dist:
+        # 🔴 A-1/M6 态②：qtype_partial 时 dist 是"部分约束"（各题型最小值），用 ≥ 判而非逐项相等。
+        partial = bool(knobs.get("qtype_partial"))
         got: dict[str, int] = {}
         for it in items:
             qt = _QTYPE_ALIAS.get(str(it.get("qtype") or "").strip(), str(it.get("qtype") or "").strip())
             got[qt] = got.get(qt, 0) + 1
-        if any(got.get(k, 0) != v for k, v in dist.items()):
-            want_s = "、".join(f"{k}×{v}" for k, v in dist.items())
+        if partial:
+            bad = any(got.get(k, 0) < v for k, v in dist.items())
+        else:
+            bad = any(got.get(k, 0) != v for k, v in dist.items())
+        if bad:
+            sep = "≥" if partial else "×"
+            want_s = "、".join(f"{k}{sep}{v}" for k, v in dist.items())
             got_s = "、".join(f"{k}×{v}" for k, v in got.items()) or "(空)"
             defects.append(f"题型分布不符：要求 {want_s}，实出 {got_s}")
 
@@ -3405,6 +3486,12 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
                 )
             ]
         }
+
+    # 🔴 C3/A-24（PRD-A-018）：进入出题（generate 起跑 / resume 经 route_entry 直奔 generate）时补发一帧
+    #   review=STAGE_DONE，让「确认母题」节点善终（之前停在 review=await 等老师点「开始」；老师点了进 generate
+    #   后若不补 done，定题三节点里「确认母题」永远停 await、状态条不收口）。await_mother_review 仍发 await
+    #   （variant.py:2495 不动）——那是「等老师确认」的暂停态；本帧是「老师已确认、开始出题」的善终态。
+    _emit_stage("review", "确认母题", STAGE_DONE, "母题已确认，开始生成变式")
 
     # 🔴 P13：出题轮入口重置预算（generate→gene_gate→solve_explain→assemble 同轮共享）。
     budget = _budget_bind(state, reset_limit=settings.VARIANT_BUDGET_GENERATE)
@@ -4576,7 +4663,12 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
                 }
             _format_item_stem(item)  # 题型模版规范（与 assemble 同口径，幂等）
             out.append(item)
-        _emit_stage("verify", "程序验算", "done", "待老师手动验算")
+        # 🔴 C1/A-10/M2（PRD-A-018）：手动模式（auto_verify=False，产品默认）下程序验算是「老师自选可选
+        #   旁挂步」，**不再发 done**（否则状态条把「程序验算」判完成绿，与每题 check.tier=pending 自相矛盾，
+        #   还会把验算挂进「题组就绪/全部完成」必经链）。改发未完成态 STAGE_AWAIT（中性·可选），detail
+        #   「待老师自选验算」。每题 check 仍 {verify:pending, tier:pending} 不变（FE 渲染「待验算」徽章 +
+        #   验算按钮）。FE 把「程序验算」从 coreDone/allDone 必经链摘出，题组就绪只依赖 generate+gene_gate(+真配图)。
+        _emit_stage("verify", "程序验算", STAGE_AWAIT, "待老师自选验算")
         return {"items": out, "dropped_notes": [], "llm_call_budget": budget, "messages": []}
 
     async def _run(i: int, it: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -5862,7 +5954,15 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
         "facts_locked": False,
         "facts_audit": audit,
         "pending": None,
-        "messages": [AIMessage(content="收到修正，我按新的年级/考点重锚并重出这组变式。")],
+        # 🔴 M5/PRD-A-018：patch 改 grade/kp 清 items 后，流程实际硬停在母题卡 review（B5 硬停闸，
+        #   after_patch→classify→gate_after_classify pinned→await_review），并不自动重出。旧文案承诺
+        #   「重出这组变式」与硬停语义打架（两气泡矛盾）。改为与 await_review 对齐：只说重锚完、母题卡已更新，
+        #   重出须老师确认无误后显式点「开始举一反三」。
+        "messages": [
+            AIMessage(
+                content="已按新的年级/考点重锚，母题卡已更新；确认无误后点「开始举一反三」重新生成变式。"
+            )
+        ],
     }
 
 
@@ -6554,17 +6654,17 @@ def edit_dna_state(
     it["from_edit"] = True
     it["check"] = {"tier": TIER_MANUAL}
 
-    if rclass == "hard_anchor" and field == "main_kp":
-        # 🔴 BUG-01（2026-06-19）·改主考点「不强制重出、可回退」（拆掉旧「改主考点=清 items 整组
-        #   重出」自动级联）：
-        #   旧行为：清 items + mother_confirmed=False + facts_locked=False → 立即整组重锚重出
-        #           （未经老师同意烧 token + 旧绑定不可回退）。
-        #   新行为：① 只更新主考点本身（main_kp/analysis.kp 已在上面写好）+ 守恒维留痕；
-        #           ② 不清 items、不解冻（mother_confirmed/facts_locked 不动）→ 不触发任何自动重出；
-        #           ③ 把下游变式标 mother_dirty（母题脏，进待重生集合）——要据新考点重生变式必须
-        #              老师**显式点「重生」**（regen_dirty_items 走 facts 的新 kp_name 重出，token 受控）；
-        #           ④ 可回退：旧考点快照（main_kp_prev）随 update 外发，FE 给「撤销改考点」入口；
-        #              即便不撤销，items 仍在（没被清），老师可直接把主考点改回旧值复原。
+    if field == "main_kp":
+        # 🔴 A-2/契约C4（PRD-A-018）：main_kp 已是 soft_regen 维（REGEN_CLASS·380），不再有
+        #   hard_anchor 特例分支。改主考点 = 母题级守恒维改 → 标全组 dirty + 可回退 + await 显式重生
+        #   （行为同其余 soft_regen 维，由常量直驱、无 BE 特判）。main_kp 是**母题级**维（全组变式共享
+        #   同一主考点），故标「整组 dirty」而非仅本道 mark_item_dirty——这是 main_kp 与普通题级
+        #   soft_regen 维（qtype/difficulty 仅本道）的唯一差别，属维度归属层级，非路由特判。
+        #   承接 BUG-01（2026-06-19）「改主考点不强制重出、可回退」语义：
+        #   ① 只更新主考点本身（main_kp/analysis.kp 已在上面写好）+ 守恒维留痕；
+        #   ② 不清 items、不解冻（mother_confirmed/facts_locked 不动）→ 不触发任何自动重出；
+        #   ③ 把下游变式标 mother_dirty（母题脏，进待重生集合）——据新考点重生须老师**显式点「重生」**；
+        #   ④ 可回退：旧考点快照（main_kp_prev）随 update 外发，FE 给「撤销改考点」入口。
         if len(audit) > _audit_n0:
             update["facts_audit"] = audit
         # 母题脏（致命① 拦入库）+ 下游变式标 dirty 不自动重出（点「重生」才据新考点重出）
