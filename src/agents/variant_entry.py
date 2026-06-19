@@ -33,6 +33,9 @@ from agents import dna_extract, model_anchor, mother_opus
 
 # D1：条件 confirm 触发阈值（置信 < 0.80 或 ≥2 强候选章 → 弹窗）。
 CONF_CONFIRM_THRESHOLD = 0.80
+# 🔴 BUG-04（2026-06-19）：读图置信「极低」阈值——低于它提示「图可能不适合做母题，建议换清晰图」。
+#   与 CONF_CONFIRM_THRESHOLD 分层：0.40~0.80 = 普通待确认；< 0.40 = 加换图建议（不改判定逻辑）。
+LOW_CONF_HINT_THRESHOLD = 0.40
 
 # 6 个浙教版教材册（与 analyze 旧闭集对齐，防口径漂移）。
 _GRADE_BOOKS = [
@@ -540,14 +543,28 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             "confidence": decision["confidence"],
         }
         V._emit_need_confirm(payload)
-        V._emit_stage("classify", "锚定考点", V.STAGE_AWAIT, "请确认年级与章后继续")
+        # 🔴 BUG-04（2026-06-19）·读图置信极低提示：confidence 极低（< LOW_CONF_HINT_THRESHOLD）时，
+        #   多半是图本身不清/非标准题图——状态条 detail + 母题确认气泡里明确建议换清晰图，别让老师在读不清
+        #   的图上白点「开始举一反三」。复用既有低置信分支加文案（不改判定逻辑、不新增闸）。
+        _very_low = decision["confidence"] < LOW_CONF_HINT_THRESHOLD
+        _await_detail = (
+            "这张图可能不够清晰·建议换张清晰的图，或确认年级与章后继续"
+            if _very_low else "请确认年级与章后继续"
+        )
+        V._emit_stage("classify", "锚定考点", V.STAGE_AWAIT, _await_detail)
         V._emit_stage("knobs", "解析配方", V.STAGE_AWAIT, "待确认年级章后定配方")
         grade_line = decision["grade_book"] or "（未判出，请手选）"
         chapter_line = decision["chapter"] or "（未判出，请手选）"
+        _low_conf_note = (
+            "\n\n⚠️ 我对这张图的读图把握很低——**可能这张图不太适合做母题**（拍得不清/不是标准题图）。"
+            "建议换一张更清晰的题目图，或先确认年级与章后再继续。"
+            if _very_low else ""
+        )
         body = (
             f"我读图判了一下母题范围（{decision['reason']}），**请确认年级册与章**再继续举一反三：\n\n"
             f"- 年级册：**{grade_line}**\n- 章：**{chapter_line}**\n\n"
             "确认无误请回复「确认」，需要修改请直接告诉我正确的年级/章。"
+            f"{_low_conf_note}"
         )
         # 暂存 opus 一把的 richText/solve/dna 供 classify-resume 复用（避免 confirm 后白丢这次解题）
         prov_dna = dict(state.get("mother_dna") or {})
@@ -781,6 +798,7 @@ async def _finalize_high_conf(
         }
         out_nc["mother_confirm"] = V.build_mother_confirm({**state, **out_nc})
         V._emit_mother_card({**state, **out_nc})  # 母题卡仍先出（卡出了但未定死，等老师定章）
+        V._emit_figure_stage({**state, **out_nc})  # 🔴 BUG-02：「母题切图」节点据 mother_has_figure 发 done
         return out_nc
 
     out: dict[str, Any] = {
@@ -794,4 +812,5 @@ async def _finalize_high_conf(
     }
     out["mother_confirm"] = V.build_mother_confirm({**state, **out})
     V._emit_mother_card({**state, **out})  # 母题卡先出（早于变式）
+    V._emit_figure_stage({**state, **out})  # 🔴 BUG-02：「母题切图」节点据 mother_has_figure 发 done
     return out

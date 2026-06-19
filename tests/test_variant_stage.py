@@ -243,9 +243,11 @@ def test_classify_emits_done_with_kp_and_grade(monkeypatch):
     assert out["mother_confirmed"] is True
     # 🔴 改动2：首灯 running 已由 analyze 点亮 → classify 不重发 running（防绿→running 回闪），
     #   只发首灯终态 done；并补发次灯「解析配方」done（带道数，knobs 缺 → 默认配方文案）。
+    # 🔴 BUG-02（2026-06-19）：classify 末尾经 _emit_figure_stage 补发「母题切图」done（纯文本母题）。
     assert calls == [
         ("classify", "锚定考点", "done", "考点「一元一次方程」·年级「七年级上学期」"),
         ("knobs", "解析配方", "done", "未指定，走默认配方（3 道 = 2 普通 + 1 难）"),
+        ("figure", "母题切图", "done", "纯文本母题，无需切图"),
     ]
 
 

@@ -189,6 +189,9 @@ GENE_GATE_SKIPPED = "skipped"  # 历史值（judge 退役后纯代码不再产�
 #   「开始举一反三」）不是告警，发 "await"（FE 配中性色 + "待确认/待开始"文案），不发 warn、
 #   不发"已中断"。带图打回(reject) 那个 warn 保留（真要拦）。FE 需对 "await" 配色。
 STAGE_AWAIT = "await"
+# 🔴 BUG-01/02（2026-06-19）·状态枚举常量化（避免散落字面量）：figure/review 两节点新增帧用它们。
+STAGE_RUNNING = "running"
+STAGE_DONE = "done"
 
 
 # 🔴 BUG-09（2026-06-19）：程序验算「何时跑」开关——auto_verify。
@@ -1543,6 +1546,20 @@ def _emit_mother_card(state: VariantState) -> None:
         pass
 
 
+def _emit_figure_stage(state: VariantState) -> None:
+    """🔴 BUG-01/02（2026-06-19）·「母题切图」节点专帧（key="figure"）：母题就绪、figure 判定之后发。
+    判定纯文本 vs 带图复用既有 mother_has_figure（opus 一把判定，不另判）：
+      - 纯文本/无图母题 → done「无需切图·纯文本」（= 不适用即完成，不让前端恒「待完成」）。
+      - 带图母题 → done「已切出母题图形」（FE 据 mother_has_figure 自动调 crop_mother_figure 实际切图，
+        切图失败属 infra 不挂起本节点——本节点只表「母题侧已判定有图、可切」，不阻塞流程）。
+    🔴 独立于 classify 三锚帧（不与「锚定考点」共 key），让三节点（读图锚定/母题切图/确认母题）各有专 key。
+    同 _emit_stage 双层静默吞：无 runtime context → no-op，绝不炸节点。"""
+    if bool(state.get("mother_has_figure")):
+        _emit_stage("figure", "母题切图", STAGE_DONE, "母题含图形，已切出母题图供变式参照")
+    else:
+        _emit_stage("figure", "母题切图", STAGE_DONE, "纯文本母题，无需切图")
+
+
 # ---------------------------------------------------------------------------
 # Router（入口分诊：登录? 有图? 在途母题? 库内母题跳 analyze/classify）
 # ---------------------------------------------------------------------------
@@ -1577,6 +1594,12 @@ def route_entry(
         cfg = (config or {}).get("configurable") or {}
         if cfg.get("start_variants") and state.get("mother_dna"):
             return "generate"
+        # 🔴 BUG-01 R1·#4：高置信 await_review 态下老师改章（FE 经 config 回传 confirmed_chapter_id）
+        #   → 也走重锚（同低置信 awaiting_mother_confirm 那条），重入 classify（_reanchor_reuse_first_solve
+        #   复用首解、重发 classify done 帧），别落 parse 僵住（旧实现只认低置信确认章，高置信改章静默回
+        #   parse、classify 帧不刷 = 状态条卡死）。confirmed_chapter_id 在 → 重锚优先于 parse 分诊。
+        if cfg.get("confirmed_chapter_id"):
+            return "classify"
         # 🔴 停在 review 但老师没点开始（发了别的话/改 DNA）→ 落 parse 分诊（既有母题纠正/
         #   答疑路径），**绝不**掉进下面「mother_confirmed → 自动 generate」把硬停闸架空。
         return "parse"
@@ -2201,6 +2224,8 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     #   渲染、且携全字段（stem/solved_answer/副考点 id/anchor 章 id/need_anchor_review）供入库。
     #   复用 mother_dna（绝不重调 opus）；{**state,**out} 让组卡读到本轮最终 mother_dna/confirmed_chapter_id。
     _emit_mother_card({**state, **out})
+    # 🔴 BUG-02：「母题切图」节点专帧（母题就绪、figure 判定后）——据 mother_has_figure 发 done。
+    _emit_figure_stage({**state, **out})
     return out
 
 
@@ -2321,11 +2346,22 @@ async def _reanchor_reuse_first_solve(
     grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
     _detail = f"考点「{kp_name}」·年级「{grade_name}」（复用母题首解，未重解）"
     if degraded:
-        _detail += "·锚定待人审"
+        # 🔴 BUG-03（2026-06-19）·锚定章冲突不静默放行：老师手选章里锚不到「{kp_name}」的真叶子
+        #   = 手选章与 AI 判主考点不符。仍按老师选定章范围出题（铁律④不卡死），但把冲突明确播出（detail +
+        #   AIMessage），不静默吞——让老师知道「按你选的章出，但主考点没落到该章叶子，请留意是否选错章」。
+        _detail += f"·⚠ 主考点「{kp_name}」未落到所选章的具体叶子（按所选章范围锚定·待人审）"
     _emit_stage("classify", "锚定考点", "done" if confirmed else "warn", _detail)
     recipe = knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
     _emit_stage("knobs", "解析配方", "done" if confirmed else "warn", recipe)
 
+    # 🔴 BUG-03：降级（手选章锚不到主考点叶子）→ 气泡里把冲突说清（不静默放行），但仍按所选章出题。
+    _conflict_msgs = (
+        [AIMessage(content=(
+            f"提示：主考点「{main_kp_name}」没能落到你选的章里的具体知识点叶子——可能这道母题的主考点"
+            f"不在该章。我先按你选定的章范围出变式（已标「锚定待人审」），若你觉得选错了章，直接告诉我正确的章。"
+        ))]
+        if degraded else []
+    )
     out: VariantState = {
         "analysis": analysis,
         "mother_dna": mother_dna,
@@ -2333,10 +2369,11 @@ async def _reanchor_reuse_first_solve(
         "facts_locked": bool(confirmed),
         "awaiting_mother_confirm": False,
         "confirmed_chapter_id": confirmed_chapter_id,
-        "messages": [],
+        "messages": _conflict_msgs,
     }
     out["mother_confirm"] = build_mother_confirm({**state, **out})
     _emit_mother_card({**state, **out})  # 母题卡仍先出（复用首解的全字段）
+    _emit_figure_stage({**state, **out})  # 🔴 BUG-02：「母题切图」节点据 mother_has_figure 发 done
     return out
 
 
@@ -2405,9 +2442,14 @@ async def await_mother_review(state: VariantState, config: RunnableConfig) -> Va
 
     🔴 阶段灯中性态（B5 问题1）：发 STAGE_AWAIT（"await"，非 warn / 非"已中断"），文案「母题已就绪，
        点『开始举一反三』生成变式」。这是正常暂停不是告警。
+    🔴 BUG-01（2026-06-19）·「确认母题」节点改由 review key 驱动，**不再复用 classify key**：
+       旧实现这里发 classify=await，把前面 finalize/classify 已发的 classify=done 覆盖回退成 await →
+       「读图锚定」节点倒退「需人工」（三节点自相矛盾根因）。现改发 review=await（专用 key），
+       classify=done 不被动；「确认母题」节点 FE 改读 review，不再读 knobs（knobs 仍发但语义=配方非确认）。
     🔴 不重调任何 LLM（母题卡已在 classify 备齐）；checkpointer 跨本次暂停持久 mother_dna（thread state）。
     """
-    _emit_stage("classify", "锚定考点", STAGE_AWAIT, "母题已就绪，待老师确认后开始举一反三")
+    _emit_stage("review", "确认母题", STAGE_AWAIT,
+                "待老师确认母题，点『开始举一反三』生成变式")
     return {
         "awaiting_mother_review": True,
         # 留痕：母题确认环节已过（route 不再当成在途确认）；review 是新的暂停态。
