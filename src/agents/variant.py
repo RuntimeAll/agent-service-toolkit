@@ -149,6 +149,10 @@ VERIFY_TIMEOUT_S = 10.0
 VERIFY_FAIL_AFTER_REGEN = "fail_after_regen"
 VERIFY_UNVERIFIED = "unverified"  # degrade：sympy 吃不下 → 退回 LLM 自检 fallback
 REVIEW_PROOF = "proof_needs_human"  # 证明/开放/作图类：不进 sympy，转人审
+# 🔴 BUG-09 手动验算（2026-06-19）：auto_verify=False（产品默认）下生成不自动跑 sympy/回炉，
+#   每题挂 pending（待老师手动点验算）。判分铁律不破——pending 只是「还没验」，不是判结果；
+#   老师点 /variant/verify-one 或 /variant/reverify 才真跑 sympy（判决仍只读 verdict）。
+VERIFY_PENDING = "pending"  # 待手动验算（auto_verify=False 生成态；非判分态）
 
 # 题卡可见文本（追加在 item.solution 尾部 → 入库 analyze 字段同步可见）。
 # 🔴 4d 可见性矩阵（PRD-C-012，用户拍板 2026-06-11「只说好、不说坏，除非双闸都不高」）：
@@ -166,6 +170,7 @@ TIER_PROOF = "proof"  # 中性：证明/开放类转人审
 TIER_SILENT = "silent"  # 沉默：单闸存疑（不说坏）
 TIER_BOTH_LOW = "both_low"  # ⚠：双闸皆存疑
 TIER_MANUAL = "manual"  # 中性：老师手动编辑、验算待重跑（题组编辑器 /variant/edit-item）
+TIER_PENDING = "pending"  # 中性·待手动验算：auto_verify=False 生成态（FE 渲染「待验算」徽章 + 验算按钮）
 
 # ---------------------------------------------------------------------------
 # 闸A·基因闸（验"是不是平行题"，与闸B"答案对不对"正交。依据 12-题目DNA方法论 §2/§5）：
@@ -184,6 +189,27 @@ GENE_GATE_SKIPPED = "skipped"  # 历史值（judge 退役后纯代码不再产�
 #   「开始举一反三」）不是告警，发 "await"（FE 配中性色 + "待确认/待开始"文案），不发 warn、
 #   不发"已中断"。带图打回(reject) 那个 warn 保留（真要拦）。FE 需对 "await" 配色。
 STAGE_AWAIT = "await"
+
+
+# 🔴 BUG-09（2026-06-19）：程序验算「何时跑」开关——auto_verify。
+#   - 产品默认 = 手动（False）：生成秒到就绪、每题 pending、老师按需点验算（service 入口注入 False）。
+#   - 节点级缺省 = True：直调节点（单测 / 未走 service 入口的内部路径）不传该键时保持既有自动验算行为，
+#     不破现有测试与回炉/守恒链。判分铁律不破——本开关只改「何时验」，不改「怎么判」（仍只读 sympy verdict）。
+def _auto_verify_on(config: RunnableConfig | None = None) -> bool:
+    """读 auto_verify（config.configurable 优先，回退 graph 上下文 ensure_config()）。
+    键缺省 → True（节点级自动验算，兼容直调）；service 入口对真实请求显式注入 False = 手动。"""
+    try:
+        conf = ((config or {}).get("configurable") or {}) if config else {}
+    except Exception:  # noqa: BLE001
+        conf = {}
+    if "auto_verify" not in conf:
+        try:
+            conf = (ensure_config() or {}).get("configurable", {}) or {}
+        except Exception:  # noqa: BLE001
+            conf = {}
+    if "auto_verify" not in conf:
+        return True  # 节点级缺省自动（兼容直调单测/内部路径）
+    return bool(conf.get("auto_verify"))
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1258,14 @@ def _artifact_payload(
             "level": str(it.get("level") or "normal"),
             # 🔴 verify 与 review 互斥不同键：证明类只有 review（proof_needs_human）
             "verify": chk.get("verify") or chk.get("review") or None,
+            # 🔴 BUG-09（2026-06-19）：手动验算态机器抓手——pending=待老师手动点验算（auto_verify=False
+            #   生成态），done=已过验算/已定状态（含 sympy_pass/self_ok/proof/manual 等）。FE 据它渲染
+            #   「待验算」徽章 + 验算按钮（点 → /variant/verify-one 或 /variant/reverify）。
+            "verify_status": (
+                "pending"
+                if (chk.get("verify") == VERIFY_PENDING or chk.get("tier") == TIER_PENDING)
+                else ("done" if chk else "pending")
+            ),
             # 4d 外显层级（FE 徽章唯一依据；旧线程恢复无 tier → FE 按「只说好」兜底）
             "tier": chk.get("tier") or None,
             # 🔴 PRD-A-017 R1·验算可查真证据透传（FE 验算徽章展开层）：math_verify.verify() 纯 sympy
@@ -1351,6 +1385,26 @@ def _emit_artifact(
 #   故本帧必早于任何变式 item 帧。
 # 🔴 复用 classify 已产出的 mother_dna（含 opus dna/解答/锚定），绝不重调 opus。
 # ---------------------------------------------------------------------------
+def _mother_chapter_name(state: VariantState) -> str | None:
+    """🔴 BUG-08（2026-06-19）：从 state 取母题章名（纯函数·零 IO，可单测）。
+
+    源优先级（皆已由 classify/entry 异步节点用 chapter_name_for_id / opus 判定回写进 state）：
+      ① state.confirmed_chapter_name（确认章人话名，classify 回写）；
+      ② analysis.chapter.value（opus 判定章文本 / classify 反查章名）。
+    都空 → None（调用方据此不加 chapter_name，绝不伪造）。
+    """
+    direct = str(state.get("confirmed_chapter_name") or "").strip()
+    if direct:
+        return direct
+    analysis = state.get("analysis") or {}
+    chap = analysis.get("chapter")
+    if isinstance(chap, dict):
+        v = str(chap.get("value") or "").strip()
+        if v:
+            return v
+    return None
+
+
 def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
     """组母题卡 payload（契约 §10）。纯函数·零 IO（可单测）。
 
@@ -1457,6 +1511,10 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
             # 🔴 2026-06-17：补年级册名(八年级下册)，FE 显示它而非 ID(3082)——帧原先只发 code
             "grade_book_name": str(grade_node.get("value") or "").strip() or None,
             "chapter_id": chapter_id,
+            # 🔴 BUG-08（2026-06-19）：母题卡回灌章名（FE 显示章名而非 chapter_id）。源 = classify/entry
+            #   节点已用 chapter_name_for_id / opus 判定回写进 state（analysis.chapter.value 或顶层
+            #   chapter_name）。空就不加（不伪造，禁假数据）。
+            **({"chapter_name": _chapter_name} if (_chapter_name := _mother_chapter_name(state)) else {}),
             "confidence": confidence if isinstance(confidence, (int, float)) else None,
             "need_anchor_review": need_review,
         },
@@ -1914,6 +1972,14 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             chapter_id = grade_code  # 不以聚合章 id 为前缀锚（防跨章串题）
             _emit_stage("classify", "锚定考点", "warn",
                         f"「{chap_name}」是聚合/复习章，已按年级册范围锚定（防跨章串题）")
+    # 🔴 BUG-08（2026-06-19）：把章名落进 analysis.chapter → 随 classify 返回值进 state →
+    #   _build_mother_card 回灌母题卡 anchor.chapter_name（空就不落，不抹既有值）。
+    if chapter_text:
+        analysis["chapter"] = {
+            **(analysis.get("chapter") if isinstance(analysis.get("chapter"), dict) else {}),
+            "id": confirmed_chapter_id or "",
+            "value": chapter_text,
+        }
 
     # --- 🔴 PRD-C-100 B2·重锚复用母题首解（root cause 根治 niche 考点重锚反复解析失败死循环） ---
     #   现象：niche 考点母题（如韦达定理）首解（mother_opus_entry）opus **已成功**解题+10维打标
@@ -2347,7 +2413,7 @@ async def await_mother_review(state: VariantState, config: RunnableConfig) -> Va
         # 留痕：母题确认环节已过（route 不再当成在途确认）；review 是新的暂停态。
         "awaiting_mother_confirm": False,
         "messages": [
-            AIMessage(content="母题已解析并打标完成（见上方母题卡），确认无误请点「开始举一反三」生成变式；如需修改母题，直接告诉我。")
+            AIMessage(content="请确认母题无误（见上方母题卡）：确认无误就点「开始举一反三」，开始准备生成变式；若要修改母题，直接告诉我。")
         ],
     }
 
@@ -3343,6 +3409,10 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     # 调用成本不增：闸A/闸B 仍是同一批 per-item helper，只是从「流结束后串行」改成
     # 「题一完整就并发跑」（同一 Semaphore(GATE_CONCURRENCY) 限流）。宏观 DAG 零改动：
     # 产物已带 gene+check → 下游 gene_gate/solve_explain 节点天然跳过已判项。
+    # 🔴 BUG-09（2026-06-19）：手动验算（auto_verify=False）下流内 eager **只过闸A（基因/平行度）
+    #   不过闸B（sympy 验算/回炉）** —— 闸B 留给老师手动按需点。闸A 是纯代码三检（零 LLM、秒级），
+    #   保留它让平行度徽章照常上卡；不剔题（pending 题进 solve_explain 挂 pending、绝不被剔）。
+    _auto_verify = _auto_verify_on(config)
     sem = asyncio.Semaphore(GATE_CONCURRENCY)
     eager_raw: list[dict[str, Any]] = []  # 流内稳收的规整题（生成序；merge/兜底用）
     eager_tasks: list[asyncio.Task] = []
@@ -3384,7 +3454,16 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             async with sem:
                 # B2·T2：闸A 内涵换纯代码三检（facts 直传，judge 配方对齐 facts 组装已退役）。
                 judged = await _gene_one_item(item, facts, idx, total_n)
-                kept, note = await _check_one_item(judged, facts, idx, total_n)
+                # 🔴 BUG-09：手动模式只过闸A，闸B 留给老师手动点 → 挂 pending（不剔题、不回炉）。
+                if _auto_verify:
+                    kept, note = await _check_one_item(judged, facts, idx, total_n)
+                else:
+                    kept, note = dict(judged), None
+                    if not kept.get("check"):
+                        kept["check"] = {
+                            "badge": "ok", "solved_answer": None,
+                            "verify": VERIFY_PENDING, "tier": TIER_PENDING,
+                        }
             if stale["flag"]:
                 return  # 本轮 eager 已作废（流重启/整组 retry）→ 不记账、不发作废题的帧
             if kept is None:
@@ -3395,7 +3474,11 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             completed[idx] = kept
             # 思路条进度（已过闸计数）+ 原位重发该题帧（同 seq，现带 tier 上定状态）
             done_n = len([k for k in completed if not completed[k].get("_dropped")])
-            _emit_stage("verify", "程序验算", "running", f"第 {done_n}/{total_n} 道完成")
+            _stage_detail = (
+                f"第 {done_n}/{total_n} 道完成" if _auto_verify
+                else f"第 {done_n}/{total_n} 道就绪（待手动验算）"
+            )
+            _emit_stage("verify", "程序验算", "running", _stage_detail)
             _emit_eager_frame()
         except Exception:  # noqa: BLE001 — eager 失败绝不炸 generate；该题留给下游节点补判
             pass
@@ -4413,6 +4496,29 @@ async def solve_explain(state: VariantState, config: RunnableConfig) -> VariantS
     items = list(state.get("items") or [])
     total = len(items)
     sem = asyncio.Semaphore(GATE_CONCURRENCY)
+
+    # 🔴 BUG-09（2026-06-19）：手动验算（auto_verify=False，产品默认）—— 跳过 _solve_one+_machine_verify
+    #   +回炉+反退化闸，每题挂 pending（待老师手动点验算），**绝不因未验算被剔除**（pending≠dropped）。
+    #   终态非阻塞「done」帧，流程秒到「题组就绪」不挂起。判分铁律不破：pending 只是「还没验」，
+    #   老师点 /variant/verify-one 或 /variant/reverify 才真跑 sympy（判决仍只读 verdict）。
+    if not _auto_verify_on(config):
+        out: list[dict[str, Any]] = []
+        for it in items:
+            item = dict(it)
+            if item.get("_dropped"):
+                # 极端：上游已带剔除哨兵（手动模式下 generate 不产生，仅兜底）→ 转 pending 保留不剔
+                item.pop("_dropped", None)
+            if not item.get("check"):
+                item["check"] = {
+                    "badge": "ok",
+                    "solved_answer": None,
+                    "verify": VERIFY_PENDING,
+                    "tier": TIER_PENDING,
+                }
+            _format_item_stem(item)  # 题型模版规范（与 assemble 同口径，幂等）
+            out.append(item)
+        _emit_stage("verify", "程序验算", "done", "待老师手动验算")
+        return {"items": out, "dropped_notes": [], "llm_call_budget": budget, "messages": []}
 
     async def _run(i: int, it: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
         item = dict(it)
@@ -6025,6 +6131,49 @@ async def reverify_item_state(
     _format_item_stem(final)
     new_items[index - 1] = final
     return {"items": new_items}, new_items[index - 1], None
+
+
+async def verify_one_stem(
+    stem: str, answer: str, *, qtype: str | None = None, options: Any = None
+) -> dict[str, Any]:
+    """🔴 BUG-09（2026-06-19）：无状态单题程序验算（/variant/verify-one 后端核心）。
+
+    入参 = 题面 stem + 题面标答 answer（+ 可选 qtype/options）。复用闸B 同一判决路径
+    （_solve_one 重解 → _machine_verify 纯 sympy），判决只读 verdict（铁律不破，零 LLM 自评）。
+    返回 {"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}：
+      - pass    = sympy 证实题面标答自洽；
+      - fail    = sympy 证实题面标答错（computed = 程序真算值）；
+      - degrade = sympy 吃不下载荷（抽不成/超时/证明开放类）→ 老师人工判（非判错）。
+    永不抛（任何异常按 degrade 收口），与 reverify 同源、与 solve_explain 单题逐字一致语义。
+    """
+    s = str(stem or "").strip()
+    a = str(answer or "").strip()
+    if not s:
+        return {"verdict": math_verify.DEGRADE, "detail": "题面为空，无从验算", "computed": None}
+    item: dict[str, Any] = {"stem": s, "answer": a}
+    if qtype:
+        item["qtype"] = str(qtype)
+    if options is not None:
+        item["options"] = options
+    # 证明/开放/作图类 → 不进 sympy（与 _check_one_item 同分流），按 degrade 转人工。
+    if _is_proof_like(item.get("qtype"), s):
+        return {
+            "verdict": math_verify.DEGRADE,
+            "detail": "证明/作图/开放类不做程序验算，转人工复核",
+            "computed": None,
+        }
+    try:
+        solved = await _solve_one(s)
+        res = await _machine_verify(item, solved.get("solved_answer"))
+    except Exception as e:  # noqa: BLE001 — 反挂死/反外抛（G5）：任何异常按 degrade 收口
+        return {"verdict": math_verify.DEGRADE, "detail": f"验算异常: {str(e)[:80]}", "computed": None}
+    verdict = res.get("verdict") or math_verify.DEGRADE
+    computed = res.get("computed")
+    return {
+        "verdict": verdict,
+        "detail": str(res.get("detail") or ""),
+        "computed": str(computed) if computed is not None else None,
+    }
 
 
 # ===========================================================================

@@ -581,6 +581,9 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                        if isinstance((entry.get("dna") or {}).get("primaryKp"), dict) else None,
                        "confidence": decision["confidence"]},
                 "qtype": {"value": (entry.get("dna") or {}).get("qtype"), "confidence": decision["confidence"]},
+                # 🔴 BUG-08：opus 判定章文本（空则省略键）→ 母题卡 anchor.chapter_name 回灌。
+                **({"chapter": {"id": "", "value": str(decision["chapter"]).strip()}}
+                   if str(decision.get("chapter") or "").strip() else {}),
             },
             "mother_dna": prov_dna,
             "awaiting_mother_confirm": True,
@@ -608,6 +611,10 @@ async def _finalize_high_conf(
         "kp": {"value": None, "confidence": 0},
         "qtype": {"value": None, "confidence": 0},
     }
+    # 🔴 BUG-08（2026-06-19）：opus 判定的章文本落进 analysis.chapter → _build_mother_card 回灌
+    #   母题卡 anchor.chapter_name（空就不落，不伪造）。
+    if str(decision.get("chapter") or "").strip():
+        analysis["chapter"] = {"id": "", "value": str(decision["chapter"]).strip()}
     mother_dna = dict(state.get("mother_dna") or {})
 
     include_review_books = V._wants_review_books(V._latest_human_text(state.get("messages", [])))

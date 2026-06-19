@@ -353,10 +353,14 @@ def test_solve_explain_emits_per_item_progress_then_done(monkeypatch):
     state = dict(_FACTS_STATE, items=items)
     out = asyncio.run(solve_explain(state, {}))
     assert all(it["check"]["badge"] == "ok" for it in out["items"])
-    # P14 叙事修正（RC3）：per-item running 去掉误导性「/总数」→「第 N 题验算中」
+    # P14 叙事修正（RC3）：per-item running 去掉误导性「/总数」→「第 N 题验算中」。
+    # 🔴 PRD-A-017 R2·真值正向播报：每题 sympy 验算通过后补发一条「第 N 题程序验算通过（算得 …）」
+    #   running 帧（带真算证据 computed），让老师逐题看见结果而非只在收尾见一个总 done。
     assert calls == [
         ("verify", "程序验算", "running", "第 1 题验算中"),
+        ("verify", "程序验算", "running", "第 1 题程序验算通过（算得 x=2）"),
         ("verify", "程序验算", "running", "第 2 题验算中"),
+        ("verify", "程序验算", "running", "第 2 题程序验算通过（算得 x=2）"),
         ("verify", "程序验算", "done", None),
     ]
 
@@ -497,6 +501,11 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
         "difficulty": 3,
         "level": "normal",
         "verify": "sympy_pass",
+        # 🔴 PRD-A-017 契约新增三键：verify_status（chk 有值且非 pending → done）；
+        #   _RICH_ITEM 的 check 无 verify_detail/computed → 两键 None（如实留空不伪造）。
+        "verify_status": "done",
+        "verify_detail": None,
+        "verify_computed": None,
         "tier": None,  # 旧结构 check 无 tier（4d 前存量）→ FE 按「只说好」兜底
         "gene": "pass",
         "persisted": False,
@@ -573,6 +582,11 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "difficulty": 2,
         "level": "normal",
         "verify": None,
+        # 🔴 PRD-A-017 契约新增三键：裸题无 check → verify_status pending（待手动验算）；
+        #   无 verify_detail/computed → 两键 None。
+        "verify_status": "pending",
+        "verify_detail": None,
+        "verify_computed": None,
         "tier": None,
         "gene": None,
         "persisted": False,

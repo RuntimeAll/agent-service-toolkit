@@ -149,6 +149,12 @@ async def _handle_input(user_input: UserInput, agent: AgentGraph) -> tuple[dict[
             )
         configurable.update(user_input.agent_config)
 
+    # 🔴 BUG-09（2026-06-19）·变式手动验算产品默认：真实请求若未显式指定 auto_verify，则注入
+    #   False = 手动（生成秒到就绪、每题 pending，老师按需点 /variant/verify-one）。FE 想恢复自动
+    #   则在 agent_config 里传 auto_verify=true。其它 agent 不读该键、无副作用。
+    #   （直调节点的单测不走本入口 → 节点级 _auto_verify_on 缺省 True，既有验算测试不受影响。）
+    configurable.setdefault("auto_verify", False)
+
     config = RunnableConfig(
         configurable=configurable,
         run_id=run_id,
@@ -764,6 +770,46 @@ async def variant_reverify(input: VariantReverifyInput) -> dict[str, Any]:
         return update, error
 
     return await _variant_apply(input.thread_id, _fn)
+
+
+class VariantVerifyOneInput(BaseModel):
+    """🔴 BUG-09（2026-06-19）：无状态单题程序验算请求（手动验算后端核心）。
+
+    stem=题面、answer=题面标答（必填）；qtype/options 可选（结构分流用，缺省按解答类）。
+    无 thread_id/index（无状态，不读会话）；service 层 bearer 已鉴权（router dependency）。
+    """
+
+    stem: str
+    answer: str
+    qtype: str | None = None
+    options: Any = None
+
+
+@router.post("/variant/verify-one")
+async def variant_verify_one(input: VariantVerifyOneInput) -> dict[str, Any]:
+    """🔴 BUG-09：无状态单题程序验算（同步返回，非 SSE）。
+
+    复用闸B 判决路径（_solve_one + _machine_verify，纯 sympy；判决只读 verdict，铁律不破）。
+    返回 {"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}：
+      pass=标答自洽 / fail=标答错（computed=真算值）/ degrade=sympy 吃不下→转人工（非判错）。
+    永不 500（异常按 degrade 收口）。前端「待验算」徽章点验算 → 调本端点 → 据 verdict 刷状态。
+    """
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.variant import verify_one_stem
+
+    # 设 config contextvar（让验算链内 _ainvoke_text 的 ensure_config() 拿到归属；无身份不报错）。
+    cfg: dict[str, Any] = {"configurable": {"thread_id": "verify-one"}}
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        return await verify_one_stem(
+            input.stem, input.answer, qtype=input.qtype, options=input.options
+        )
+    except Exception as e:  # noqa: BLE001 — verify_one_stem 本应自兜，这里纯保险（不 500）
+        logger.error(f"variant_verify_one error: {e}")
+        return {"verdict": "degrade", "detail": f"验算异常: {str(e)[:80]}", "computed": None}
+    finally:
+        var_child_runnable_config.reset(ctok)
 
 
 class VariantSetFigureUrlInput(BaseModel):

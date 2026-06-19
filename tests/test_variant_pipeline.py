@@ -284,6 +284,9 @@ def test_artifact_payload_never_leaks_internal_item_keys():
     assert set(it) == {
         "index", "seq", "stem", "answer", "solution", "qtype", "difficulty",
         "level", "verify", "tier", "gene", "persisted", "dna",
+        # 🔴 PRD-A-017：契约新增——手动验算态（verify_status pending/done）+ R1 验算可查真证据
+        #   （verify_detail sympy 逐步核对话术 / verify_computed 真算出的解集），FE 验算徽章展开层。
+        "verify_status", "verify_detail", "verify_computed",
         # 🔴 PRD-C-015 批4·DNA 改→重生态（FE 批5 角标/重生·撤销按钮/dirty 入库拦截）
         "dna_dirty", "dirty_dims", "mother_dirty_dims", "can_undo_regen",
         # 🔴 PRD-C-100 BC2 变式配图 OSS url（FE 会话恢复保持配图态）
