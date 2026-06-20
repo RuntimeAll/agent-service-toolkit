@@ -6006,7 +6006,18 @@ async def ask_clarify(state: VariantState, config: RunnableConfig) -> VariantSta
         "- 问解析（如「第 1 题为什么这么解」）\n"
         "- 「这组可以了」入库"
     )
-    if _looks_like_conservation_hit(utterance):
+    # 🔴 PRD-A-018 G10-4：配图相关诉求（补图/配图/图没画完/图歪）单独引导——配图是变式卡上
+    #   逐题手动点的（不进 graph、agent 不直接画），别甩通用兜底让老师以为没听懂。
+    _FIGURE_HINT_WORDS = ("图片", "配图", "图形", "画图", "图没", "补图", "切图", "图歪", "没画", "没出来", "图不")
+    if utterance and any(w in utterance for w in _FIGURE_HINT_WORDS):
+        body = (
+            "配图是在变式卡上逐题手动点的（我这边不直接画图）：\n"
+            "- 每道变式正文下方有「🖼 配图 / 🖼 重新配图」按钮，点它给这道题画图；\n"
+            "- 图歪了 / 没画全 → 点「图歪了？重新生成」，补一句图形描述（说清要画哪些点 / 角 / 线）再画；\n"
+            "- 母题图在母题卡左侧，点「重新切图」可重切。\n\n"
+            "（几何题偶尔画不出会标「⚠ 待补图」，点上面的按钮重试或补一句描述即可。）"
+        )
+    elif _looks_like_conservation_hit(utterance):
         # 真撞守恒：明示守恒=考点+年级两项不可改，其余维度都能改
         body = (
             f"这组变式的硬守恒只有两项：考点「{facts['kp_name']}」+ 年级「{facts['grade']}」"
