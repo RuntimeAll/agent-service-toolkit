@@ -645,6 +645,17 @@ def _apply_labels(
 # 选项内联图（option 内含图）本期不拆（选项图极少且需结构化抽取）→ 选项 content 只放 text。
 # ---------------------------------------------------------------------------
 
+# 🔴 PRD-A-018 BUG（2026-06-20）：举一反三变式入库配图默认尺寸过大整改。
+#   image 块 width = FE 渲染器（QuestionBlockRender.imageStyle）解读为「占容器宽百分比」(1-100)。
+#   原默认 60 → 对 mathfig 造的变式几何图（≈方形 1256×948）在详情页 ~934px 容器下渲成 ~560px 宽、
+#   ~420px 高，喧宾夺主把题面挤下去；老师每次都得进「手动排版」把宽度手调到 ~30% 才舒服
+#   （已观测到老师把两道变式手调成 31%/57%）。固定单值无法同时适配方形图与宽图、宽容器与窄容器，
+#   故把变式配图默认调到 40%——方形几何图在详情页渲 ~370px 宽（清晰不压题），卡片/工作台窄栏里也
+#   不至于太小，默认即可看、无需手调；老师仍可在编辑器自由微调。
+#   ⚠️ 只改新入库默认值（本函数产出）；存量老题 blockJson 里的 width=60 不动（那可能是老师有意设置，
+#      渲染器照 60% 正常显示，不在此函数兜底改写以免覆盖老师选择）。
+DEFAULT_IMAGE_WIDTH_PCT = 40
+
 # 选项标记切分后，从单项里抠「标签字母 + 正文」。镜像 qtype_format 的标记定义。
 _OPT_LABEL_RE = re.compile(r"^\s*[（(]?\s*([A-H])\s*[）).．、:：]\s*(.*)$", re.DOTALL)
 
@@ -710,7 +721,7 @@ def build_block_json(
       - 题干 → text 块（md 含 $...$ 公式原文，原样不动）。
       - 选择题 → 题干 head 为 text 块、各选项为 option 块（一行一项，每项单独一 row）。
       - 非选择题 → 整段 stem 作单 text 块（无 option 块）。
-      - image_url（https OSS）→ 末尾追加 image 块（独占一 row；width=60 居中默认）。
+      - image_url（https OSS）→ 末尾追加 image 块（独占一 row；width=DEFAULT_IMAGE_WIDTH_PCT 居中默认）。
       - answer/analysis 不进 block（留 biz_question 旧字段）。
     布局：每 row 一个 cell（一行一块），与 _normalize_choice 一行一项语义一致；
       列数沿用现状（单列）。空 stem 且无图 → 返回 None（不产空 block，create 跳过校验/落库）。
@@ -741,7 +752,7 @@ def build_block_json(
             "cells": [{
                 "type": "image",
                 "url": str(image_url).strip(),
-                "width": 60,
+                "width": DEFAULT_IMAGE_WIDTH_PCT,
                 "align": "center",
             }],
         })
