@@ -64,10 +64,14 @@ dependencies = [
     #   不进 pyproject 锁，授权直改 D15）；下列为内嵌 figure-crop（DocLayout-YOLO）的 torch 全栈。
     # 🔴 torch CPU 轮子须经 `--index-url https://download.pytorch.org/whl/cpu` 装（uv pip）；
     #   numpy 守 2.3.4（B0 实测 torch2.12/cv2 4.13/doclayout 0.0.4 不降 numpy）。matplotlib 给 mathfig。
-    "torch ==2.12.0",
-    "torchvision ==0.27.0",
-    "doclayout-yolo ==0.0.4",
-    "opencv-python >=4.13.0",
+    # 🔴 2026-06-20 PRD-A-018 prod 瘦身: figure-crop(母题切图) torch 全栈暂移除——CUDA torch ~2GB 拖垮
+    #   ECS build(慢网下不完)+运行 OOM。compose.crop_mother_figure 懒加载 + except 已兜底降级,
+    #   缺这些仅母题切图不可用(走 needs_figure 降级, FE 既有处理), 服务+举一反三主链路正常。
+    #   恢复: 取消下列注释 + torch 用 CPU index(download.pytorch.org/whl/cpu)重装。
+    # "torch ==2.12.0",
+    # "torchvision ==0.27.0",
+    # "doclayout-yolo ==0.0.4",
+    # "opencv-python >=4.13.0",
     "matplotlib >=3.11.0",
 ]
 
