@@ -23,10 +23,17 @@ from doclayout_yolo import YOLOv10
 
 # 权重默认路径：vendor 不带 40MB .pt，默认指 qbank-labeler 现成权重（本机可跑）；
 # 部署机经 FIGURE_CROP_WEIGHTS env 指向 download_weights.py 拉下的本地权重。
-_DEFAULT_WEIGHTS = (
-    Path(__file__).resolve().parents[4]  # toolkit/src/agents/figure → toolkit 根 → ...
-    / "weights" / "doclayout_yolo_docstructbench_imgsz1024.pt"
-)
+# 🔴 2026-06-20：原始 repo 是 toolkit/src/agents/figure（parents[4]=toolkit 根），但 prod 镜像把
+#   src/agents COPY 成扁平 /app/agents/figure（只 3 层父目录）→ parents[4] IndexError 在 import 期就崩，
+#   连带 compose 懒加载走 except 降级（症状=切图永远失败）。容器布局兜底到 /app/weights。
+#   prod 实际走 FIGURE_CROP_WEIGHTS env（_weights_path 先查它），此默认值仅本机兜底。
+try:
+    _DEFAULT_WEIGHTS = (
+        Path(__file__).resolve().parents[4]  # toolkit/src/agents/figure → toolkit 根 → ...
+        / "weights" / "doclayout_yolo_docstructbench_imgsz1024.pt"
+    )
+except IndexError:
+    _DEFAULT_WEIGHTS = Path("/app/weights/doclayout_yolo_docstructbench_imgsz1024.pt")
 _QBANK_WEIGHTS = Path(
     r"d:/workplace/book-ai/codeplace-B/qbank-labeler/figure_crop/weights/"
     r"doclayout_yolo_docstructbench_imgsz1024.pt"

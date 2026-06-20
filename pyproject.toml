@@ -64,10 +64,14 @@ dependencies = [
     #   不进 pyproject 锁，授权直改 D15）；下列为内嵌 figure-crop（DocLayout-YOLO）的 torch 全栈。
     # 🔴 torch CPU 轮子须经 `--index-url https://download.pytorch.org/whl/cpu` 装（uv pip）；
     #   numpy 守 2.3.4（B0 实测 torch2.12/cv2 4.13/doclayout 0.0.4 不降 numpy）。matplotlib 给 mathfig。
-    # 🔴 2026-06-20 PRD-A-018 prod 瘦身: figure-crop(母题切图) torch 全栈暂移除——CUDA torch ~2GB 拖垮
-    #   ECS build(慢网下不完)+运行 OOM。compose.crop_mother_figure 懒加载 + except 已兜底降级,
-    #   缺这些仅母题切图不可用(走 needs_figure 降级, FE 既有处理), 服务+举一反三主链路正常。
-    #   恢复: 取消下列注释 + torch 用 CPU index(download.pytorch.org/whl/cpu)重装。
+    # 🔴 2026-06-20 PRD-A-018 prod 瘦身: figure-crop(母题切图) torch 全栈不进 pyproject(否则 uv sync
+    #   从 aliyun 默认源解析出 CUDA torch + nvidia-* 巨包~2GB, 拖垮 ECS build/运行 OOM)。
+    # 🔴 prod 恢复方式 = Dockerfile.toolkit-ecs-crop 单独一层装 CPU 对版(避开 CUDA, 在 build 期隔离):
+    #     uv pip install --find-links https://mirrors.aliyun.com/pytorch-wheels/cpu/ \
+    #         torch==2.6.0+cpu torchvision==0.21.0+cpu doclayout-yolo==0.0.4
+    #   + apt libgl1/glib(cv2 运行期) + COPY 40MB 权重 + FIGURE_CROP_WEIGHTS env。详见该 Dockerfile。
+    #   本地开发仍用 .venv 内 torch2.12+cpu/tv0.27(松依赖, 版本差异不影响 YOLO 推理)。
+    #   故下列保持注释(它们在 pyproject 会污染 uv sync 解析); 切图依赖只活在 prod Docker 层。
     # "torch ==2.12.0",
     # "torchvision ==0.27.0",
     # "doclayout-yolo ==0.0.4",
