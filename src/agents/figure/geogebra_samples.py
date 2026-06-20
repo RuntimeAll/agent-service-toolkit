@@ -53,20 +53,22 @@ SAMPLES: list[dict] = [
                  "像点 Ap/Bp/Cp 用 relabel 映射 A′/B′/C′。"),
     },
     {
-        "kind": "标注角+公式文字(题面要求标∠1∠2/记号/数值)",
+        "kind": "标注角(题面要求标度数/∠1∠2/示意符号)",
         "commands": [
             "A=(0,0)", "B=(6,0)", "C=(2,4)", "tri=Polygon(A,B,C)",
             "a1=Angle(B,A,C)", "a2=Angle(C,B,A)",
-            'l1=Text("∠1",(0.9,0.5))', 'l2=Text("∠2",(4.6,0.5))',
             'l3=Text("AB=6",(2.6,-0.5))',
         ],
         "vals": ["a1", "a2"],
+        "angle_labels": {"a2": "β"},
         "note": ("题面明确要标的角（∠1/∠2/∠BAC…）**必须**用 Angle(P,V,Q) 画出角记号——"
                  "V 为顶点放中间：∠BAC=Angle(B,A,C)、∠ABC=Angle(C,B,A)；"
                  "点序须让有向角扫角 ≤180°（否则渲成优角），扫超平角就把首尾两点调换。"
-                 "需要文字标「∠1/∠2/数值/公式」时配 Text(\"标签\",(x,y)) 放在该角/边附近，"
-                 "🔴 标签内用 **Unicode**（∠ ° ² √ ∥ ⊥ ′ ₁₂ 等），**绝不写 LaTeX 宏**"
-                 "（\\frac/\\sqrt 渲不出会印反斜杠乱码，分式写 a/b、平方写 a²）；要标的角放进 vals 回读核对。"
+                 "🔴🔴 要标角的**度数**：只画 Angle()——引擎自动按角平分线标实测度数，**绝不手放 "
+                 "Text(\"20°\",(x,y))**（坐标靠猜必偏 + 双标打架）；同顶点多角弧引擎自动按角大小递增半径错开。"
+                 "🔴 示意图（画的角≠要标的度数 / 标 α/β/∠1 等符号）→ 顶层 angle_labels 覆盖该角文字"
+                 "（此例 a2 标「β」而非实测度数）；要标实测度数的角（a1）只画 Angle 不进 angle_labels。"
+                 "🔴 边长/AB=6/非角度的自由标注仍用 Text（Unicode：∠ ° ² √ ∥ ⊥ ′ ₁₂，绝不写 LaTeX 宏）。"
                  "🔴 列清单时凡题面写了「标出∠1、∠2」就各一条 Angle，绝不只画三角形不标角。"),
     },
     {
@@ -116,4 +118,6 @@ def samples_prompt_block() -> str:
             lines.append("  hide: " + ", ".join(s["hide"]))
         if s.get("relabel"):
             lines.append("  relabel: " + ", ".join(f"{k}→{v}" for k, v in s["relabel"].items()))
+        if s.get("angle_labels"):
+            lines.append("  angle_labels: " + ", ".join(f"{k}→{v}" for k, v in s["angle_labels"].items()))
     return "\n".join(lines)

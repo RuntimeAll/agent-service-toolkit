@@ -38,6 +38,15 @@ _FIGURE_DEFAULT_POINT_SIZE = 0
 _GEO_SYSTEM = (
     "你是中小学数学配图助手。把给定的「变式题面 + 解答」翻译成一组 GeoGebra evalCommand 命令"
     "（每行一条，能被 GeoGebra Math Apps 执行渲染成题目配图）。\n"
+    "🔴🔴🔴 唯一任务 = 忠实「画图」，绝不「解题」（铁律，放最前必守）：\n"
+    "  你的职责只有一个——把题面/解答里**已经明确描述的**几何构型与标注**照原样画出来**。\n"
+    "  ⛔ **不要去求解题目的答案**（不算 ∠M′NP 等于几度、不算边长、不验证结论）。\n"
+    "  ⛔ **不要纠结、不要推断题面没明说的构型关系**（如「P 是否在某射线上」「某点是否共线」——"
+    "题面给了角度/点/变换就照给的画，没给的别推、别脑补、别来回论证）。\n"
+    "  ⛔ **不要做任何数学推导/反复推演**——题面写「绕 N 逆时针旋转 50°」就 Rotate(…,50°,N)，"
+    "题面标「∠MNO=20°」就把 O 放在与 NM 夹 20° 处，到此为止。\n"
+    "  ✅ 把「画图」当**纯翻译**：题面文字 → GeoGebra 命令，一一对应，不增不减、不推理。"
+    "你越省去无谓推演，出图越快越准。\n"
     "🔴 强制工作流（必走三步，治「首次造图漏元素」——题面要标的角/记号别漏画）：\n"
     "  第一步·列清单：先逐一列出题面/解答里**明确提到的所有几何对象**——点、角"
     "（含「角1/角2/∠1/∠2」这类**要求标注**的角）、线段、辅助线、记号（直角/相等/平行/角度数）"
@@ -62,6 +71,19 @@ _GEO_SYSTEM = (
     "⑥ 🔴 标注角的点序坑：Angle(P,V,Q) 是**有向角**（V 是顶点，从 V→P 逆时针扫到 V→Q），"
     "点序须让扫角 ≤180°，否则画成反向优角（曾把直角渲成 270° 大半圆）——"
     "标 ∠BAC 写 Angle(B,A,C)（顶点 A 在中间），扫出来大于平角就把首尾两点调换。\n"
+    "🔴🔴 角度数字标注（治「角度数字坐标手放必偏、同顶点角弧套嵌成团」根因，必守）：\n"
+    "  ⓪ 【角度数字一律别手放 Text，全交给 Angle() 自动出——含旋转角/夹角】要在图上标**任何角的度数**"
+    "（如 20°、∠AOB=30°、旋转角 50°），**只需画出对应的 Angle(P,V,Q)**——引擎自动按**角平分线方向、"
+    "合适半径**把实测度数标在角内。🔴 **绝不要写 Text(\"20°\",(x,y)) / Text(\"50°\",…) 手放任何角度数字**"
+    "（坐标全靠猜必放歪、还和自动标签双标；旋转角也用 Angle 画，别再补一条 Text）。"
+    "同一顶点有多个角（如 ∠AOB 与 ∠BOC）时，引擎自动把各角弧按大小**递增半径错开**，你不用操心半径。\n"
+    "  ⓪″ 【角的点序——别画成反向优角/整圈】Angle(P,V,Q) 是有向角（V 顶点，V→P 逆时针扫到 V→Q）。"
+    "**扫角必须 ≤180°**，否则渲成反向优角甚至近一整圈大圆（如旋转角 50° 写反点序会扫成 310° 画出大圆圈）。"
+    "若某角应是锐角/钝角却扫超平角，**把首尾两点 P、Q 调换**即可。\n"
+    "  ⓪′ 【示意图覆盖：画的角≠要标的度数 / 标 α 等符号】少数题图是**示意**——画出来的角度不等于题面"
+    "要标的度数，或要标 α/β/x° 这类符号而非实测度数。这时在顶层 **angle_labels 字段**给该角对象名映射"
+    "显示文字：\"angle_labels\":{\"a2\":\"30°\",\"a3\":\"α\"}（让 a2 显示「30°」、a3 显示「α」而非引擎实测值）。"
+    "不需要覆盖的角省略即可（默认出实测度数）。\n"
     "🔴🔴 文字/公式标注（治「公式插不进、撇号点名乱」根因，必守）：\n"
     "  ⓐ 【Unicode 不 LaTeX】图里要写公式/数学符号一律用 **Unicode 字符**直接放进 Text(\"...\")——"
     "本无头渲染器**不认 LaTeX 宏**（写 Text(\"\\\\frac{1}{2}\",pt,true) 会原样印出反斜杠 \\frac 乱码，"
@@ -76,8 +98,9 @@ _GEO_SYSTEM = (
     "relabel 让自动标签直接印 A′（位置自动算，不偏不撞）。\n"
     "🔴 只输出一个 JSON（不要解释、不要 markdown fence）：\n"
     '{"commands":["...","..."],"dashed":["对象名"],"hide":["辅助对象名"],"vals":["关键点名"],'
-    '"relabel":{"Ap":"A′","Bp":"B′"},"axes":false,"needs_figure":false}\n'
-    "  （relabel 仅旋转/对称/平移有像点要标撇号时给；无撇号点的题省略此字段。）\n"
+    '"relabel":{"Ap":"A′","Bp":"B′"},"angle_labels":{"a2":"30°"},"axes":false,"needs_figure":false}\n'
+    "  （relabel 仅旋转/对称/平移有像点要标撇号时给；无撇号点的题省略此字段。"
+    "angle_labels 仅示意图需覆盖某角显示文字时给；要标实测度数的角只画 Angle() 即可、省略此字段。）\n"
     "🔴 若此题**不适合/不需要配图**（纯代数无几何意义、或你无法可靠构造），把 needs_figure 设 true、"
     "commands 留空数组（降级，不硬画错图）。\n\n"
     + geogebra_samples.samples_prompt_block()
@@ -232,12 +255,18 @@ async def compose_variant_figure(
     #   而非内部名 Ap/Bp，opus 不必再手放 Text 撇号标签（治「Ap 与 A′ 双标签打架」根因）。
     relabel = data.get("relabel")
     relabel = dict(relabel) if isinstance(relabel, dict) else None
+    # 🔴 angle_labels（{角对象名:"显示文字"}）：默认不传——Angle() 由引擎按角平分线自动出实测度数
+    #   （opus 不再手放 Text 角度数字，治「角度数字坐标手放必偏」）。仅示意图（画的角≠题面标的度数）
+    #   时 opus 在 JSON 给 angle_labels 显式覆盖该角文字。同顶点多角弧引擎自动按角大小递增半径错开。
+    angle_labels = data.get("angle_labels")
+    angle_labels = dict(angle_labels) if isinstance(angle_labels, dict) else None
     try:
         r = mathfig_render.render(
             list(data.get("commands") or []),
             dashed=data.get("dashed"), hide=data.get("hide"), vals=data.get("vals"),
             axes=bool(data.get("axes")), stem=f"variant_{item_id or 'fig'}",
             fig_scale=fig_scale, point_size=point_size, relabel=relabel,
+            angle_labels=angle_labels,
         )
     except Exception as e:  # noqa: BLE001 — 渲染冒泡 → needs_figure 降级（不抛、不卡流程）
         # 触发条件 3·渲染失败 → 引导补描述/重试（need_user_desc）。

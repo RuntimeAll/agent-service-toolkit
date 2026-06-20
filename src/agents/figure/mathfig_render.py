@@ -39,6 +39,7 @@ def render(
     fig_scale: float | None = None,
     point_size: float | None = None,
     relabel: dict | None = None,
+    angle_labels: dict | None = None,
 ) -> dict[str, Any]:
     """一轮直出渲染。返回归一 dict：
        {ok, png_path?, n_cmd, n_fail, commands:[{cmd,ok,err}], vals, warnings, view_final, error?}。
@@ -47,6 +48,9 @@ def render(
        point_size（=0 隐圆点只留字母）—— 均透传本地 render_geogebra，None 走引擎默认（不传 = 字小、点全显）。
     🔴 relabel（{内部点名:"显示文字"}，如 {"Ap":"A′"}）：旋转/对称像标识符不能含撇号，relabel 让
        自动标签印 A′/B′ 而非内部名 Ap/Bp，opus 不必再手放 Text 撇号标签（双标打架根因）。
+    🔴 angle_labels（{角对象名:"显示文字"}，如 {"a2":"30°"}）：默认不传——Angle() 对象由引擎按角平分线
+       自动出实测度数（不手放 Text 角度数字，治「角度数字坐标手放必偏」）。仅示意图（画的角≠题面标的
+       度数 / 标 α 等符号）时对该角显式覆盖。同顶点多角弧引擎自动按角大小递增半径错开（不传任何字段即生效）。
     """
     _ensure_env()
     try:
@@ -60,6 +64,7 @@ def render(
             list(commands or []), dashed=dashed, hide=hide, vals=vals, styles=styles,
             axes=axes, grid=grid, mono=True, stem=stem, timeout=RENDER_TIMEOUT_S,
             fig_scale=fig_scale, point_size=point_size, relabel=relabel,
+            angle_labels=angle_labels,
         )
         # render_geogebra 失败（n_fail>0 / 无 png）→ ok 已为 False；原样透传 + 兜 png 存在性
         png = r.get("png_path")
