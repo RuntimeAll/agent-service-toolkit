@@ -62,9 +62,22 @@ _GEO_SYSTEM = (
     "⑥ 🔴 标注角的点序坑：Angle(P,V,Q) 是**有向角**（V 是顶点，从 V→P 逆时针扫到 V→Q），"
     "点序须让扫角 ≤180°，否则画成反向优角（曾把直角渲成 270° 大半圆）——"
     "标 ∠BAC 写 Angle(B,A,C)（顶点 A 在中间），扫出来大于平角就把首尾两点调换。\n"
+    "🔴🔴 文字/公式标注（治「公式插不进、撇号点名乱」根因，必守）：\n"
+    "  ⓐ 【Unicode 不 LaTeX】图里要写公式/数学符号一律用 **Unicode 字符**直接放进 Text(\"...\")——"
+    "本无头渲染器**不认 LaTeX 宏**（写 Text(\"\\\\frac{1}{2}\",pt,true) 会原样印出反斜杠 \\frac 乱码，"
+    "$...$ 也不行）。改用 Unicode：根号 √、角 ∠、度 °、撇号 ′、平方 ²、立方 ³、下标 ₁₂₃、"
+    "平行 ∥、垂直 ⊥、全等 ≅、相似 ∽、三角形 △、乘 ×、除 ÷、正负 ±、≤ ≥ ≈ π。"
+    "如 Text(\"∠1=90°\",(x,y))、Text(\"a²+b²=c²\",(x,y))、Text(\"AB∥CD\",(x,y))、"
+    "Text(\"x₁+x₂=-b/a\",(x,y))——分式用 a/b 斜杠写、别用 \\frac。\n"
+    "  ⓑ 【撇号点名走 relabel，别手放 Text】旋转/对称/平移的「像」点（A′/B′/C′）——GeoGebra "
+    "标识符**不能含撇号**，只能命名 Ap/Bp/Cp（或 A1/A2）。要让图上显示 A′/B′，**用顶层 relabel "
+    "字段**把内部点名映射到撇号显示文字：\"relabel\":{\"Ap\":\"A′\",\"Bp\":\"B′\"}。🔴 **绝不要再手放 "
+    "Text(\"A'\",(x,y)) 撇号标签**——那样会和自动标签的内部名（Ap）双标打架、且坐标全靠猜必偏。"
+    "relabel 让自动标签直接印 A′（位置自动算，不偏不撞）。\n"
     "🔴 只输出一个 JSON（不要解释、不要 markdown fence）：\n"
     '{"commands":["...","..."],"dashed":["对象名"],"hide":["辅助对象名"],"vals":["关键点名"],'
-    '"axes":false,"needs_figure":false}\n'
+    '"relabel":{"Ap":"A′","Bp":"B′"},"axes":false,"needs_figure":false}\n'
+    "  （relabel 仅旋转/对称/平移有像点要标撇号时给；无撇号点的题省略此字段。）\n"
     "🔴 若此题**不适合/不需要配图**（纯代数无几何意义、或你无法可靠构造），把 needs_figure 设 true、"
     "commands 留空数组（降级，不硬画错图）。\n\n"
     + geogebra_samples.samples_prompt_block()
@@ -92,13 +105,14 @@ _FIGURE_KEYWORDS = (
     "数轴", "坐标", "图象", "图像", "扇形", "弧", "象限", "网格", "立体", "三视图",
     "正方体", "长方体", "棱", "梯形", "矩形", "菱形", "平行四边形", "抛物线",
 )
-# 方向元素关键词（命令/题面命中 → 标方向待确认）：旋转/箭头/向量/镜像/反射等含「朝向」语义。
-_DIRECTION_KEYWORDS = (
-    "旋转", "rotate", "角转向", "顺时针", "逆时针", "箭头", "向量", "vector",
-    "镜像", "对称", "reflect", "translate", "平移",
-)
+# 🔴 PRD-A-018 bug#4（2026-06-20 用户反馈「方向待确认提示太泛」）：方向待确认**只在图里真画了
+#   方向箭头**(GeoGebra Vector / 箭头符号)时才触发。旧逻辑按题面/答案/命令里「旋转/平移/镜像」关键词
+#   泛触发 → 任何变换题(哪怕只出虚线像、图中无箭头)都弹「方向待确认」= 噪音(用户实测旋转题无箭头也弹)。
+#   收窄判据：纯出虚线像的旋转/平移/对称题(无箭头) **不**提示；唯有 commands 里含 Vector(...)/箭头
+#   (明确画了表方向的箭头)才提示老师确认方向。判据只看 commands(图本身)，不看题面文字。
+_ARROW_CMD_KEYWORDS = ("vector(", "→", "箭头")
 _DESC_HINT = "如需配图，请补一句图形描述（说清要画哪些点/角/线/标注），我再据此重画。"
-_DIRECTION_HINT = "本图含方向元素（旋转/箭头/镜像/平移），请确认方向是否正确；如不对，补一句说明我来重画。"
+_DIRECTION_HINT = "本图含方向箭头，请确认旋转/平移方向是否正确；如不对，补一句说明我来重画。"
 
 
 def _has_keyword(text: str | None, keywords: tuple[str, ...]) -> bool:
@@ -109,12 +123,13 @@ def _has_keyword(text: str | None, keywords: tuple[str, ...]) -> bool:
 
 
 def _hit_direction(stem: str | None, answer: str | None, commands: Any) -> bool:
-    """方向元素命中：题面/答案含方向关键词，或 commands 里含 Rotate/Reflect/Translate/Vector。"""
-    if _has_keyword(stem, _DIRECTION_KEYWORDS) or _has_keyword(answer, _DIRECTION_KEYWORDS):
-        return True
+    """方向待确认命中：**仅当 commands 里真画了方向箭头**(Vector(...)/箭头符号)时返 True。
+    🔴 bug#4 收窄（2026-06-20）：旧版按题面/答案/命令「旋转/平移/镜像」关键词泛触发，
+       致任何变换题(哪怕图中无箭头、只出虚线像)都弹「方向待确认」噪音。现只看图本身有无箭头——
+       不看题面文字、也不把 Rotate/Reflect/Translate(只出虚线像、非箭头)当方向元素。"""
     if isinstance(commands, list):
-        joined = "\n".join(str(c) for c in commands)
-        return _has_keyword(joined, _DIRECTION_KEYWORDS)
+        joined = "\n".join(str(c) for c in commands).lower()
+        return any(kw in joined for kw in _ARROW_CMD_KEYWORDS)
     return False
 
 
@@ -212,12 +227,17 @@ async def compose_variant_figure(
     fig_scale = float(fig_scale) if fig_scale else _FIGURE_DEFAULT_SCALE
     point_size = data.get("point_size")
     point_size = float(point_size) if point_size is not None else _FIGURE_DEFAULT_POINT_SIZE
+    # 🔴 relabel（{内部点名:"显示文字"}，如 {"Ap":"A′"}）：opus 把旋转/对称像点（命名 Ap/Bp，
+    #   GeoGebra 标识符不能含撇号）映射到数学正确的撇号显示文字 A′/B′。让自动标签印 A′/B′
+    #   而非内部名 Ap/Bp，opus 不必再手放 Text 撇号标签（治「Ap 与 A′ 双标签打架」根因）。
+    relabel = data.get("relabel")
+    relabel = dict(relabel) if isinstance(relabel, dict) else None
     try:
         r = mathfig_render.render(
             list(data.get("commands") or []),
             dashed=data.get("dashed"), hide=data.get("hide"), vals=data.get("vals"),
             axes=bool(data.get("axes")), stem=f"variant_{item_id or 'fig'}",
-            fig_scale=fig_scale, point_size=point_size,
+            fig_scale=fig_scale, point_size=point_size, relabel=relabel,
         )
     except Exception as e:  # noqa: BLE001 — 渲染冒泡 → needs_figure 降级（不抛、不卡流程）
         # 触发条件 3·渲染失败 → 引导补描述/重试（need_user_desc）。

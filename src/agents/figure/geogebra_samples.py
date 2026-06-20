@@ -8,6 +8,11 @@ recon 结论：这些全 GeoGebra 主路径零引擎改造（旧 matplotlib REJE
    - 自由点直接 A=(2,3)，**别用 Point((2,3))**（会失败）；
    - 派生点用 Intersect/Midpoint/Rotate/Reflect/Translate 让引擎算，别手填坐标；
    - 别在 commands 里写 SetLineStyle（会把对象渲染没）—— 虚线走 dashed 参数。
+🔴 文字/公式标注（2026-06-20 实测定，治「公式插不进」）：
+   - 图里写公式/符号一律用 **Unicode**（√ ∠ ° ′ ² ³ ₁₂ ∥ ⊥ ≅ ∽ △ × ÷ ± π）放进 Text("…")；
+     **无头渲染器不认 LaTeX 宏**（\\frac/\\sqrt 印反斜杠乱码、$…$ 也不行），分式写 a/b。
+   - 旋转/对称/平移的「像」点（A′/B′）：标识符不能含撇号 → 命名 Ap/Bp，用顶层 **relabel**
+     字段 {"Ap":"A′"} 让标签显示撇号，**别手放 Text("A'",…)**（与自动标签双标打架、坐标必偏）。
 """
 
 # 每条 = {图型, commands, dashed?, hide?, note}（note 给 opus 看构造范式）
@@ -19,40 +24,50 @@ SAMPLES: list[dict] = [
             "Bp=Rotate(B,30°,A)", "Cp=Rotate(C,30°,A)", "tri2=Polygon(A,Bp,Cp)",
         ],
         "dashed": ["tri2"],
-        "note": "Rotate(对象,角度°,中心)；像的边用 dashed 区分原图。",
+        "relabel": {"Bp": "B′", "Cp": "C′"},
+        "note": ("Rotate(对象,角度°,中心)；像的边用 dashed 区分原图。"
+                 "🔴 像点命名 Bp/Cp（标识符不能含撇号），用 relabel 让图上显示 B′/C′——"
+                 "**别手放 Text(\"B'\",…) 撇号标签**（会和自动标签双标打架且坐标必偏）。"),
     },
     {
         "kind": "平移",
         "commands": [
             "A=(0,0)", "B=(4,0)", "C=(1,3)", "t=Polygon(A,B,C)", "u=Vector((5,1))",
-            "A2=Translate(A,u)", "B2=Translate(B,u)", "C2=Translate(C,u)", "t2=Polygon(A2,B2,C2)",
+            "Ap=Translate(A,u)", "Bp=Translate(B,u)", "Cp=Translate(C,u)", "t2=Polygon(Ap,Bp,Cp)",
         ],
         "dashed": ["t2"],
-        "note": "Translate(对象,向量)；先 Vector((dx,dy)) 定平移向量。",
+        "relabel": {"Ap": "A′", "Bp": "B′", "Cp": "C′"},
+        "note": ("Translate(对象,向量)；先 Vector((dx,dy)) 定平移向量。"
+                 "像点 Ap/Bp/Cp 用 relabel 映射 A′/B′/C′。"),
     },
     {
         "kind": "对称",
         "commands": [
             "A=(1,1)", "B=(4,2)", "C=(2,4)", "t=Polygon(A,B,C)", "ax=Line((0,0),(0,1))",
-            "A2=Reflect(A,ax)", "B2=Reflect(B,ax)", "C2=Reflect(C,ax)", "t2=Polygon(A2,B2,C2)",
+            "Ap=Reflect(A,ax)", "Bp=Reflect(B,ax)", "Cp=Reflect(C,ax)", "t2=Polygon(Ap,Bp,Cp)",
         ],
         "dashed": ["t2"],
         "hide": ["ax"],
-        "note": "Reflect(对象,对称轴线/点)；对称轴用 hide 隐去，像用 dashed。",
+        "relabel": {"Ap": "A′", "Bp": "B′", "Cp": "C′"},
+        "note": ("Reflect(对象,对称轴线/点)；对称轴用 hide 隐去，像用 dashed。"
+                 "像点 Ap/Bp/Cp 用 relabel 映射 A′/B′/C′。"),
     },
     {
-        "kind": "标注角(题面要求标∠1∠2/记号)",
+        "kind": "标注角+公式文字(题面要求标∠1∠2/记号/数值)",
         "commands": [
             "A=(0,0)", "B=(6,0)", "C=(2,4)", "tri=Polygon(A,B,C)",
             "a1=Angle(B,A,C)", "a2=Angle(C,B,A)",
-            'l1=Text("角1",(0.9,0.5))', 'l2=Text("角2",(4.6,0.5))',
+            'l1=Text("∠1",(0.9,0.5))', 'l2=Text("∠2",(4.6,0.5))',
+            'l3=Text("AB=6",(2.6,-0.5))',
         ],
         "vals": ["a1", "a2"],
-        "note": ("题面明确要标的角（角1/角2/∠BAC…）**必须**用 Angle(P,V,Q) 画出角记号——"
+        "note": ("题面明确要标的角（∠1/∠2/∠BAC…）**必须**用 Angle(P,V,Q) 画出角记号——"
                  "V 为顶点放中间：∠BAC=Angle(B,A,C)、∠ABC=Angle(C,B,A)；"
                  "点序须让有向角扫角 ≤180°（否则渲成优角），扫超平角就把首尾两点调换。"
-                 "需要文字标「角1/角2」时配 Text(标签,(x,y)) 放在该角附近；要标的角放进 vals 回读核对。"
-                 "🔴 列清单时凡题面写了「标出角1、角2」就各一条 Angle，绝不只画三角形不标角。"),
+                 "需要文字标「∠1/∠2/数值/公式」时配 Text(\"标签\",(x,y)) 放在该角/边附近，"
+                 "🔴 标签内用 **Unicode**（∠ ° ² √ ∥ ⊥ ′ ₁₂ 等），**绝不写 LaTeX 宏**"
+                 "（\\frac/\\sqrt 渲不出会印反斜杠乱码，分式写 a/b、平方写 a²）；要标的角放进 vals 回读核对。"
+                 "🔴 列清单时凡题面写了「标出∠1、∠2」就各一条 Angle，绝不只画三角形不标角。"),
     },
     {
         "kind": "折叠",
@@ -99,4 +114,6 @@ def samples_prompt_block() -> str:
             lines.append("  dashed: " + ", ".join(s["dashed"]))
         if s.get("hide"):
             lines.append("  hide: " + ", ".join(s["hide"]))
+        if s.get("relabel"):
+            lines.append("  relabel: " + ", ".join(f"{k}→{v}" for k, v in s["relabel"].items()))
     return "\n".join(lines)
