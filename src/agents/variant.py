@@ -1349,6 +1349,10 @@ def _artifact_payload(
         #   传 OSS → 经 /variant/set-figure-url 回写 state.items[i].figure_url）。入库时
         #   build_create_bo 据它产 A-015 image 块；透传给 FE 用于会话恢复后保持配图态。缺则 None。
         cell["figure_url"] = str(it.get("figure_url") or "") or None
+        # 🔴 PRD-A-018 治本A·figure_spec 透传（出题节点产的配图自然语言描述）：随帧上屏 + 会话恢复保留，
+        #   供 compose 从 state 取来照画（service /variant/compose-figure 自取，FE 不必传）。展示/内部键，
+        #   不入 biz_question 旧字段（同 figure_url；build_create_bo 显式白名单天然不外漏）。缺则 None。
+        cell["figure_spec"] = str(it.get("figure_spec") or "") or None
         # 🔴 PRD-C-100 BC3：已入库题在库雪花 id（= _persist_id 内部簿记键，persist_one/全部入库后回写）。
         #   FE 据它把已入库变式 round-trip 进 A-015 网格编辑器（/question/editor/:id 按 questionId 载 blockJson
         #   编辑 → /teacher/question/update-block 存）。未入库题为 None（无 questionId 不能进编辑器）。
@@ -2626,6 +2630,29 @@ _DIFFICULTY_RUBRIC = """难度四档 rubric（每道题的 difficulty 按下面�
 - 2（常规）：无难点 + 考察类型∈{{直接计算·公式套用·性质判定}} + 多步骨架。
 - 1（送分）：无难点 +（概念辨析 或 单步骨架）。"""
 
+# 🔴 配图描述契约（PRD-A-018 治本A·单一事实源）：出题时（上下文最全——有母题题面+母题配图+
+#   变式题面）顺手为每道变式产一份**自然语言配图描述 figure_spec**，下游 compose 直接照它翻
+#   GeoGebra（不再现场逆推构型，根治「逆推歧义」+ 大降耗时）。figure_spec 是**自然语言**，不是
+#   GeoGebra 命令——说清「这道图有哪些点、大致布局、标哪些角/度数、什么旋转/平移/对称到哪、
+#   哪些虚线」即可，把"画什么"想清楚，"怎么翻成命令"留给 compose。
+#   🔴 与 GENERATE 同以「format 模板片段」形态存在（无 {占位符}；文本内若出现花括号须双写——当前无）。
+_FIGURE_SPEC_CONTRACT = """figure_spec 字段（配图自然语言描述，下游照此画图，不要在这里写 GeoGebra 命令）：
+- **只对几何/图形题给描述**（含角、三角形、圆、折叠、旋转、对称、平移、平行、垂直、数轴、坐标系、
+  函数图象、扇形、弧、立体三视图、棱柱棱锥、各类四边形/多边形 等需要配图才说得清的题）。
+- **纯代数/纯文字题（解方程、化简、应用题文字建模、纯数值计算等无几何意义）→ figure_spec 给空串 ""**
+  （表示无需配图；绝不硬凑几何描述）。
+- 给描述时**用自然语言说清这几件事**（你此刻上下文最全：有母题题面、母题原配图、变式新题面，
+  最清楚这道变式图该长什么样）：
+  ① 有哪些点、它们大致的布局/位置关系（如「△ABC，A 在顶部，B、C 在底边」「点 O 为坐标原点」）；
+  ② 要标注的角和度数（如「标出 ∠BAC=40°、∠ABC 为直角」「旋转角 50°」）；
+  ③ 变换关系（如「△ABC 绕点 A 逆时针旋转 60° 得 △AB′C′」「点 P 关于 x 轴对称到 P′」「沿向量平移」），
+     说清**绕谁/沿什么/转或移多少/到哪个像**；
+  ④ 哪些是虚线/辅助线（如「连结 BB′ 为虚线」「对称轴用虚线」）；
+  ⑤ 其它必要记号（平行/垂直记号、相等边记号等）。
+- 描述**只说题面/解答里已明确的构型**，不推断、不脑补题面没给的关系（与下游「只画不解题」一致）。
+- 🔴 figure_spec 是**新增可选字段**：拿不准/嫌麻烦时给空串 "" 即可（下游会退回老办法从题面现推），
+  绝不要因为这个字段卡住出题或编造内容。"""
+
 # 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
 # 含 {占位符} 的变动段（配方/铁律的考点名、母题 DNA）移到末尾；语义一字不改。
 GENERATE_PROMPT = (
@@ -2634,7 +2661,12 @@ GENERATE_PROMPT = (
 只输出 JSON 数组(不要解释)，每个元素：
 {{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
   "qtype":"选择/填空/解答","difficulty":1~4,"level":"normal/hard","injected_kp":"相邻kp名或null",
+  "figure_spec":"配图自然语言描述或空串（契约见下）",
   "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
+
+"""
+    + _FIGURE_SPEC_CONTRACT
+    + """
 
 """
     + _DIFFICULTY_RUBRIC
@@ -3382,6 +3414,13 @@ def _normalize_generated_item(it: dict[str, Any], facts: dict) -> dict[str, Any]
         "injected_kp": it.get("injected_kp") or None,
         # check 待 solve_explain 填（无 check 不许进 assemble）
     }
+    # 🔴 PRD-A-018 治本A·figure_spec（出题节点产的「画什么」自然语言描述，下游 compose 照此翻
+    #   GeoGebra，不再现场逆推构型）：仅当 LLM 给了非空字符串才落 item（内部/展示键，不入 biz_question
+    #   旧字段——build_create_bo/_artifact_payload 显式白名单天然不外漏；参照 figure_url 处理）。
+    #   缺字段/非字符串/纯代数题给空串 → 不落该键 → 下游退回从 stem 现推（向后兼容，旧线程无此键不崩）。
+    _fig_spec = it.get("figure_spec")
+    if isinstance(_fig_spec, str) and _fig_spec.strip():
+        out["figure_spec"] = _fig_spec.strip()
     if isinstance(it.get("verify_payload"), dict):
         out["verify_payload"] = it["verify_payload"]
     # 🔴 批3·⑦ 反退化载荷（最值/动点构型才有）随 item 流转——item 内部字段，不进帧/不入库。

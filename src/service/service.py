@@ -569,6 +569,50 @@ async def _mem_write_preference(token: str, *, grade_book: str | None, qtype: st
         logger.debug(f"_mem_write_preference best-effort skip: {e}")
 
 
+async def _lookup_figure_spec(thread_id: str, item_id: str | None) -> str | None:
+    """PRD-A-018 治本A：按 thread_id + item_id 从 checkpointer state 取该题的 figure_spec
+       （出题节点产的「画什么」自然语言配图描述）。
+
+    🔴 item_id = FE 传的 item.seq || item.index（见 book-ui onComposeVariantFigure）。state 里每道题
+       的有效 seq = it["_seq"]（generate eager 落的稳定生成序）或 index+1（缺省回退，与 _artifact_payload
+       同口径）。先按 seq 匹配，命中即取 figure_spec；未命中再按 1-based index 兜底。
+    🔴 best-effort：thread 无 state / 无 items / 取不到一律返回 None（compose 退回从 stem 现推，
+       绝不因取 spec 失败而挡造图）。
+    """
+    if not item_id:
+        return None
+    try:
+        agent: AgentGraph = get_agent("variant")
+        snapshot = await agent.aget_state(
+            config=RunnableConfig(configurable={"thread_id": thread_id})
+        )
+        items = (snapshot.values or {}).get("items") or []
+        if not items:
+            return None
+        target = str(item_id).strip()
+        # 按有效 seq 匹配（it["_seq"] 或 index+1）
+        for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                continue
+            eff_seq = it.get("_seq")
+            eff_seq = str(eff_seq) if eff_seq not in (None, "") else str(i + 1)
+            if eff_seq == target:
+                spec = it.get("figure_spec")
+                return spec.strip() if isinstance(spec, str) and spec.strip() else None
+        # seq 未命中 → 按 1-based index 兜底
+        try:
+            idx = int(target) - 1
+        except (TypeError, ValueError):
+            return None
+        if 0 <= idx < len(items) and isinstance(items[idx], dict):
+            spec = items[idx].get("figure_spec")
+            return spec.strip() if isinstance(spec, str) and spec.strip() else None
+        return None
+    except Exception as e:  # noqa: BLE001 — 取 spec 是增强不是关卡，失败降级 None
+        logger.debug(f"_lookup_figure_spec best-effort skip: {e}")
+        return None
+
+
 @router.post("/variant/compose-figure")
 async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
     """PRD-C-100 B3：带图管线后处理端点（不进变式 StateGraph，四节点字节不动 D14）。
@@ -599,11 +643,17 @@ async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
         if input.mode == "compose_variant":
             if not input.stem:
                 raise HTTPException(status_code=400, detail="compose_variant 需 stem")
+            # 🔴 PRD-A-018 治本A：从 state 自取该题 figure_spec（出题节点产的「画什么」自然语言描述）
+            #   传给 compose 作为权威画图依据（compose 照 spec 翻命令，不再逆推构型）。BE 自取最稳——
+            #   FE 不必传；老线程/无 spec → 取到 None → compose 退回从 stem 现推（向后兼容）。
+            #   任何取 state 失败一律降级 None（绝不因为取不到 spec 而挡住造图）。
+            figure_spec = await _lookup_figure_spec(input.thread_id, input.item_id)
             result = await compose.compose_variant_figure(
                 stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
                 parse_json=_parse_json, correction_prompt=input.correction_prompt,
                 prev_commands=input.prev_commands,  # 🔴 PRD-C-100 C：图片重生带上一版命令 → 增量改图
                 item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
+                figure_spec=figure_spec,  # 🔴 PRD-A-018 治本A：出题产的配图自然语言描述（权威画什么）
             )
             # 🔴 B4 经验层留痕（图修正）：老师发修正提示词 → 每次都写（只累计 D13）。best-effort。
             if input.correction_prompt:

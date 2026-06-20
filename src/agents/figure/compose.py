@@ -171,6 +171,7 @@ async def compose_variant_figure(
     prev_commands: list[str] | None = None,
     item_id: str | None = None,
     model: str | None = None,
+    figure_spec: str | None = None,
 ) -> dict[str, Any]:
     """变式造图一轮直出（+ 图片重生）。返回
        {item_id, ok, png_base64?, commands, dashed, vals, needs_figure, warnings, reason?}。
@@ -180,6 +181,10 @@ async def compose_variant_figure(
     🔴 PRD-C-100 C：图片重生带上一版 GeoGebra commands（prev_commands）+ 原题上下文 →
        opus 在「上一版配图命令的基础上按修正要求调整」（增量修改，而非从零重画，保证继承上一版）。
        仅当 correction_prompt 与 prev_commands 同时非空才走增量分支；首次造图（无 prev_commands）维持原行为。
+    🔴 PRD-A-018 治本A·figure_spec（出题节点产的「画什么」自然语言配图描述）：非空时作为**权威画图依据**
+       喂给 opus —— opus 只需「照 figure_spec 翻成 GeoGebra 命令」，不再现场从题面**逆推**几何构型
+       （根治「逆推歧义」+ 大降耗时）。figure_spec 为空/缺省 → 退回原行为（从 stem/answer 现推），向后兼容。
+       图片重生（correction_prompt 在）时 figure_spec 仍作为「这道图本该是什么」的底图描述一并喂入。
     🔴 任何失败 → needs_figure=True（降级，不抛、不掐流程 G11）。
     """
     # 🔴 B5 预算护栏（G7）：当日花费超阈值 → 造图降级（needs_figure，不调翻命令，题照常交付）。
@@ -192,6 +197,18 @@ async def compose_variant_figure(
     user_segs = [f"【变式题面】\n{stem}"]
     if answer:
         user_segs.append(f"【标准答案/解答】\n{answer}")
+    # 🔴 PRD-A-018 治本A：figure_spec 非空 = 出题节点已把「这道图画什么」想清楚（自然语言描述）。
+    #   把它作为**权威画图依据**放在最前位重的段——指令 opus「照这份描述翻 GeoGebra，别再从题面逆推
+    #   构型」。题面/答案仍附在后供消歧（如描述里某点坐标含糊时回看题面），但「画什么」以 spec 为准。
+    spec_clean = (figure_spec or "").strip()
+    if spec_clean:
+        user_segs.append(
+            "【🔴 配图描述（权威·画什么以此为准）】\n"
+            "下面是出题时（上下文最全）已经写好的本图自然语言描述——你的任务是**照这份描述忠实翻译成 "
+            "GeoGebra 命令**，不要再从题面逆推几何构型、不要纠结题面没明说的关系。描述里说画哪些点/角/"
+            "度数/旋转平移对称/虚线，就照画哪些；题面与答案附在上方仅供消歧参考。\n"
+            f"{spec_clean}"
+        )
     # 🔴 PRD-C-100 C：图片重生 = correction_prompt + prev_commands 都在 → 增量修改（带上一版命令 + 原题上下文）。
     #   把上一版 GeoGebra commands 原样喂回，指令改成「在下面这版配图命令的基础上，按修正要求调整」，
     #   让 opus 继承上一版骨架做增量改动，而非丢掉上下文从零重画（跑偏的根因）。
