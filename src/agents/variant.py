@@ -1352,7 +1352,13 @@ def _artifact_payload(
         # 🔴 PRD-A-018 治本A·figure_spec 透传（出题节点产的配图自然语言描述）：随帧上屏 + 会话恢复保留，
         #   供 compose 从 state 取来照画（service /variant/compose-figure 自取，FE 不必传）。展示/内部键，
         #   不入 biz_question 旧字段（同 figure_url；build_create_bo 显式白名单天然不外漏）。缺则 None。
-        cell["figure_spec"] = str(it.get("figure_spec") or "") or None
+        # 🔴 round4：figure_spec 现可为 str（旧）或 dict（新 {"layout":..,"angle_labels":[..]}）——
+        #   原样透传（dict 不 str 化），FE/会话恢复保留结构、compose 取来按类型分发。缺/空 → None。
+        _cell_fs = it.get("figure_spec")
+        if isinstance(_cell_fs, dict) and (_cell_fs.get("layout") or _cell_fs.get("angle_labels")):
+            cell["figure_spec"] = _cell_fs
+        else:
+            cell["figure_spec"] = (str(_cell_fs).strip() or None) if isinstance(_cell_fs, str) else None
         # 🔴 PRD-C-100 BC3：已入库题在库雪花 id（= _persist_id 内部簿记键，persist_one/全部入库后回写）。
         #   FE 据它把已入库变式 round-trip 进 A-015 网格编辑器（/question/editor/:id 按 questionId 载 blockJson
         #   编辑 → /teacher/question/update-block 存）。未入库题为 None（无 questionId 不能进编辑器）。
@@ -2636,26 +2642,43 @@ _DIFFICULTY_RUBRIC = """难度四档 rubric（每道题的 difficulty 按下面�
 #   GeoGebra 命令——说清「这道图有哪些点、大致布局、标哪些角/度数、什么旋转/平移/对称到哪、
 #   哪些虚线」即可，把"画什么"想清楚，"怎么翻成命令"留给 compose。
 #   🔴 与 GENERATE 同以「format 模板片段」形态存在（无 {占位符}；文本内若出现花括号须双写——当前无）。
-_FIGURE_SPEC_CONTRACT = """figure_spec 字段（配图自然语言描述，下游照此画图，不要在这里写 GeoGebra 命令）：
-- **只对几何/图形题给描述**（含角、三角形、圆、折叠、旋转、对称、平移、平行、垂直、数轴、坐标系、
+_FIGURE_SPEC_CONTRACT = """figure_spec 字段（配图描述 = 这道图「画什么」的权威决策，下游 compose 只照此忠实翻成 GeoGebra，自己不增不减、不做内容取舍、不判已知/求解。所以「画什么、标哪些角、哪些不画」全在你这里一次定死）：
+
+🔴 你现在手里有**母题原配图**（多模态附在消息里）+ 母题题干 + 你刚造的变式题面 —— 上下文最全，由你（出题方）来定这道图画什么、标什么，这是你的职责，不要推给下游。
+
+【何时给 / 何时空】
+- **只对几何/图形题给 figure_spec**（含角、三角形、圆、折叠、旋转、对称、平移、平行、垂直、数轴、坐标系、
   函数图象、扇形、弧、立体三视图、棱柱棱锥、各类四边形/多边形 等需要配图才说得清的题）。
 - **纯代数/纯文字题（解方程、化简、应用题文字建模、纯数值计算等无几何意义）→ figure_spec 给空串 ""**
   （表示无需配图；绝不硬凑几何描述）。
-- 给描述时**用自然语言说清这几件事**（你此刻上下文最全：有母题题面、母题原配图、变式新题面，
-  最清楚这道变式图该长什么样）：
-  ① 有哪些点、它们大致的布局/位置关系（如「△ABC，A 在顶部，B、C 在底边」「点 O 为坐标原点」）；
-  ② 要标注的角和度数——**只标题目已知（明确给出）的角度**（如「标出 ∠BAC=40°、∠ABC 为直角」）。
-     🔴 配图是**给学生做的题图**（不是解题图/答案图）。**必要性闸**：描述每个元素前先自问「这个**必须**画吗？
-     **不画它学生还能看懂这道题吗？**能看懂就不写进描述」——只描述「不画就看不懂题」的元素。
-     **绝不要标注/画出需要学生求解的角、推导出的中间角度值**（那是答案，标=泄题）；**被平分/分割的角不要把
-     各半子角画出来**（连弧带度数都不要——平分关系只用射线表示，必要时加等长刻度记号）。除题目给定构型与
-     已知标注外一概不画，最小忠实集、宁少勿多；
-  ③ 变换关系（如「△ABC 绕点 A 逆时针旋转 60° 得 △AB′C′」「点 P 关于 x 轴对称到 P′」「沿向量平移」），
-     说清**绕谁/沿什么/转或移多少/到哪个像**；
-  ④ 哪些是虚线/辅助线（如「连结 BB′ 为虚线」「对称轴用虚线」）；
-  ⑤ 其它必要记号（平行/垂直记号、相等边记号等）。
-- 描述**只说题面/解答里已明确的构型**，不推断、不脑补题面没给的关系（与下游「只画不解题」一致）。
-- 🔴 figure_spec 是**新增可选字段**：拿不准/嫌麻烦时给空串 "" 即可（下游会退回老办法从题面现推），
+
+【🔴 内容决策（这些「画什么」的判断全归你 —— 下游不做内容裁剪）】
+- 配图是**给学生做的题图**（不是解题图、不是答案图）：**简洁明了、最小忠实集、宁少勿多**。
+- **必要性闸（描述每个元素——点/线/弧/标注——前先自问，不通过就不写进 figure_spec）**：
+  「这个**必须**画吗？**不画它，学生还能看懂这道题吗？**」——**能看懂，就不写。**
+- ⛔ **绝不描述/标注需要学生求解的角、推导出的中间角度值**（那是答案，画出来=泄题）。
+- ⛔ **被平分/被分割的角，不要把它的每一半子角画出来**（连弧都不要）——平分关系**只用射线表示**
+  （必要时在两半边加等长刻度记号），既不给各半子角描述、更不标度数。
+- ⛔ **只说题面/答案里已明确的构型**，不推断、不脑补题面没明说的关系（P 是否共线、某点是否在某射线上等，
+  题面给了就照给的说、没给的别推）；不要在 figure_spec 里解题/算答案/验证结论。
+
+【figure_spec 写成什么形态（半结构化：布局走自然语言，标注决策走结构化）】
+🔴 推荐写成一个 **JSON 对象**（让你的「标哪些角=什么文字」无损传给下游，不再让下游从自然语言猜）：
+  {{
+    "layout": "自然语言说清：有哪些点及大致布局（如「△ABC，A 在顶部，B、C 在底边」「O 为坐标原点」）；
+               变换关系（绕谁/沿什么/转或移多少/到哪个像，如「△ABC 绕 A 逆时针旋转 60° 得 △AB′C′」）；
+               哪些是虚线/辅助线（如「连结 BB′ 为虚线」「对称轴虚线」）；其它必要记号（平行/垂直/等长记号）。",
+    "angle_labels": []
+  }}
+  🔴🔴 **图上一律不标任何角度度数（限死，2026-06-20 用户拍板）**：配图是给学生做的题，**度数信息在题目
+    文字里、图上一概不写**（20°/30° 等度数文字一律不画，画了=泄题/冗余）。所以：
+  - **"angle_labels" 默认给空数组 []**——不要往里放任何度数。下游只按构型画弧、不标度数。
+  - 直角小方块、等长刻度、平行/垂直记号 = **构型记号**（不是度数），需要时**写进 layout 文字描述**
+    （如「∠ABC 处画直角小方块」「OS、OT 两侧加等长刻度表平分」），它们不是度数、照画。
+  - （唯一例外：老师后续在对话里**明确强制要求**把某角度数标到图上——那是下游图片重生时的事，与你出题无关，
+    你这里 angle_labels 始终空。）
+- 也允许把 figure_spec 写成**纯字符串**（自然语言描述布局/构型/变换/记号，同样不写度数）；但**优先 JSON 对象**。
+- 🔴 figure_spec 是**可选字段**：拿不准/嫌麻烦时给空串 "" 即可（下游会退回老办法从题面现推），
   绝不要因为这个字段卡住出题或编造内容。"""
 
 # 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
@@ -2666,7 +2689,7 @@ GENERATE_PROMPT = (
 只输出 JSON 数组(不要解释)，每个元素：
 {{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
   "qtype":"选择/填空/解答","difficulty":1~4,"level":"normal/hard","injected_kp":"相邻kp名或null",
-  "figure_spec":"配图自然语言描述或空串（契约见下）",
+  "figure_spec":{{"layout":"...","angle_labels":[...]}} 或 "" （配图决策对象/空串，契约见下；纯代数题给 ""）,
   "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
 
 """
@@ -3422,10 +3445,20 @@ def _normalize_generated_item(it: dict[str, Any], facts: dict) -> dict[str, Any]
     # 🔴 PRD-A-018 治本A·figure_spec（出题节点产的「画什么」自然语言描述，下游 compose 照此翻
     #   GeoGebra，不再现场逆推构型）：仅当 LLM 给了非空字符串才落 item（内部/展示键，不入 biz_question
     #   旧字段——build_create_bo/_artifact_payload 显式白名单天然不外漏；参照 figure_url 处理）。
-    #   缺字段/非字符串/纯代数题给空串 → 不落该键 → 下游退回从 stem 现推（向后兼容，旧线程无此键不崩）。
+    #   缺字段/空串/纯代数题给空串 → 不落该键 → 下游退回从 stem 现推（向后兼容，旧线程无此键不崩）。
+    #   🔴 round4 半结构化：figure_spec 现可为 ① 字符串（旧形态，自然语言）或 ② dict（新形态
+    #   {"layout":..., "angle_labels":[{"angle":"∠BAC","label":"20°"}]}）—— 标注决策结构化无损下传。
+    #   两种形态都原样落 item（dict 的空判 = layout/angle_labels 均空才算空）；compose 端按类型分发。
     _fig_spec = it.get("figure_spec")
     if isinstance(_fig_spec, str) and _fig_spec.strip():
         out["figure_spec"] = _fig_spec.strip()
+    elif isinstance(_fig_spec, dict):
+        _layout = str(_fig_spec.get("layout") or "").strip()
+        _al = _fig_spec.get("angle_labels")
+        _al = _al if isinstance(_al, list) else []
+        # 仅当至少有 layout 或 angle_labels 才落（纯空对象视同无 spec → 下游退回现推）
+        if _layout or _al:
+            out["figure_spec"] = {"layout": _layout, "angle_labels": _al}
     if isinstance(it.get("verify_payload"), dict):
         out["verify_payload"] = it["verify_payload"]
     # 🔴 批3·⑦ 反退化载荷（最值/动点构型才有）随 item 流转——item 内部字段，不进帧/不入库。
@@ -3586,6 +3619,25 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         + recipe["spec"]
     )
 
+    # 🔴 PRD-A-018 round4·治本P0「出题写 figure_spec 时手里有图」：把母题原图作为多模态 image 一并
+    #   喂给 generate（仿 analyze 的 ANALYZE_PROMPT 多模态写法 variant.py:1756-1761）。出题节点此刻
+    #   **真看着母题图**写 figure_spec（含结构化标注决策），不再凭母题题干文字+骨架脑补几何构型。
+    #   relay/opus 支持 vision（analyze 已用同套 list-content HumanMessage）。
+    #   🔴 向后兼容：image_url 可能缺（无图母题/纯代数母题/旧线程）→ 退回纯文本 HumanMessage，不崩。
+    #   on_delta 流内进度回调对 list-content / str-content 一视同仁（数 acc 里 "stem" 次数），不受影响。
+    _mother_img_url = (facts.get("image_url") or "").strip() if facts.get("image_url") else ""
+    if _mother_img_url:
+        _gen_human = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt
+                    + "\n\n🔴 上方附了**母题原配图**。写每道变式的 figure_spec 时**对照这张母题图**"
+                      "判断几何构型与标注（哪些点/角/线、标哪些已知角=什么文字），别再凭题干文字脑补。"},
+                {"type": "image_url", "image_url": {"url": _mother_img_url}},
+            ]
+        )
+    else:
+        _gen_human = HumanMessage(content=prompt)
+
     # 🔴 思维外放（用户反馈 2026-06-11）：JSON token 对用户是乱码不外放，但流内数
     # "stem" 出现次数 → 思路条实时跳「正在写第 n/N 道」+ 当前题干前几个字，等待不再是黑盒。
     total_n = int(recipe["n"])
@@ -3719,7 +3771,7 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
 
     try:
         text = await _ainvoke_text(
-            [HumanMessage(content=prompt)],
+            [_gen_human],
             on_delta=_gen_progress,
             model=settings.variant_model("generate"),
             # 🔴 PRD-C-100 B3-perf：套总时长墙钟闸（默认 180s，与 §11「opus 带图 ≤180s」对齐）。
@@ -3779,8 +3831,16 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             + "。请整组重出，严格满足配方（数量/题型配比/难度计划逐项核对后再输出）。"
         )
         try:
+            # 🔴 round4：整组 retry 同样喂母题图（出题二稿仍需看图写 figure_spec）；缺图退纯文本。
+            if _mother_img_url:
+                _retry_human = HumanMessage(content=[
+                    {"type": "text", "text": prompt + feedback},
+                    {"type": "image_url", "image_url": {"url": _mother_img_url}},
+                ])
+            else:
+                _retry_human = HumanMessage(content=prompt + feedback)
             retry_text = await _ainvoke_text(
-                [HumanMessage(content=prompt + feedback)],
+                [_retry_human],
                 model=settings.variant_model("generate"),
                 # 🔴 B3-perf：整组 retry 也套同一墙钟闸（这是第二次全量出题，不套则又是一条长尾）。
                 timeout=settings.VARIANT_TIMEOUT_GENERATE,

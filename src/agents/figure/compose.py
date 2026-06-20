@@ -35,37 +35,26 @@ _FIGURE_DEFAULT_SCALE = 0.7
 _FIGURE_DEFAULT_POINT_SIZE = 0
 
 # opus 翻 GeoGebra 命令 system 前缀（稳定，喂样例 + 命令语义坑）。画图链不挂缓存，但 prompt 仍分层清晰。
+# 🔴 round4 重构（2026-06-20）：本 system **砍成纯翻译器**——所有「画什么/内容决策」（必要性闸/不画子角/
+#   不标求解角/不解题/不推导）已上移到出题的 figure_spec（出题看着母题图、知道题目语义，一次定死）。
+#   画图节点不再做内容取舍、不判已知/求解，只把 figure_spec 忠实翻成 GeoGebra 命令 + 守翻译技术规则。
 _GEO_SYSTEM = (
-    "你是中小学数学配图助手。把给定的「变式题面 + 解答」翻译成一组 GeoGebra evalCommand 命令"
-    "（每行一条，能被 GeoGebra Math Apps 执行渲染成题目配图）。\n"
-    "🔴🔴🔴 唯一任务 = 忠实「画图」，绝不「解题」（铁律，放最前必守）：\n"
-    "  你画的是**给学生做的题目图**（不是解题图、不是答案图）。必须**简洁明了、最小忠实集、宁少勿多**："
-    "只画题目**给定**的几何构型（点/线/射线/必要标注）与**题目明确给出的已知**——"
-    "**除必要内容一概不画、不做多余的事**。\n"
-    "  🔴 **必要性闸（每画一个元素——点/线/弧/标注——前先自问，不通过就不写这条命令）**：\n"
-    "     「这个是**必须**画的吗？**不画它，学生还能看懂这道题吗？**」——**能看懂，就不画。**\n"
-    "     只画「不画就看不懂题目」的元素。画弧线本身没问题，但画前同样要过这道闸：这道弧必要吗？\n"
-    "     —— 被平分/被分割角的各半子角弧、题目没问到的角弧，**学生不看也懂题**（平分关系两条射线已表达清楚）"
-    "→ 属多余，**连弧带标度数一律不画**（不是只去掉度数、弧也不画）。\n"
-    "  ⛔ **绝不标注/画出需要学生求解的角、推导出的中间角度值**（那是答案，画出来=泄题）；\n"
-    "  ⛔ **被平分/被分割的角，不要把它的每一半子角画出来**（连弧都不画）——平分关系**只用射线表示**"
-    "（必要时在两半边加等长刻度记号），既不给各半子角画弧、更不标度数。\n"
-    "  ⛔ **不要去求解题目的答案**（不算 ∠M′NP 等于几度、不算边长、不验证结论）。\n"
-    "  ⛔ **不要纠结、不要推断题面没明说的构型关系**（如「P 是否在某射线上」「某点是否共线」——"
-    "题面给了角度/点/变换就照给的画，没给的别推、别脑补、别来回论证）。\n"
-    "  ⛔ **不要做任何数学推导/反复推演**——题面写「绕 N 逆时针旋转 50°」就 Rotate(…,50°,N)，"
-    "题面标「∠MNO=20°」就把 O 放在与 NM 夹 20° 处，到此为止。\n"
-    "  ✅ 把「画图」当**纯翻译**：题面文字 → GeoGebra 命令，一一对应，不增不减、不推理。"
-    "你越省去无谓推演，出图越快越准。\n"
-    "🔴 强制工作流（必走三步，治「首次造图漏元素」——题面要标的角/记号别漏画）：\n"
-    "  第一步·列清单：先逐一列出题面/解答里**明确提到的所有几何对象**——点、角"
-    "（含「角1/角2/∠1/∠2」这类**要求标注**的角）、线段、辅助线、记号（直角/相等/平行/角度数）"
-    "——形成元素清单（在脑中或注释里过一遍，不外放到 JSON）。\n"
-    "  第二步·逐项落命令：保证清单里**每一项都有对应的 GeoGebra 命令或标注**"
-    "（标注角用 Angle(...)，点序见下；要标的角必须有 Angle 命令，绝不只画线不标角）。\n"
-    "  第三步·交付前自检：对照第一步的元素清单**逐项核对**，确认**无遗漏**"
-    "（题面要的角/记号都画了）、也**无擅自新增**题面不存在的元素（忠实原图最小集——"
-    "原图没有的圆点/角弧/直角小方块/辅助线一律不加）。\n"
+    "你是 GeoGebra **翻译器**：把上游给定的「配图决策（figure_spec）」忠实翻译成一组 GeoGebra "
+    "evalCommand 命令（每行一条，能被 GeoGebra Math Apps 执行渲染成题目配图）。\n"
+    "🔴🔴🔴 你的职责边界（铁律，放最前必守）：\n"
+    "  ✅ **忠实翻译**：配图决策说画哪些点/线/角/虚线/记号、标哪些角=什么文字，你就一一对应翻成命令，"
+    "**不增不减**。把「画图」当纯翻译：决策文字 → GeoGebra 命令。\n"
+    "  ⛔ **绝不自己做内容决策**：画什么、标哪些角、哪个角是已知/哪个要学生求解、要不要极简——"
+    "这些**上游（出题）已经定死并写进配图决策**，**不归你判**。决策里有的就画，没有的就不画、不补、不脑补。\n"
+    "  ⛔ **绝不解题/推导**：不算角度、不算边长、不验证结论、不推断题面没明说的构型关系——"
+    "上游给的坐标/角度/变换照翻即可（如「绕 N 逆时针旋转 50°」就 Rotate(…,50°,N)，到此为止）。\n"
+    "  ⛔ **绝不标任何角度度数**：默认**所有角都不标度数**（angle_labels 输出空/省略），只按构型画必要的弧；"
+    "唯一例外 = 老师在【修正要求】里明确强制要标某角度数（详见下方角度度数铁律）。\n"
+    "🔴 翻译工作流（治「漏翻决策里的元素」）：\n"
+    "  第一步·读决策列清单：把配图决策里**明确提到的所有几何对象**（点、要标的角、线段、辅助线、"
+    "虚线、平行/垂直/等长记号）逐一列出（脑中或注释，不外放 JSON）。\n"
+    "  第二步·逐项落命令：清单每一项都有对应 GeoGebra 命令；角用 Angle(...) 画弧即可（默认不标度数、不进 angle_labels）。\n"
+    "  第三步·交付前自检：对照清单**逐项核对**——决策要的都翻了（无遗漏）、决策没有的没擅自加（无新增）。\n"
     "🔴 命令语义坑（必守，防返工）：① 自由点直接 A=(2,3)，**别用 Point((2,3))**（会失败）；"
     "② 派生点（交点/垂足/中点/旋转像）用 Intersect/Midpoint/PerpendicularLine/Rotate/Reflect/Translate"
     "让引擎算，别手填坐标——垂足用 ClosestPoint(Line(A,E),B)（求 B 到 AE 的垂足）、"
@@ -81,22 +70,18 @@ _GEO_SYSTEM = (
     "⑥ 🔴 标注角的点序坑：Angle(P,V,Q) 是**有向角**（V 是顶点，从 V→P 逆时针扫到 V→Q），"
     "点序须让扫角 ≤180°，否则画成反向优角（曾把直角渲成 270° 大半圆）——"
     "标 ∠BAC 写 Angle(B,A,C)（顶点 A 在中间），扫出来大于平角就把首尾两点调换。\n"
-    "🔴🔴 角度标注（默认只画弧不标度数；只有题目已知的角才标，治「泄答案 + 丑小数 + 套嵌成团」根因，必守）：\n"
-    "  ⓪ 【默认：Angle() 只画弧、不标度数；只有题目已知角才标，且走 angle_labels】"
-    "本渲染器默认对每个 Angle(P,V,Q) **只画一道弧、不显任何度数文字**。"
-    "🔴 **只有题目里明确给出（已知）的角度才标出来**——把那个角放进顶层 angle_labels 字段映射要显示的文字："
-    "\"angle_labels\":{\"a1\":\"20°\",\"a2\":\"α\"}（a1 标「20°」、a2 标「α」）。"
-    "🔴🔴 **绝不要标注/画弧标度数给「学生要求解的角」或「推导出的中间角度」**（那是答案，标=泄题）；"
-    "**被平分/分割的角不要给各半子角各标度数**（平分只用射线表示，必要时加等长刻度记号）。"
-    "🔴 **绝不要写 Text(\"20°\",(x,y)) 手放任何角度数字**（坐标全靠猜必放歪、还和标签双标）——"
-    "要标的已知角走 angle_labels，其余角只画弧（或干脆不画那道弧）。"
-    "同一顶点有多个角时，引擎自动把各角弧按大小**递增半径错开**，你不用操心半径。\n"
+    "🔴🔴🔴 角度度数 = 绝对禁止标（限死，2026-06-20 用户拍板，必守）：\n"
+    "  ⓪ 【任何角一律只画弧、绝不在图上标度数文字】配图是给学生做的题，**度数信息在题目文字里、"
+    "图上一概不写**。所以：每个 Angle(P,V,Q) **默认只画一道弧、不显任何度数/角度数值文字**（不写 "
+    "20°/30°/55°、不写 α/x° 等任何角度数值），**angle_labels 默认输出空对象或直接省略该字段**。\n"
+    "  🔴 **唯一例外 = 老师在【修正要求】里明确要求**把某个角的度数标到图上时，才把那个角放进 angle_labels "
+    "标该度数；除此之外，**无论上游配图决策、题面、答案里写没写度数，你都一律不标**（默认 angle_labels 空）。\n"
+    "  🔴 **绝不要写 Text(\"20°\",(x,y)) 手放任何角度数字**（坐标全靠猜必放歪、还和标签双标）。\n"
+    "  🔴 注意区分：直角小方块、等长刻度记号 = **构型记号**（不是度数），按构型该画就画，不受本禁令约束；"
+    "本禁令只禁**角度数值文字**。同一顶点多角弧，引擎自动按大小递增半径错开，你不用操心。\n"
     "  ⓪″ 【角的点序——别画成反向优角/整圈】Angle(P,V,Q) 是有向角（V 顶点，V→P 逆时针扫到 V→Q）。"
     "**扫角必须 ≤180°**，否则渲成反向优角甚至近一整圈大圆（如旋转角 50° 写反点序会扫成 310° 画出大圆圈）。"
     "若某角应是锐角/钝角却扫超平角，**把首尾两点 P、Q 调换**即可。\n"
-    "  ⓪′ 【angle_labels 就是「标哪些已知角」的唯一开关】只把**题目已知的角**放进 angle_labels，"
-    "值写题面给的文字（实测度数 30°、或符号 α/x°——以题面为准，不要写引擎算出的丑小数）。"
-    "不放进 angle_labels 的角默认不标度数（只画弧）。**该求解的角、各半子角一律不要放进 angle_labels。**\n"
     "🔴🔴 文字/公式标注（治「公式插不进、撇号点名乱」根因，必守）：\n"
     "  ⓐ 【Unicode 不 LaTeX】图里要写公式/数学符号一律用 **Unicode 字符**直接放进 Text(\"...\")——"
     "本无头渲染器**不认 LaTeX 宏**（写 Text(\"\\\\frac{1}{2}\",pt,true) 会原样印出反斜杠 \\frac 乱码，"
@@ -111,13 +96,27 @@ _GEO_SYSTEM = (
     "relabel 让自动标签直接印 A′（位置自动算，不偏不撞）。\n"
     "🔴 只输出一个 JSON（不要解释、不要 markdown fence）：\n"
     '{"commands":["...","..."],"dashed":["对象名"],"hide":["辅助对象名"],"vals":["关键点名"],'
-    '"relabel":{"Ap":"A′","Bp":"B′"},"angle_labels":{"a2":"30°"},"axes":false,"needs_figure":false}\n'
+    '"relabel":{"Ap":"A′","Bp":"B′"},"axes":false,"needs_figure":false}\n'
     "  （relabel 仅旋转/对称/平移有像点要标撇号时给；无撇号点的题省略此字段。"
-    "angle_labels 放**题目已知、需在图上标出的角**（key=角对象名,value=显示文字）；"
-    "不放的角默认只画弧不标度数——该求解的角/各半子角绝不放进来。无已知角要标时省略此字段。）\n"
-    "🔴 若此题**不适合/不需要配图**（纯代数无几何意义、或你无法可靠构造），把 needs_figure 设 true、"
-    "commands 留空数组（降级，不硬画错图）。\n\n"
+    "🔴 **angle_labels 默认不要这个字段**（任何角都不标度数）——只有老师明确强制要标某角度数时才加 "
+    '"angle_labels":{"角对象名":"度数"}，否则一律省略。）\n'
+    "🔴 若上游**没给配图决策**且你也无法可靠从题面消歧构造（纯代数无几何意义、或无法可靠构造），"
+    "把 needs_figure 设 true、commands 留空数组（降级，不硬画错图）。\n\n"
     + geogebra_samples.samples_prompt_block()
+)
+
+
+# 🔴 round4 退化路径专用内容决策（仅 figure_spec 空时塞进 user 段，不进 system 翻译器）：
+#   正常路径内容决策已在出题的 figure_spec；只有上游没给决策（旧线程/纯文本兼容）才用这块兜底，
+#   让画图临时从 stem 现推时仍守「最小忠实集/不泄题」。命中观测 figure_spec_used=False 会暴露走了这里。
+_FALLBACK_CONTENT_RULES = (
+    "【⚠ 退化提示·上游未给配图决策，请你据上面的题面临时判断画什么（守以下铁律）】\n"
+    "你画的是**给学生做的题图**（不是解题图/答案图），简洁明了、最小忠实集、宁少勿多：\n"
+    "  · 必要性闸：每画一个元素前自问「不画它学生还看得懂这道题吗？看得懂就不画」；\n"
+    "  · ⛔ 绝不标注/画出需要学生求解的角、推导出的中间角度值（那是答案，画=泄题）；\n"
+    "  · ⛔ 被平分/分割的角不要画各半子角的弧（平分只用射线表示，必要时加等长刻度记号）；\n"
+    "  · ⛔ 只画题面已明确的构型，不推断/不脑补题面没给的关系，不解题、不算答案；\n"
+    "  · 🔴 **任何角一律不标度数**（angle_labels 省略，度数信息在题目文字里、图上不写），只按构型画弧。\n"
 )
 
 
@@ -199,6 +198,27 @@ def _append_reason(base: str | None, extra: str) -> str:
     return f"{base} {extra}".strip() if base else extra
 
 
+def _fmt_figure_spec(figure_spec: Any) -> tuple[str, list[dict[str, str]]]:
+    """round4 半结构化 figure_spec 归一：返回 (描述文本, angle_label_hints)。
+       - dict 形态 {"layout":..,"angle_labels":[{"angle":"∠BAC","label":"20°"},..]}：
+         layout 作描述文本；angle_labels 作结构化标注提示（无损下传，compose 据此产 angle_labels）。
+       - str 形态（旧·纯自然语言）：整串作描述文本，无结构化提示（compose 从描述里读标注决策）。
+       - 空/其它 → ("", [])。"""
+    if isinstance(figure_spec, dict):
+        layout = str(figure_spec.get("layout") or "").strip()
+        hints: list[dict[str, str]] = []
+        for al in (figure_spec.get("angle_labels") or []):
+            if isinstance(al, dict):
+                a = str(al.get("angle") or "").strip()
+                lb = str(al.get("label") or "").strip()
+                if a and lb:
+                    hints.append({"angle": a, "label": lb})
+        return layout, hints
+    if isinstance(figure_spec, str):
+        return figure_spec.strip(), []
+    return "", []
+
+
 async def compose_variant_figure(
     *,
     stem: str,
@@ -209,7 +229,7 @@ async def compose_variant_figure(
     prev_commands: list[str] | None = None,
     item_id: str | None = None,
     model: str | None = None,
-    figure_spec: str | None = None,
+    figure_spec: Any = None,
 ) -> dict[str, Any]:
     """变式造图一轮直出（+ 图片重生）。返回
        {item_id, ok, png_base64?, commands, dashed, vals, needs_figure, warnings, reason?}。
@@ -219,10 +239,14 @@ async def compose_variant_figure(
     🔴 PRD-C-100 C：图片重生带上一版 GeoGebra commands（prev_commands）+ 原题上下文 →
        opus 在「上一版配图命令的基础上按修正要求调整」（增量修改，而非从零重画，保证继承上一版）。
        仅当 correction_prompt 与 prev_commands 同时非空才走增量分支；首次造图（无 prev_commands）维持原行为。
-    🔴 PRD-A-018 治本A·figure_spec（出题节点产的「画什么」自然语言配图描述）：非空时作为**权威画图依据**
-       喂给 opus —— opus 只需「照 figure_spec 翻成 GeoGebra 命令」，不再现场从题面**逆推**几何构型
-       （根治「逆推歧义」+ 大降耗时）。figure_spec 为空/缺省 → 退回原行为（从 stem/answer 现推），向后兼容。
+    🔴 PRD-A-018 round4·figure_spec（出题节点看着母题图产的「画什么」配图决策，半结构化）：
+       figure_spec 现可为 str（旧·自然语言）或 dict（新·{"layout":..,"angle_labels":[..]}）。
+       非空时作为**权威且唯一的画图依据** —— 画图节点是**纯翻译器**：照 figure_spec 忠实翻成 GeoGebra
+       命令，自己不增不减、不做内容取舍、不判已知/求解（那些内容决策出题已定死）。其中
+       angle_labels 结构化提示（哪些角=什么文字）**无损**传给画图 → 直接据它产 compose 的 angle_labels。
+       figure_spec 为空/缺省 → 退回原行为（从 stem 现推，画图临时兼任内容决策），向后兼容。
        图片重生（correction_prompt 在）时 figure_spec 仍作为「这道图本该是什么」的底图描述一并喂入。
+    🔴 answer 不再喂入画图（round4 治泄题诱因）：画图只吃 figure_spec + stem（stem 仅作轻量消歧）。
     🔴 任何失败 → needs_figure=True（降级，不抛、不掐流程 G11）。
     """
     # 🔴 B5 预算护栏（G7）：当日花费超阈值 → 造图降级（needs_figure，不调翻命令，题照常交付）。
@@ -232,21 +256,35 @@ async def compose_variant_figure(
         return {"item_id": item_id, "ok": False, "needs_figure": True,
                 "reason": "今日 AI 额度已用尽，配图暂缓（可明日重试或手动配图）", "commands": [], "warnings": []}
 
-    user_segs = [f"【变式题面】\n{stem}"]
-    if answer:
-        user_segs.append(f"【标准答案/解答】\n{answer}")
-    # 🔴 PRD-A-018 治本A：figure_spec 非空 = 出题节点已把「这道图画什么」想清楚（自然语言描述）。
-    #   把它作为**权威画图依据**放在最前位重的段——指令 opus「照这份描述翻 GeoGebra，别再从题面逆推
-    #   构型」。题面/答案仍附在后供消歧（如描述里某点坐标含糊时回看题面），但「画什么」以 spec 为准。
-    spec_clean = (figure_spec or "").strip()
-    if spec_clean:
-        user_segs.append(
-            "【🔴 配图描述（权威·画什么以此为准）】\n"
-            "下面是出题时（上下文最全）已经写好的本图自然语言描述——你的任务是**照这份描述忠实翻译成 "
-            "GeoGebra 命令**，不要再从题面逆推几何构型、不要纠结题面没明说的关系。描述里说画哪些点/角/"
-            "度数/旋转平移对称/虚线，就照画哪些；题面与答案附在上方仅供消歧参考。\n"
-            f"{spec_clean}"
+    # round4 半结构化：拆出 layout 描述 + angle_label 结构化提示。
+    spec_layout, spec_angle_hints = _fmt_figure_spec(figure_spec)
+    used_spec = bool(spec_layout or spec_angle_hints)  # 命中观测：本次用了 spec 还是退回 stem 现推
+
+    # 🔴 round4：画图只吃 figure_spec + stem（stem 仅作轻量消歧，**不再喂 answer**=治泄题诱因）。
+    user_segs = [
+        "【变式题面（仅作轻量消歧参考，画图以下面的配图决策为准；切勿据题面解题/标答案）】\n" + str(stem or "")
+    ]
+    # 🔴 round4：figure_spec 非空 = 出题节点看着母题图把「画什么」想清楚了（含标注决策）。画图=纯翻译。
+    if used_spec:
+        seg = (
+            "【🔴 配图决策（权威·唯一画图依据；你只照此忠实翻成命令，不增不减、不做内容取舍）】\n"
+            "出题时（看着母题原图、上下文最全）已经定死了这道图画什么。你的任务是**把它忠实翻成 GeoGebra "
+            "命令**——决策里说画哪些点/线/角弧/旋转平移对称/虚线/记号，就照画哪些；不在决策里的不画。"
+            "绝不自己逆推几何、绝不解题、绝不判哪个角是已知/哪个要求解（出题已替你定）。\n"
         )
+        if spec_layout:
+            seg += f"·布局/构型/变换/虚线/记号：\n{spec_layout}\n"
+        # 🔴 限死（2026-06-20 用户拍板）：图上一律不标任何角度度数，angle_labels 省略，只按构型画弧。
+        seg += (
+            "·🔴 角度度数：**一律不标**（angle_labels 省略/空，任何角只画弧、不写 20°/30° 等度数文字）——"
+            "度数信息在题目文字里、图上不写。直角小方块/等长刻度等构型记号不是度数、按决策该画就画。\n"
+        )
+        user_segs.append(seg)
+    else:
+        # 🔴 round4 退化路径（figure_spec 空/旧线程）：上游没给配图决策，画图临时兼任内容决策——
+        #   把「画什么」的内容裁剪规则（必要性闸/不画子角/不标求解角）作为**这条退化路径专用**的提示
+        #   塞进 user 段（不污染 system 翻译器纯净度；命中观测 figure_spec_used=False 会暴露走了这里）。
+        user_segs.append(_FALLBACK_CONTENT_RULES)
     # 🔴 PRD-C-100 C：图片重生 = correction_prompt + prev_commands 都在 → 增量修改（带上一版命令 + 原题上下文）。
     #   把上一版 GeoGebra commands 原样喂回，指令改成「在下面这版配图命令的基础上，按修正要求调整」，
     #   让 opus 继承上一版骨架做增量改动，而非丢掉上下文从零重画（跑偏的根因）。
@@ -338,11 +376,22 @@ async def compose_variant_figure(
                 "reason": _append_reason("PNG 读取失败", _DESC_HINT),
                 "commands": data.get("commands"), "warnings": []}
     # 成功路径：触发条件 4·方向元素 → 标 direction_review + 引导老师确认方向（图照常交付）。
+    # 🔴 round4 命中观测：figure_spec_used 暴露本次走的是 spec（治本路径）还是 spec 空退回 stem 现推
+    #   （退化路径）——别让治本静默退化成现推都没人察觉。日志同步打一行。
     out: dict[str, Any] = {
         "item_id": item_id, "ok": True, "needs_figure": False, "png_base64": b64,
         "commands": data.get("commands"), "dashed": data.get("dashed"),
         "vals": r.get("vals", {}), "warnings": r.get("warnings", []),
+        "figure_spec_used": used_spec,
     }
+    try:
+        import logging
+        logging.getLogger(__name__).info(
+            "compose_variant_figure item=%s figure_spec_used=%s angle_hints=%d",
+            item_id, used_spec, len(spec_angle_hints),
+        )
+    except Exception:  # noqa: BLE001
+        pass
     if _hit_direction(stem, answer, data.get("commands"), data.get("hide")):
         out["direction_review"] = True
         out["reason"] = _DIRECTION_HINT

@@ -569,9 +569,20 @@ async def _mem_write_preference(token: str, *, grade_book: str | None, qtype: st
         logger.debug(f"_mem_write_preference best-effort skip: {e}")
 
 
-async def _lookup_figure_spec(thread_id: str, item_id: str | None) -> str | None:
+def _spec_nonempty(spec: Any) -> Any:
+    """figure_spec 取值归一（round4 半结构化）：spec 可为 str（旧·自然语言）或 dict
+       （新·{"layout":..,"angle_labels":[..]}）。非空则原样返回（dict 不 str 化，结构无损下传
+       compose），空串/空对象/其它 → None。"""
+    if isinstance(spec, str):
+        return spec.strip() or None
+    if isinstance(spec, dict):
+        return spec if (spec.get("layout") or spec.get("angle_labels")) else None
+    return None
+
+
+async def _lookup_figure_spec(thread_id: str, item_id: str | None) -> Any:
     """PRD-A-018 治本A：按 thread_id + item_id 从 checkpointer state 取该题的 figure_spec
-       （出题节点产的「画什么」自然语言配图描述）。
+       （出题节点产的「画什么」配图决策）。round4 起返回值可为 str（旧）或 dict（新半结构化）。
 
     🔴 item_id = FE 传的 item.seq || item.index（见 book-ui onComposeVariantFigure）。state 里每道题
        的有效 seq = it["_seq"]（generate eager 落的稳定生成序）或 index+1（缺省回退，与 _artifact_payload
@@ -597,16 +608,14 @@ async def _lookup_figure_spec(thread_id: str, item_id: str | None) -> str | None
             eff_seq = it.get("_seq")
             eff_seq = str(eff_seq) if eff_seq not in (None, "") else str(i + 1)
             if eff_seq == target:
-                spec = it.get("figure_spec")
-                return spec.strip() if isinstance(spec, str) and spec.strip() else None
+                return _spec_nonempty(it.get("figure_spec"))
         # seq 未命中 → 按 1-based index 兜底
         try:
             idx = int(target) - 1
         except (TypeError, ValueError):
             return None
         if 0 <= idx < len(items) and isinstance(items[idx], dict):
-            spec = items[idx].get("figure_spec")
-            return spec.strip() if isinstance(spec, str) and spec.strip() else None
+            return _spec_nonempty(items[idx].get("figure_spec"))
         return None
     except Exception as e:  # noqa: BLE001 — 取 spec 是增强不是关卡，失败降级 None
         logger.debug(f"_lookup_figure_spec best-effort skip: {e}")
