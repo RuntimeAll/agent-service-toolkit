@@ -195,7 +195,9 @@ class Settings(BaseSettings):
     RELAY_NAME: str = "compatible"
     # 轻活模型（S1.1）：难度总评等无识图、可降本的调用点经 per-call model 覆盖走它；
     # 留空 → 各调用点退回默认（relay 配置 model），行为不变。
-    LLM_MODEL_LIGHT: str = "gpt-5.4-nano"
+    # 🔴 2026-06-20 用户拍板「全面 opus 4.8、停用 gpt-5.4/nano/mini」：代码默认也硬化成 opus
+    #   （.env 早已全档 opus；此默认是无 .env 时的兜底，确保任何情况都不回退 gpt-5.4/nano）。
+    LLM_MODEL_LIGHT: str = "claude-opus-4-8"
 
     # === 按环节分档模型路由（PRD-C-009 变式·2026-06-12）===
     # 举一反三管线按「环节」分档配模型：前置抽取环节降本（nano），深度思考档（gpt-5.4）只留
@@ -372,11 +374,13 @@ class Settings(BaseSettings):
         if override:
             return override
         # 缺省回退链（= 现行为；改默认值在此处一处定，调用点不重复）
+        # 🔴 2026-06-20 用户拍板「全面 opus 4.8」：缺省回退也全 opus（原 None=退 relay 站默认 gpt-5.4、
+        #   nano=轻档），彻底无 gpt-5.4/nano 残留。.env 已全档显式 opus，此为无 .env 兜底双保险。
         defaults: dict[str, str | None] = {
-            "analyze": None,
+            "analyze": "claude-opus-4-8",
             "dna": self.LLM_MODEL_LIGHT,
-            "solve": None,
-            "generate": None,
+            "solve": "claude-opus-4-8",
+            "generate": "claude-opus-4-8",
             # 缺省回退 nano（与 dna 同档）；.env 显式切 gpt-5.4-mini（H2 甜点档）覆盖。
             "model_confirm": self.LLM_MODEL_LIGHT,
             # 🔴 PRD-C-017 F1 冗余护栏：母题档即使 override 被人误清空也绝不回退到 None/gpt-5.4。

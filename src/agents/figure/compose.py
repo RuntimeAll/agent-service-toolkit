@@ -39,7 +39,17 @@ _GEO_SYSTEM = (
     "你是中小学数学配图助手。把给定的「变式题面 + 解答」翻译成一组 GeoGebra evalCommand 命令"
     "（每行一条，能被 GeoGebra Math Apps 执行渲染成题目配图）。\n"
     "🔴🔴🔴 唯一任务 = 忠实「画图」，绝不「解题」（铁律，放最前必守）：\n"
-    "  你的职责只有一个——把题面/解答里**已经明确描述的**几何构型与标注**照原样画出来**。\n"
+    "  你画的是**给学生做的题目图**（不是解题图、不是答案图）。必须**简洁明了、最小忠实集、宁少勿多**："
+    "只画题目**给定**的几何构型（点/线/射线/必要标注）与**题目明确给出的已知**——"
+    "**除必要内容一概不画、不做多余的事**。\n"
+    "  🔴 **必要性闸（每画一个元素——点/线/弧/标注——前先自问，不通过就不写这条命令）**：\n"
+    "     「这个是**必须**画的吗？**不画它，学生还能看懂这道题吗？**」——**能看懂，就不画。**\n"
+    "     只画「不画就看不懂题目」的元素。画弧线本身没问题，但画前同样要过这道闸：这道弧必要吗？\n"
+    "     —— 被平分/被分割角的各半子角弧、题目没问到的角弧，**学生不看也懂题**（平分关系两条射线已表达清楚）"
+    "→ 属多余，**连弧带标度数一律不画**（不是只去掉度数、弧也不画）。\n"
+    "  ⛔ **绝不标注/画出需要学生求解的角、推导出的中间角度值**（那是答案，画出来=泄题）；\n"
+    "  ⛔ **被平分/被分割的角，不要把它的每一半子角画出来**（连弧都不画）——平分关系**只用射线表示**"
+    "（必要时在两半边加等长刻度记号），既不给各半子角画弧、更不标度数。\n"
     "  ⛔ **不要去求解题目的答案**（不算 ∠M′NP 等于几度、不算边长、不验证结论）。\n"
     "  ⛔ **不要纠结、不要推断题面没明说的构型关系**（如「P 是否在某射线上」「某点是否共线」——"
     "题面给了角度/点/变换就照给的画，没给的别推、别脑补、别来回论证）。\n"
@@ -71,19 +81,22 @@ _GEO_SYSTEM = (
     "⑥ 🔴 标注角的点序坑：Angle(P,V,Q) 是**有向角**（V 是顶点，从 V→P 逆时针扫到 V→Q），"
     "点序须让扫角 ≤180°，否则画成反向优角（曾把直角渲成 270° 大半圆）——"
     "标 ∠BAC 写 Angle(B,A,C)（顶点 A 在中间），扫出来大于平角就把首尾两点调换。\n"
-    "🔴🔴 角度数字标注（治「角度数字坐标手放必偏、同顶点角弧套嵌成团」根因，必守）：\n"
-    "  ⓪ 【角度数字一律别手放 Text，全交给 Angle() 自动出——含旋转角/夹角】要在图上标**任何角的度数**"
-    "（如 20°、∠AOB=30°、旋转角 50°），**只需画出对应的 Angle(P,V,Q)**——引擎自动按**角平分线方向、"
-    "合适半径**把实测度数标在角内。🔴 **绝不要写 Text(\"20°\",(x,y)) / Text(\"50°\",…) 手放任何角度数字**"
-    "（坐标全靠猜必放歪、还和自动标签双标；旋转角也用 Angle 画，别再补一条 Text）。"
-    "同一顶点有多个角（如 ∠AOB 与 ∠BOC）时，引擎自动把各角弧按大小**递增半径错开**，你不用操心半径。\n"
+    "🔴🔴 角度标注（默认只画弧不标度数；只有题目已知的角才标，治「泄答案 + 丑小数 + 套嵌成团」根因，必守）：\n"
+    "  ⓪ 【默认：Angle() 只画弧、不标度数；只有题目已知角才标，且走 angle_labels】"
+    "本渲染器默认对每个 Angle(P,V,Q) **只画一道弧、不显任何度数文字**。"
+    "🔴 **只有题目里明确给出（已知）的角度才标出来**——把那个角放进顶层 angle_labels 字段映射要显示的文字："
+    "\"angle_labels\":{\"a1\":\"20°\",\"a2\":\"α\"}（a1 标「20°」、a2 标「α」）。"
+    "🔴🔴 **绝不要标注/画弧标度数给「学生要求解的角」或「推导出的中间角度」**（那是答案，标=泄题）；"
+    "**被平分/分割的角不要给各半子角各标度数**（平分只用射线表示，必要时加等长刻度记号）。"
+    "🔴 **绝不要写 Text(\"20°\",(x,y)) 手放任何角度数字**（坐标全靠猜必放歪、还和标签双标）——"
+    "要标的已知角走 angle_labels，其余角只画弧（或干脆不画那道弧）。"
+    "同一顶点有多个角时，引擎自动把各角弧按大小**递增半径错开**，你不用操心半径。\n"
     "  ⓪″ 【角的点序——别画成反向优角/整圈】Angle(P,V,Q) 是有向角（V 顶点，V→P 逆时针扫到 V→Q）。"
     "**扫角必须 ≤180°**，否则渲成反向优角甚至近一整圈大圆（如旋转角 50° 写反点序会扫成 310° 画出大圆圈）。"
     "若某角应是锐角/钝角却扫超平角，**把首尾两点 P、Q 调换**即可。\n"
-    "  ⓪′ 【示意图覆盖：画的角≠要标的度数 / 标 α 等符号】少数题图是**示意**——画出来的角度不等于题面"
-    "要标的度数，或要标 α/β/x° 这类符号而非实测度数。这时在顶层 **angle_labels 字段**给该角对象名映射"
-    "显示文字：\"angle_labels\":{\"a2\":\"30°\",\"a3\":\"α\"}（让 a2 显示「30°」、a3 显示「α」而非引擎实测值）。"
-    "不需要覆盖的角省略即可（默认出实测度数）。\n"
+    "  ⓪′ 【angle_labels 就是「标哪些已知角」的唯一开关】只把**题目已知的角**放进 angle_labels，"
+    "值写题面给的文字（实测度数 30°、或符号 α/x°——以题面为准，不要写引擎算出的丑小数）。"
+    "不放进 angle_labels 的角默认不标度数（只画弧）。**该求解的角、各半子角一律不要放进 angle_labels。**\n"
     "🔴🔴 文字/公式标注（治「公式插不进、撇号点名乱」根因，必守）：\n"
     "  ⓐ 【Unicode 不 LaTeX】图里要写公式/数学符号一律用 **Unicode 字符**直接放进 Text(\"...\")——"
     "本无头渲染器**不认 LaTeX 宏**（写 Text(\"\\\\frac{1}{2}\",pt,true) 会原样印出反斜杠 \\frac 乱码，"
@@ -100,7 +113,8 @@ _GEO_SYSTEM = (
     '{"commands":["...","..."],"dashed":["对象名"],"hide":["辅助对象名"],"vals":["关键点名"],'
     '"relabel":{"Ap":"A′","Bp":"B′"},"angle_labels":{"a2":"30°"},"axes":false,"needs_figure":false}\n'
     "  （relabel 仅旋转/对称/平移有像点要标撇号时给；无撇号点的题省略此字段。"
-    "angle_labels 仅示意图需覆盖某角显示文字时给；要标实测度数的角只画 Angle() 即可、省略此字段。）\n"
+    "angle_labels 放**题目已知、需在图上标出的角**（key=角对象名,value=显示文字）；"
+    "不放的角默认只画弧不标度数——该求解的角/各半子角绝不放进来。无已知角要标时省略此字段。）\n"
     "🔴 若此题**不适合/不需要配图**（纯代数无几何意义、或你无法可靠构造），把 needs_figure 设 true、"
     "commands 留空数组（降级，不硬画错图）。\n\n"
     + geogebra_samples.samples_prompt_block()
@@ -131,9 +145,13 @@ _FIGURE_KEYWORDS = (
 # 🔴 PRD-A-018 bug#4（2026-06-20 用户反馈「方向待确认提示太泛」）：方向待确认**只在图里真画了
 #   方向箭头**(GeoGebra Vector / 箭头符号)时才触发。旧逻辑按题面/答案/命令里「旋转/平移/镜像」关键词
 #   泛触发 → 任何变换题(哪怕只出虚线像、图中无箭头)都弹「方向待确认」= 噪音(用户实测旋转题无箭头也弹)。
-#   收窄判据：纯出虚线像的旋转/平移/对称题(无箭头) **不**提示；唯有 commands 里含 Vector(...)/箭头
-#   (明确画了表方向的箭头)才提示老师确认方向。判据只看 commands(图本身)，不看题面文字。
-_ARROW_CMD_KEYWORDS = ("vector(", "→", "箭头")
+#   收窄判据：纯出虚线像的旋转/平移/对称题(无箭头) **不**提示；唯有 commands 里含**可见**的 Vector(...)/
+#   箭头(明确画了表方向的箭头)才提示老师确认方向。判据只看 commands(图本身)，不看题面文字。
+# 🔴 round3 再收窄(2026-06-20 trace 1953)：UnitVector(Vector(O,M)) 这种**隐藏辅助构造**(只为算方向、
+#   放进 hide 不画出来)被旧 "vector(" 子串误判成方向箭头 → 无箭头的平分射线题也弹「方向待确认」。
+#   两层收窄：① 命中前先剔除 unitvector( 与所有 Vector(...) 的内嵌实参里的 vector(，只认**真画箭头**的
+#   顶层 Vector 赋值；② 该 Vector 对象若在 hide 里(辅助构造,不可见)不算箭头。
+_ARROW_CMD_KEYWORDS = ("→", "箭头")
 _DESC_HINT = "如需配图，请补一句图形描述（说清要画哪些点/角/线/标注），我再据此重画。"
 _DIRECTION_HINT = "本图含方向箭头，请确认旋转/平移方向是否正确；如不对，补一句说明我来重画。"
 
@@ -145,14 +163,34 @@ def _has_keyword(text: str | None, keywords: tuple[str, ...]) -> bool:
     return any((kw.lower() in low) for kw in keywords)
 
 
-def _hit_direction(stem: str | None, answer: str | None, commands: Any) -> bool:
-    """方向待确认命中：**仅当 commands 里真画了方向箭头**(Vector(...)/箭头符号)时返 True。
-    🔴 bug#4 收窄（2026-06-20）：旧版按题面/答案/命令「旋转/平移/镜像」关键词泛触发，
-       致任何变换题(哪怕图中无箭头、只出虚线像)都弹「方向待确认」噪音。现只看图本身有无箭头——
-       不看题面文字、也不把 Rotate/Reflect/Translate(只出虚线像、非箭头)当方向元素。"""
-    if isinstance(commands, list):
-        joined = "\n".join(str(c) for c in commands).lower()
-        return any(kw in joined for kw in _ARROW_CMD_KEYWORDS)
+def _hit_direction(
+    stem: str | None, answer: str | None, commands: Any, hide: Any = None,
+) -> bool:
+    """方向待确认命中：**仅当 commands 里真画了「可见的」方向箭头**(顶层 Vector(...) 且未隐藏 / 箭头符号)
+       时返 True。
+    🔴 bug#4 收窄（2026-06-20）：旧版按「旋转/平移/镜像」关键词泛触发，任何变换题(哪怕只出虚线像)都弹噪音。
+    🔴 round3 再收窄（trace 1953）：旧 "vector(" 子串把 UnitVector(Vector(O,M)) 这类**隐藏辅助构造**误判成
+       箭头 → 无箭头的平分射线题也弹「方向待确认」。现三层收窄，只认**真画出来的箭头对象**：
+         ① 只认**顶层 Vector(...) 赋值**（RHS 以 Vector( 开头，如 v=Vector(A,B)）——嵌在别的函数实参里的
+            vector(（如 UnitVector(Vector(O,M)) 的内层、或 +Vector(...) 运算项）一律不算（那不是独立箭头对象）；
+         ② 排除 UnitVector（不是箭头）；
+         ③ 该 Vector 对象名若在 hide 里(辅助构造、不可见)不算箭头。"""
+    if not isinstance(commands, list):
+        return False
+    hide_set = {str(h).strip() for h in hide} if isinstance(hide, list) else set()
+    for c in commands:
+        s = str(c)
+        # 箭头符号直接命中（少见，opus 一般不会塞）
+        if "→" in s or "箭头" in s:
+            return True
+        # 只认「name=Vector(...)」形态（RHS 顶层就是 Vector 调用）= 真画出来的独立箭头对象。
+        if "=" not in s:
+            continue
+        name, rhs = s.split("=", 1)
+        name = name.strip()
+        rhs = rhs.strip().lower()
+        if rhs.startswith("vector(") and (name not in hide_set):
+            return True
     return False
 
 
@@ -272,9 +310,9 @@ async def compose_variant_figure(
     #   而非内部名 Ap/Bp，opus 不必再手放 Text 撇号标签（治「Ap 与 A′ 双标签打架」根因）。
     relabel = data.get("relabel")
     relabel = dict(relabel) if isinstance(relabel, dict) else None
-    # 🔴 angle_labels（{角对象名:"显示文字"}）：默认不传——Angle() 由引擎按角平分线自动出实测度数
-    #   （opus 不再手放 Text 角度数字，治「角度数字坐标手放必偏」）。仅示意图（画的角≠题面标的度数）
-    #   时 opus 在 JSON 给 angle_labels 显式覆盖该角文字。同顶点多角弧引擎自动按角大小递增半径错开。
+    # 🔴 angle_labels（{角对象名:"显示文字"}）：round3 默认翻转——Angle() 默认**只画弧、不标度数**
+    #   （配图=给学生做的题，不泄答案、不冒丑小数）。**只有题目已知的角**才放进 angle_labels 标出（如
+    #   {"a1":"20°"}）；不放的角无标签。该求解的角/被平分各半子角绝不放进来。同顶点多角弧仍自动递增半径错开。
     angle_labels = data.get("angle_labels")
     angle_labels = dict(angle_labels) if isinstance(angle_labels, dict) else None
     try:
@@ -305,7 +343,7 @@ async def compose_variant_figure(
         "commands": data.get("commands"), "dashed": data.get("dashed"),
         "vals": r.get("vals", {}), "warnings": r.get("warnings", []),
     }
-    if _hit_direction(stem, answer, data.get("commands")):
+    if _hit_direction(stem, answer, data.get("commands"), data.get("hide")):
         out["direction_review"] = True
         out["reason"] = _DIRECTION_HINT
     return out
