@@ -976,6 +976,20 @@ _LITERAL_NL_RE = re.compile(r"\\n(?![a-z])")
 _MATH_SPLIT_RE = re.compile(r"(\$\$[\s\S]+?\$\$|\$[^\n$]+?\$)")
 # 裸间距命令：\quad \qquad \, \; \! \:（后接非字母边界，防误伤 \quadword 之类）
 _BARE_SPACING_RE = re.compile(r"\\(?:qquad|quad)(?![a-zA-Z])|\\[,;!:]")
+# 🔴 2026-06-21（PRD-A-018 用户终审）：LLM 常把无参几何符号命令粘住点标签，如把 $\angle BOD$
+#   写成 $\angleBOD$ → KaTeX 当未定义控制序列 → 整段红字裸显示。后跟大写字母必是标签，插空格修复。
+#   仅无参符号命令（不含 \vec/\overrightarrow 带参）。FE mathNormalize.ts GLUED_GEOM_RE 同口径。
+_GLUED_GEOM_RE = re.compile(r"\\(angle|triangle|parallel|nparallel|perp|cong|simeq|odot)(?=[A-Z])")
+# 数学段内裸 ° → ^\circ（KaTeX 数学模式不认裸 °）。
+_BARE_DEGREE_RE = re.compile("°")
+
+
+def _fix_glued_inside_math(s: str) -> str:
+    """修 $...$ **内**常见 LLM LaTeX 脏写：粘连几何命令补空格、裸 ° → ^\\circ。段外不碰。"""
+    parts = _MATH_SPLIT_RE.split(s)
+    for i in range(1, len(parts), 2):  # 奇数下标 = 数学段（含定界符）
+        parts[i] = _BARE_DEGREE_RE.sub(r"^\\circ ", _GLUED_GEOM_RE.sub(r"\\\1 ", parts[i]))
+    return "".join(parts)
 
 
 def _strip_bare_spacing_outside_math(s: str) -> str:
@@ -995,7 +1009,7 @@ def _sanitize_rich_text(s: Any) -> Any:
     s = _BRACKET_MATH_RE.sub(lambda m: f"$${m.group(1)}$$", s)
     s = _PAREN_MATH_RE.sub(lambda m: f"${m.group(1)}$", s)
     s = _LITERAL_NL_RE.sub("\n", s)
-    return _strip_bare_spacing_outside_math(s)
+    return _fix_glued_inside_math(_strip_bare_spacing_outside_math(s))
 
 
 def _sanitize_item(it: dict[str, Any]) -> dict[str, Any]:
