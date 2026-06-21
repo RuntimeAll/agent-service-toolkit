@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.figure import geogebra_samples, mathfig_render
+from agents.figure import chapter_figure, geogebra_samples, mathfig_render
 
 # 🔴 单元2 标定（2026-06-18 实测）：配图默认 fig_scale=0.7（缩画布让标签相对放大；无头渲染下
 #   fontSize 参数无效，figScale 是唯一杠杆——见本地引擎 geogebra/render.js:81-92 注释）。
@@ -232,6 +232,8 @@ async def compose_variant_figure(
     item_id: str | None = None,
     model: str | None = None,
     figure_spec: Any = None,
+    chapter: str | None = None,
+    kp: str | None = None,
 ) -> dict[str, Any]:
     """变式造图一轮直出（+ 图片重生）。返回
        {item_id, ok, png_base64?, commands, dashed, vals, needs_figure, warnings, reason?}。
@@ -249,6 +251,11 @@ async def compose_variant_figure(
        figure_spec 为空/缺省 → 退回原行为（从 stem 现推，画图临时兼任内容决策），向后兼容。
        图片重生（correction_prompt 在）时 figure_spec 仍作为「这道图本该是什么」的底图描述一并喂入。
     🔴 answer 不再喂入画图（round4 治泄题诱因）：画图只吃 figure_spec + stem（stem 仅作轻量消歧）。
+    🔴 PRD-A-021 R3b·章节×图型定型闸（chapter/kp）：据母题章节名 + 考点名查 biz_chapter_figure_map
+       取「允许图型集」，命中非空时把定型约束拼进 prompt（spec 路径 + fallback 路径都拼，
+       fallback 才是 add/regen/库内母题几何图「乱画」主路径，必落），让 opus **只在允许图型内**翻命令。
+       🔴 逃生窗口：章节/考点取不到 / 无匹配图型 / 表读不到 → 允许集空 → **不拼约束**（自由翻命令），
+       绝不因没映射而画不出图。chapter/kp 缺省 → 同逃生（向后兼容，老调用不传也不崩）。
     🔴 任何失败 → needs_figure=True（降级，不抛、不掐流程 G11）。
     """
     # 🔴 B5 预算护栏（G7）：当日花费超阈值 → 造图降级（needs_figure，不调翻命令，题照常交付）。
@@ -261,6 +268,15 @@ async def compose_variant_figure(
     # round4 半结构化：拆出 layout 描述 + angle_label 结构化提示。
     spec_layout, spec_angle_hints = _fmt_figure_spec(figure_spec)
     used_spec = bool(spec_layout or spec_angle_hints)  # 命中观测：本次用了 spec 还是退回 stem 现推
+
+    # 🔴 PRD-A-021 R3b·章节×图型定型闸：据母题章节名 + 考点名取「允许图型集」（包含匹配+并集，
+    #   进程内缓存）。允许集非空 → 拼定型约束段（spec 路径 + fallback 路径都拼）；空 = 逃生（不约束）。
+    #   章节/考点取不到、无匹配、表读不到（dev 未 apply 迁移）一律落空集 → 自由翻命令（绝不画不出图）。
+    try:
+        _allowed = chapter_figure.allowed_figure_types(chapter, kp)
+    except Exception:  # noqa: BLE001 — 定型闸是增强非关卡，任何异常一律逃生（空约束）
+        _allowed = set()
+    fig_type_clause = chapter_figure.constraint_clause(_allowed)  # "" = 逃生（不拼约束）
 
     # 🔴 round4：画图只吃 figure_spec + stem（stem 仅作轻量消歧，**不再喂 answer**=治泄题诱因）。
     user_segs = [
@@ -287,6 +303,10 @@ async def compose_variant_figure(
         #   把「画什么」的内容裁剪规则（必要性闸/不画子角/不标求解角）作为**这条退化路径专用**的提示
         #   塞进 user 段（不污染 system 翻译器纯净度；命中观测 figure_spec_used=False 会暴露走了这里）。
         user_segs.append(_FALLBACK_CONTENT_RULES)
+    # 🔴 PRD-A-021 R3b·定型约束（spec / fallback 两路统一拼，fallback 才是 add/regen/库内母题主路径）：
+    #   允许集非空才拼（fig_type_clause 非空）；空 = 逃生（不拼，opus 自由翻命令）。
+    if fig_type_clause:
+        user_segs.append(fig_type_clause)
     # 🔴 PRD-C-100 C：图片重生 = correction_prompt + prev_commands 都在 → 增量修改（带上一版命令 + 原题上下文）。
     #   把上一版 GeoGebra commands 原样喂回，指令改成「在下面这版配图命令的基础上，按修正要求调整」，
     #   让 opus 继承上一版骨架做增量改动，而非丢掉上下文从零重画（跑偏的根因）。
@@ -385,12 +405,16 @@ async def compose_variant_figure(
         "commands": data.get("commands"), "dashed": data.get("dashed"),
         "vals": r.get("vals", {}), "warnings": r.get("warnings", []),
         "figure_spec_used": used_spec,
+        # 🔴 R3b 命中观测：本次定型闸是否真约束了图型（allowed 非空）+ 允许集（排序便于对账）。
+        "figure_type_constrained": bool(_allowed),
+        "allowed_figure_types": sorted(_allowed),
     }
     try:
         import logging
         logging.getLogger(__name__).info(
-            "compose_variant_figure item=%s figure_spec_used=%s angle_hints=%d",
-            item_id, used_spec, len(spec_angle_hints),
+            "compose_variant_figure item=%s figure_spec_used=%s angle_hints=%d "
+            "fig_type_constrained=%s allowed=%s",
+            item_id, used_spec, len(spec_angle_hints), bool(_allowed), sorted(_allowed),
         )
     except Exception:  # noqa: BLE001
         pass

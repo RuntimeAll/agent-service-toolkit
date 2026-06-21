@@ -17,6 +17,67 @@ recon 结论：这些全 GeoGebra 主路径零引擎改造（旧 matplotlib REJE
 
 # 每条 = {图型, commands, dashed?, hide?, note}（note 给 opus 看构造范式）
 SAMPLES: list[dict] = [
+    # ===================== 基础图型（PRD-A-021 R3b 补，治「数轴乱画/图型有限」）=====================
+    {
+        # 🔴 数轴专项模板（治「数轴乱画」根因：opus 之前无据可仿，自由发挥画歪）。
+        # 数轴 = 一条**水平线段** + 正方向**箭头**（Vector，绝不用 Arrow）+ 原点 0 + 若干刻度点 + 点上方
+        # Text 标数值。轴本身用一条 Segment/Line，刻度用小竖线 Segment 或直接点，标注用 Text。
+        "kind": "数轴(number_line)",
+        "commands": [
+            "axis=Segment((-4,0),(4,0))",
+            "arrow=Vector((4,0),(4.6,0))",
+            "O=(0,0)", "P=(2,0)", "Q=(-3,0)",
+            't0=Text("0",(0,-0.45))', 't1=Text("2",(2,-0.45))', 't2=Text("-3",(-3,-0.45))',
+        ],
+        "hide": ["O"],
+        "note": ("数轴 = 水平 Segment 作轴线 + **Vector(末端,末端外一点) 作正方向箭头**"
+                 "（🔴 绝不写 Arrow——GeoGebra 无此命令、必失败整图作废）；原点/要标的点用自由点 "
+                 "A=(x,0)，**数值标注一律用 Text(\"数\",(x,-0.45)) 放点下方**（别用 Angle/别在轴上乱画）。"
+                 "实心标记点保留可见（point_size 默认即可），纯刻度辅助点放 hide。负数直接写 Text(\"-3\",…)。"
+                 "区间/不等式解集：端点空心(开)用 Text(\"○\",…)、实心(闭)用大点，区间段用粗 Segment 叠在轴上。"),
+    },
+    {
+        "kind": "平面直角坐标系(cartesian)",
+        "commands": [
+            "A=(2,3)", "B=(-1,-2)", "O=(0,0)",
+            'la=Text("A(2,3)",(2.2,3.2))', 'lb=Text("B(-1,-2)",(-0.8,-2.4))',
+        ],
+        "hide": ["O"],
+        "axes": True,
+        "note": ("坐标系题**置顶层 axes=true**（render 自动画 x/y 轴 + 原点 + 网格刻度，不用手画轴）；"
+                 "只需放要标的点 A=(x,y) + Text 标坐标。象限/网格交给 axes，别自己用 Segment 拼轴。"),
+    },
+    {
+        "kind": "抛物线/二次函数图象(parabola)",
+        "commands": [
+            "f(x)=x^2-2x-3",
+            "V=(1,-4)", "A=(-1,0)", "B=(3,0)", "C=(0,-3)",
+            'lv=Text("顶点",(1.2,-4.3))',
+        ],
+        "axes": True,
+        "note": ("二次函数图象：直接 f(x)=a x^2+b x+c（GeoGebra 自动绘曲线），axes=true 出坐标系；"
+                 "顶点/与轴交点用自由点标出（坐标可由你算或让引擎 Intersect(f,xAxis)）。"
+                 "一次函数同理 g(x)=k x+b；反比例 h(x)=k/x。曲线本身别用 Polygon/Segment 拼。"),
+    },
+    {
+        "kind": "三角形(triangle)",
+        "commands": [
+            "A=(0,0)", "B=(6,0)", "C=(2,4)", "tri=Polygon(A,B,C)",
+        ],
+        "note": ("三角形 = 三顶点自由点 + Polygon(A,B,C)。要画高/中线/角平分线用 "
+                 "PerpendicularLine/Segment(顶点,Midpoint(..))/AngleBisector，构造的垂足/中点等中间点放 hide。"
+                 "直角三角形在直角顶点用构型记号（题面要求时），等腰/等边两腰加等长刻度记号。"),
+    },
+    {
+        "kind": "圆(circle)",
+        "commands": [
+            "O=(0,0)", "c=Circle(O,3)", "A=(3,0)", "B=(0,3)",
+            "chord=Segment(A,B)",
+        ],
+        "note": ("圆 = Circle(圆心,半径) 或 Circle(A,B,C) 过三点；圆心 Center(c)。"
+                 "弦/切线/半径用 Segment；圆周上的点用 Point(c) 或自由点放到圆上。"
+                 "🔴 注意区分：圆 = circle（平面），圆柱/圆锥/球 = solid（立体，走斜二测投影），别混。"),
+    },
     {
         "kind": "旋转",
         "commands": [
@@ -116,6 +177,8 @@ def samples_prompt_block() -> str:
             lines.append("  dashed: " + ", ".join(s["dashed"]))
         if s.get("hide"):
             lines.append("  hide: " + ", ".join(s["hide"]))
+        if s.get("axes"):
+            lines.append("  axes: true（坐标系题置顶层 axes=true，render 自动画轴+网格，不手画轴）")
         if s.get("relabel"):
             lines.append("  relabel: " + ", ".join(f"{k}→{v}" for k, v in s["relabel"].items()))
         if s.get("angle_labels"):

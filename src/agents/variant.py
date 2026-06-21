@@ -3028,6 +3028,24 @@ verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题�
 )
 
 
+def _figure_type_gate_block(state: VariantState, facts: dict) -> str:
+    """🔴 PRD-A-021 R3b·章节×图型定型闸（GENERATE 落点①）：据母题章节名 + 主考点名查
+    biz_chapter_figure_map 取「允许图型集」，渲成约束段拼到 GENERATE_PROMPT **末尾**
+    （护 aigeek 前缀缓存，约束段是变动尾段）。让出题写 figure_spec 时**只在允许图型内**描述配图。
+
+    🔴 逃生：章节/考点取不到 / 无匹配 / 表读不到 → 允许集空 → 返回 ""（不拼约束，自由发挥）。
+    纯 best-effort：任何异常一律返回 ""（定型闸是增强非关卡，绝不卡住出题）。
+    """
+    try:
+        from agents.figure import chapter_figure
+        chapter = _mother_chapter_name(state)
+        kp = str(facts.get("kp_name") or "").strip() or None
+        allowed = chapter_figure.allowed_figure_types(chapter, kp)
+        return chapter_figure.constraint_clause(allowed)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _mother_facts(state: VariantState) -> dict:
     analysis = state.get("analysis") or {}
     mdna = state.get("mother_dna") or {}
@@ -4020,6 +4038,9 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         #   场景保持组级，骨架四维仍锁。n<2 → 不注（_maybe_diversity_block 内判）。
         + _maybe_diversity_block(facts.get("dna"), recipe["n"])
         + recipe["spec"]
+        # 🔴 PRD-A-021 R3b·章节×图型定型闸（落点①）：约束段拼最末（护 aigeek 前缀缓存）。
+        #   无章节/无映射/表读不到 → 返回 ""（逃生，不约束）。
+        + _figure_type_gate_block(state, facts)
     )
 
     # 🔴 PRD-A-018 round4·治本P0「出题写 figure_spec 时手里有图」：把母题原图作为多模态 image 一并

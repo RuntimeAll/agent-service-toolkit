@@ -11,13 +11,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 def test_geogebra_samples_cover_6_kinds() -> None:
     from agents.figure import geogebra_samples as gs
     kinds = {s["kind"] for s in gs.SAMPLES}
-    # 6 变换骨架 + 1 标注角范式（治「首次造图漏标角」补的标注 few-shot）= 7
-    assert len(gs.SAMPLES) == 7
+    # 6 变换骨架 + 1 标注角范式 = 7；PRD-A-021 R3b 补 5 条基础图型（数轴/坐标系/抛物线/三角形/圆）= 12。
+    assert len(gs.SAMPLES) == 12
     for k in ("旋转", "平移", "对称", "折叠"):
         assert k in kinds
     # 立体/三视图两条（名字带前缀）
     assert any("立体" in k for k in kinds)
     assert any("三视图" in k for k in kinds)
+    # 🔴 PRD-A-021 R3b：基础图型 few-shot 补齐（尤其数轴专项模板治「数轴乱画」）
+    assert any("数轴" in k for k in kinds), "缺数轴专项模板"
+    for need in ("坐标系", "抛物线", "三角形", "圆"):
+        assert any(need in k for k in kinds), f"缺基础图型 few-shot: {need}"
     # 标注角范式：含 Angle 标注命令的样例（名字带「标注角」前缀）
     annot = [s for s in gs.SAMPLES if "标注角" in s["kind"]]
     assert annot, "缺标注角 few-shot"

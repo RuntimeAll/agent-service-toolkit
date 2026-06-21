@@ -657,6 +657,33 @@ async def _lookup_figure_spec(thread_id: str, item_id: str | None) -> Any:
         return None
 
 
+async def _lookup_chapter_kp(thread_id: str) -> tuple[str | None, str | None]:
+    """PRD-A-021 R3b·定型闸：从 checkpointer state 取母题章节名 + 主考点名（喂 compose 章节×图型定型闸）。
+
+    源（复用 variant 既有取值口径，零伪造）：
+      - 章节名 = variant._mother_chapter_name(state)（confirmed_chapter_name → analysis.chapter.value）。
+      - 考点名 = analysis.kp.value（与 _mother_facts.kp_name 同源）。
+    🔴 best-effort：thread 无 state / 取不到一律返回 (None, None) → compose 走逃生（不约束、自由翻命令）。
+    """
+    try:
+        from agents.variant import _mother_chapter_name
+        agent: AgentGraph = get_agent("variant")
+        snapshot = await agent.aget_state(
+            config=RunnableConfig(configurable={"thread_id": thread_id})
+        )
+        values = snapshot.values or {}
+        chapter = _mother_chapter_name(values)
+        kp = None
+        analysis = values.get("analysis") or {}
+        kp_obj = analysis.get("kp") or {}
+        if isinstance(kp_obj, dict):
+            kp = str(kp_obj.get("value") or "").strip() or None
+        return chapter, kp
+    except Exception as e:  # noqa: BLE001 — 定型闸取值是增强非关卡，失败降级逃生
+        logger.debug(f"_lookup_chapter_kp best-effort skip: {e}")
+        return None, None
+
+
 @router.post("/variant/compose-figure")
 async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
     """PRD-C-100 B3：带图管线后处理端点（不进变式 StateGraph，四节点字节不动 D14）。
@@ -692,12 +719,16 @@ async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
             #   FE 不必传；老线程/无 spec → 取到 None → compose 退回从 stem 现推（向后兼容）。
             #   任何取 state 失败一律降级 None（绝不因为取不到 spec 而挡住造图）。
             figure_spec = await _lookup_figure_spec(input.thread_id, input.item_id)
+            # 🔴 PRD-A-021 R3b·章节×图型定型闸：BE 自取母题章节名 + 考点名传 compose（FE 不必传）。
+            #   compose 据此查 biz_chapter_figure_map 取允许图型集约束 opus；取不到/无映射 → 逃生（不约束）。
+            _chapter, _kp = await _lookup_chapter_kp(input.thread_id)
             result = await compose.compose_variant_figure(
                 stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
                 parse_json=_parse_json, correction_prompt=input.correction_prompt,
                 prev_commands=input.prev_commands,  # 🔴 PRD-C-100 C：图片重生带上一版命令 → 增量改图
                 item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
                 figure_spec=figure_spec,  # 🔴 PRD-A-018 治本A：出题产的配图自然语言描述（权威画什么）
+                chapter=_chapter, kp=_kp,  # 🔴 PRD-A-021 R3b：章节×图型定型闸入参（add/regen/库内母题主路径）
             )
             # 🔴 B4 经验层留痕（图修正）：老师发修正提示词 → 每次都写（只累计 D13）。best-effort。
             if input.correction_prompt:
