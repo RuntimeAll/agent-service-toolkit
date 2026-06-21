@@ -26,6 +26,41 @@ def _ensure_env() -> None:
     os.environ.setdefault("MATHFIG_NODE_CWD", _DEFAULT_NODE_CWD)
 
 
+def _load_render_geogebra():
+    """取 mathfig 的 render_geogebra。
+    🔴 2026-06-21（用户终审「配图生成失败」根因）：prod 容器服务跑 `python run_service.py`，
+       sys.path[0]=/app；而 mathfig 源码 vendored 在 `/app/mathfig`（repo 根，无 __init__）→ 被 Python
+       当**命名空间包 mathfig** 遮蔽 pip -e 装的真包 → `from mathfig.geogebra import render_geogebra`
+       拿到的是命名空间目录 `/app/mathfig/geogebra/`（无该函数）→ 报 `cannot import name
+       'render_geogebra' from 'mathfig.geogebra' (unknown location)` → 造图全失败（crop 不受影响，它走
+       doclayout_yolo 非 mathfig）。先试正常 import；遮蔽时按**文件路径直载**真模块——geogebra.py 自包含
+       （仅 os/json/subprocess，无相对导入），路径直载安全，其 `__file__` 推出的 _ROOT/render.js/node_cwd
+       仍指向 /app/mathfig 的 node 资源，无需改 env/Dockerfile。"""
+    try:
+        from mathfig.geogebra import render_geogebra  # 正常路径（pip install -e）
+        return render_geogebra
+    except Exception:
+        import importlib.util
+        cands: list[str] = []
+        try:
+            import mathfig as _m  # 真包时 __path__=[.../mathfig/mathfig]，命名空间时=[/app/mathfig]
+            for base in getattr(_m, "__path__", []):
+                cands.append(os.path.join(base, "geogebra.py"))
+        except Exception:
+            pass
+        cands += ["/app/mathfig/mathfig/geogebra.py", "/app/mathfig_src/mathfig/geogebra.py"]
+        for p in cands:
+            if os.path.isfile(p):
+                spec = importlib.util.spec_from_file_location("mathfig_geogebra_real", p)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    fn = getattr(mod, "render_geogebra", None)
+                    if callable(fn):
+                        return fn
+        raise ImportError("render_geogebra 未找到（namespace 遮蔽且文件兜底未命中）")
+
+
 def render(
     commands: list[str],
     *,
@@ -54,7 +89,7 @@ def render(
     """
     _ensure_env()
     try:
-        from mathfig.geogebra import render_geogebra  # 进程内 import（mathfig pip install -e）
+        render_geogebra = _load_render_geogebra()  # 进程内取（含 namespace 遮蔽兜底，见函数注释）
     except Exception as e:  # noqa: BLE001 — 引擎不可用 → 降级（不抛，调用方标 needs_figure）
         return {"ok": False, "error": f"mathfig import 失败: {e}", "png_path": None,
                 "n_cmd": len(commands or []), "n_fail": len(commands or []), "commands": [],
