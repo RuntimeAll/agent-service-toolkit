@@ -260,7 +260,38 @@ async def message_generator(
     agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id = await _handle_input(user_input, agent)
 
+    # 🔴 PRD-A-021 S0·F13 双通道并发互斥：通道A（/stream astream，graph 内）与通道B
+    #   （/variant/* aget_state→aupdate_state，graph 外）此前对同一 thread 无任何互斥——并发写
+    #   同一 checkpointer 时后写覆盖前写（丢 figure_url/手改/重复落库）。这里把 astream 这一**单轮**
+    #   工作也纳入 per-thread 锁（复用 A-018 F12 的 _get_thread_lock，不另起一把），与所有通道B
+    #   写端点串行化。锁只覆盖「本轮 astream」这段有界工作（generate 等节点自带 VARIANT_TIMEOUT
+    #   墙钟闸），**绝不跨人类等待**（多轮交互每轮一个独立 /stream 请求；本请求结束即放锁）。
+    thread_id = (
+        ((kwargs.get("config") or {}).get("configurable") or {}).get("thread_id")
+    )
+    lock = await _get_thread_lock(thread_id) if thread_id else None
+    # 🔴 「忙」即明确返回处理中信号，不静默排队几十秒：同 thread 已有在跑的轮次（通道A 另一请求
+    #   或通道B 写端点持锁）→ 立即吐 processing 帧 + [DONE]，FE 据此禁用「发送/编辑」按钮、提示稍候，
+    #   而非让本请求在锁上空等（体验=点了没反应）。不同 thread 各持各锁、互不阻塞。
+    if lock is not None and lock.locked():
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "processing",
+                    "content": "这组题正在处理中（生成/编辑/入库未完成），请稍候再发指令。",
+                }
+            )
+            + "\n\n"
+        )
+        yield "data: [DONE]\n\n"
+        return
+
+    acquired = False
     try:
+        if lock is not None:
+            await lock.acquire()
+            acquired = True
         # Process streamed events from the graph and yield messages over the SSE stream.
         async for stream_event in agent.astream(
             **kwargs, stream_mode=["updates", "messages", "custom"], subgraphs=True
@@ -366,6 +397,10 @@ async def message_generator(
         reason = _stream_error_reason(e)
         yield f"data: {json.dumps({'type': 'error', 'content': reason})}\n\n"
     finally:
+        # 🔴 S0：本轮 astream 结束（正常/异常/客户端断流）即放锁——锁只随单个 /stream 请求生命周期，
+        #   绝不跨请求/跨人类等待。只在本协程真正 acquire 到时才释放（busy 早退路径不进此处）。
+        if lock is not None and acquired:
+            lock.release()
         yield "data: [DONE]\n\n"
 
 

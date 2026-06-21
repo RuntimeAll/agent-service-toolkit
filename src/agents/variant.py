@@ -33,7 +33,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, ChatMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -216,6 +216,100 @@ def _auto_verify_on(config: RunnableConfig | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 🔴 PRD-A-021 S4·items merge reducer（治本：杜绝 last-writer-wins 全量覆盖丢 figure_url/手改）
+# ---------------------------------------------------------------------------
+# 背景根因：旧 VariantState.items 无 reducer = LangGraph 默认 last-writer-wins 全量覆盖。任何节点
+#   （通道A graph 内）或 aupdate_state（通道B /variant/* graph 外）写 {"items": full_list} 都整组替换。
+#   于是「通道B 设了 figure_url → 通道A 某节点回写整组（拿的是更早的快照 / 重组时漏带 figure_url）」
+#   → figure_url/手改静默丢失（跨轮非并发也丢，是最普遍的丢图通道）。
+#
+# 修法 = 给 items 挂「按稳定 id 合并 + 同时支持显式清空」的 reducer：
+#   ① 右操作数（new = 本次写入）是**权威集合与顺序**：只有 new 里的题留下（不复活 old 里被删的题），
+#      顺序完全照 new（reorder/默认序都不被 reducer 扰动）。→ 「按 id 合并」是**在 new 的骨架上回填**，
+#      不是并集。
+#   ② 稳定 id = item["_seq"]（§P2b「题原始生成序」既有稳定 merge 键）。new 里缺 _seq 的题，reducer
+#      就地补 _seq（首次全量集落库即补齐，此后跨轮稳定）→ 后续 backfill 一律能按 _seq 命中、不靠位置。
+#   ③ 回填策略两类（只在 new 缺该键时回填，绝不覆盖 new 已带的新值）：
+#      - PRESERVE_ALWAYS（簿记/手改印记）：按 _seq 命中即回填（入库 id/已入库标记/手改印记等，
+#        节点重组时漏带也不丢）。
+#      - PRESERVE_IF_SAME_STEM（figure_url）：**仅当 old/new 同 _seq 且题面(stem)未变**才回填——
+#        题面变了（重生/换题）= 旧配图对新内容失效，绝不把过期图嫁接到新题面上。
+#   ④ 显式「整体替换/清空」= **空列表语义约定**：new 为 []（或非 list 容错）→ 直接返回 []（真清空）。
+#      所有「清 items」调用（mother_opus_entry.base_out / analyze 退役入口 / patch 改硬锚 / generate
+#      裸奔兜底）写的就是 "items": []，本 reducer 据此真清空，**不需另设哨兵**（[] 在本域永远=清空，
+#      无「[] 表示合并空集保留旧组」的歧义——已逐处核对全部 items 赋值点确认）。
+# 🔴 红线：本 reducer 不改 M3（高置信空池 picker 兜底，走 generate 正常出题）/ M4（新母题清旧 items=
+#   写 []，reducer 清空）/ B2（niche 重锚不死循环，走 classify/控制流，与 items 合并正交）的任何行为；
+#   它只在「整组覆盖」这一步把 figure_url/手改/簿记按 id 安全续上，对清空/替换/重排字节级透明。
+_ITEMS_PRESERVE_ALWAYS: tuple[str, ...] = (
+    "_persist_id",      # 在库雪花 id（防重落库 / 覆盖入库键）——重组漏带会致重复落行
+    "persisted",        # 已入库标记
+    "_content_dirty",   # 已入库题内容已改待覆盖
+    "question_id",      # FE 进 A-015 编辑器用
+    "manual_edited",    # 老师手改印记（重生前二次确认 + 闸B 不回炉）
+    "manual_block",     # 老师手动排版印记
+)
+_ITEMS_PRESERVE_IF_SAME_STEM: tuple[str, ...] = (
+    "figure_url",       # 变式配图 OSS url：仅题面未变才续（题面变=旧图失效，不嫁接）
+)
+
+
+def _item_stem_norm(it: Any) -> str:
+    """题面归一（仅供 reducer 判「题面是否变了」；与 _norm 同口径但本函数定义早于 _norm，独立实现）。"""
+    if not isinstance(it, dict):
+        return ""
+    return " ".join(str(it.get("stem") or "").split())
+
+
+def merge_items(old: Any, new: Any) -> list[dict[str, Any]]:
+    """items 通道 reducer（见上方设计块）。new=本次写入（权威集合+序），old=已落库前态。
+
+    - new 非 list → 容错返回 old（不让坏写炸状态；理论上不该发生）。
+    - new == [] → 显式清空（M4 新母题/patch 改硬锚/裸奔兜底都靠它真清空）。
+    - 否则在 new 骨架上：按 _seq 命中 old 同题 → 回填 PRESERVE_ALWAYS（缺即补）；题面未变再回填
+      figure_url。new 缺 _seq 的题就地补 _seq（位置序兜底，仅 old 全无 _seq 的纯首轮场景才用位置匹配）。
+    """
+    if not isinstance(new, list):
+        return old if isinstance(old, list) else []
+    if len(new) == 0:
+        return []  # 🔴 显式清空（空列表语义约定）
+    old_list = old if isinstance(old, list) else []
+    old_by_seq: dict[Any, dict[str, Any]] = {
+        o["_seq"]: o
+        for o in old_list
+        if isinstance(o, dict) and o.get("_seq") is not None
+    }
+    any_old_seq = bool(old_by_seq)
+    out: list[dict[str, Any]] = []
+    for pos, n in enumerate(new):
+        if not isinstance(n, dict):
+            out.append(n)  # 非 dict 原样保留（不该发生，纯防御）
+            continue
+        m = dict(n)
+        seq = m.get("_seq")
+        if seq is not None:
+            match = old_by_seq.get(seq)
+        elif not any_old_seq and pos < len(old_list) and isinstance(old_list[pos], dict):
+            # 纯首轮兜底：old 整组都没 _seq（理论上仅极早期）→ 退化为位置匹配；一旦补了 _seq
+            # 此分支后续不再走（稳定键优先），避免 reorder 后位置错配。
+            match = old_list[pos]
+        else:
+            match = None
+        if isinstance(match, dict):
+            for k in _ITEMS_PRESERVE_ALWAYS:
+                if k not in m and k in match:
+                    m[k] = match[k]
+            if _item_stem_norm(m) == _item_stem_norm(match):
+                for k in _ITEMS_PRESERVE_IF_SAME_STEM:
+                    if k not in m and k in match:
+                        m[k] = match[k]
+        if m.get("_seq") is None:
+            m["_seq"] = pos + 1  # 就地补稳定键（此后跨轮按 _seq 命中，不靠位置）
+        out.append(m)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # State（设计 prompt 指定结构）
 # ---------------------------------------------------------------------------
 class VariantState(MessagesState, total=False):
@@ -244,7 +338,9 @@ class VariantState(MessagesState, total=False):
     # items[{stem, answer, solution, qtype, difficulty, level, injected_kp?,
     #        check:{badge:ok|warn, solved_answer}  ← 闸B(solve_explain)填,
     #        gene:{gate:pass|warn|skipped, reason?} ← 闸A(gene_gate)填}]
-    items: list[dict[str, Any]]
+    # 🔴 PRD-A-021 S4：挂 merge_items reducer（按 _seq 稳定 id 合并 + 空列表显式清空），治本丢
+    #   figure_url/手改/簿记的 last-writer-wins 全量覆盖。语义/红线见 merge_items 上方设计块。
+    items: Annotated[list[dict[str, Any]], merge_items]
     history: list[dict[str, Any]]
     # 交互层：parse_instruction 的解析结果（intent/ops/knobs/...），路由后各分支消费并清空
     pending: dict[str, Any] | None
@@ -1649,14 +1745,34 @@ def _emit_figure_stage(state: VariantState) -> None:
 # ---------------------------------------------------------------------------
 # Router（入口分诊：登录? 有图? 在途母题? 库内母题跳 analyze/classify）
 # ---------------------------------------------------------------------------
+def _editor_op(config: RunnableConfig | None) -> dict[str, Any] | None:
+    """🔴 PRD-A-021 S1：从 config.configurable 取「编辑/验算」结构化 op（让编辑走 graph 发真帧）。
+
+    形如 {"kind": "revise"|"regen"|"edit-item"|"reverify", "index": int, ...}。缺省/非 dict → None
+    （回退既有自然语言/分诊路径）。通道B 端点若想发真状态帧，可经 /stream 带 agent_config.editor_op
+    进 graph（editor_entry 节点应用 op + 清 check → 下游 solve_explain 重验并发「程序验算」真帧）。
+    🔴 verify-one（无状态、不依赖 thread state 的纯验算）**不**走此入口（仍是独立端点，见任务约束）。
+    """
+    conf = ((config or {}).get("configurable") or {}) if config else {}
+    op = conf.get("editor_op")
+    if isinstance(op, dict) and op.get("kind") in ("revise", "regen", "edit-item", "reverify"):
+        return op
+    return None
+
+
 def route_entry(
     state: VariantState, config: RunnableConfig
-) -> Literal["mother_opus_entry", "parse", "generate", "ask", "auth", "classify"]:
+) -> Literal["mother_opus_entry", "parse", "generate", "ask", "auth", "classify", "editor_entry"]:
     # 🔴 身份硬闸（用户拍板 2026-06-11）：每次对话绑死登录老师。token 缺失/解不出 userId
     # → 一步不走（不进任何 LLM 节点，conv_trace 也不会产生无主行；表级 NOT NULL 双保险）。
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
     if conv_trace.teacher_id_from_token(token) is None:
         return "auth"
+    # 🔴 PRD-A-021 S1：结构化编辑/重生 op（经 /stream 带 editor_op 进 graph）优先于自然语言分诊——
+    #   有 op 且有题组在手 → editor_entry（应用 op + 清 check → solve_explain 发真「程序验算」帧，治 F1
+    #   通道B 静默 no-op）。无题组（op 无对象）则不拦，落既有路径（防把空轮误导进编辑）。
+    if _editor_op(config) is not None and (state.get("items") or state.get("mother_dna")):
+        return "editor_entry"
     url = _extract_image_url(_latest_human_text(state.get("messages", [])))
     # 🔴 PRD-C-100 B1a：跨轮新图 = 新母题 → 走塌缩入口 mother_opus_entry（opus 一把判章+解题+打标），
     #   替代旧 analyze→mother_precheck→classify 三节点链（控制流重写）。
@@ -6032,6 +6148,73 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
     return update
 
 
+# ===========================================================================
+# 🔴 PRD-A-021 S1·editor_entry：把「结构化编辑/重生」收进 graph，让真状态帧（程序验算等）经
+#   stream runtime 真发出（治 F1：通道B aget_state→aupdate_state 在 graph 外 → _emit_stage 静默
+#   no-op → 状态条/思路条丢帧）。
+#
+# 设计要点（evidence 订正后）：
+#   - 本节点**自身只应用 op、清 check**（不在此发完成帧）；真「程序验算」帧来自下游 solve_explain
+#     （editor_entry → solve_explain 边）。故 op 应用后凡内容变动的题必须 pop("check")，让 solve_explain
+#     重判并发 verify 帧；reorder/纯元数据改这类不需重验的，本节点直接收口（不串验算）。
+#   - 复用通道B 既有纯逻辑（revise_item / regen_dirty_items / edit_item_state / reverify_item_state），
+#     零业务分叉（单一事实源）。
+#   - 🔴 verify-one（无状态纯验算，不依赖 thread state）**不**并入 graph——它在 route 层就被 _editor_op
+#     的 kind 白名单排除（白名单不含 'verify-one'）。
+#   - 降级：op 缺字段/越界/helper 报错 → 不抛、不空轮，返回 messages 友好提示 + 不动 items（G5）。
+async def editor_entry(state: VariantState, config: RunnableConfig) -> VariantState:
+    """结构化编辑/重生入口节点：按 config.editor_op 应用对应纯逻辑 → 清 check（内容变动题）→
+    交下游 solve_explain 重验发真帧。kind: revise / regen / edit-item / reverify。"""
+    op = _editor_op(config) or {}
+    kind = op.get("kind")
+    try:
+        if kind == "revise":
+            # 单题有界 LLM 锚定重做（skeleton/scene/whole）；whole 走 REGEN，内部已清 check。
+            update, _result, error = await revise_item(
+                state, int(op.get("index")), str(op.get("target") or "whole"),
+                str(op.get("instruction") or ""), config,
+            )
+        elif kind == "regen":
+            # 手动重生待重生集合（None/空=全 dirty 集合；显式 indexes=force 整题重出，helper 内判）。
+            # helper 内部已跑闸B + 清 dirty + 清 check（_check_one_item）。
+            idxs = op.get("indexes")
+            update, _result, error = await regen_dirty_items(
+                state, idxs if isinstance(idxs, list) and idxs else None,
+            )
+        elif kind == "edit-item":
+            # 单题手动编辑（零 LLM）：edit_item_state 已把 check 置 manual 中性（待 reverify）。
+            update, _item, error = edit_item_state(
+                state, int(op.get("index")), stem=op.get("stem"),
+                answer=op.get("answer"), solution=op.get("solution"),
+            )
+        elif kind == "reverify":
+            # 单题重跑闸B（清 check → _check_one_item）；这条本身就是验算，下游 solve_explain
+            # 见已带 check 的题会跳过（不重复判），但本节点在 graph 内 → _check_one_item 的 stage 帧真发。
+            update, _item, error = await reverify_item_state(state, int(op.get("index")))
+        else:  # 不该到（route 白名单已挡）→ 不动 items，回问
+            return {"messages": [AIMessage(content="我没拿准这次要怎么编辑，这次先没改。")]}
+    except (TypeError, ValueError) as e:  # index 非 int 等参数问题 → 降级不抛（G5）
+        return {"messages": [AIMessage(content=f"这次编辑参数不对（{e}），没有改动。")]}
+
+    if error:
+        # 越界/非法 target 等 → 友好提示，不动 items（与端点 400 同语义，graph 内不抛）
+        return {"messages": [AIMessage(content=f"这次编辑没能执行：{error}")]}
+    return update or {"messages": []}
+
+
+def after_editor_entry(state: VariantState) -> Literal["solve_explain", "done"]:
+    """editor_entry 出口：有题且存在未判（清了 check）题 → solve_explain 重验发真帧；否则收口 END。
+
+    🔴 凡进 items 的题一律须带 check（不变量）。本路由保证编辑后「清了 check」的题必经 solve_explain
+    重新定状态（同时在 graph 内发「程序验算」真帧）；纯 reverify（已重判带 check）或无题 → 直接 done。"""
+    items = state.get("items") or []
+    if not items:
+        return "done"
+    if any(isinstance(it, dict) and not it.get("check") for it in items):
+        return "solve_explain"
+    return "done"
+
+
 # --- 修正：patch 母题字段 → 只重算受影响下游（设计 §6 中途修正） ----------------
 async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
     """老师纠正年级/考点 → patch analysis；改年级/考点 → 清 items 触发重锚+重造（route_after_patch）。
@@ -7294,6 +7477,7 @@ graph.add_node("exec_regenerate", exec_regenerate)
 graph.add_node("exec_add", exec_add)
 graph.add_node("exec_reorder", exec_reorder)  # P9·指令排序（纯代码重排，不过 assemble）
 graph.add_node("exec_solution_only", exec_solution_only)  # 整改3·解法修正（题面留只改解析+重跑闸B）
+graph.add_node("editor_entry", editor_entry)  # 🔴 PRD-A-021 S1·结构化编辑/重生入口（应用 op + 清 check → 下游 solve_explain 发真帧）
 graph.add_node("patch", patch)
 graph.add_node("ask_clarify", ask_clarify)
 graph.add_node("persist_to_bank", persist_to_bank)
@@ -7310,6 +7494,8 @@ graph.set_conditional_entry_point(
         "parse": "parse_instruction",
         # 🔴 B2·母题确认 resume（config 回传确认章 id）→ 直奔 classify（带确认章接闸B）
         "classify": "classify",
+        # 🔴 PRD-A-021 S1·结构化编辑/重生 op（经 /stream 带 editor_op）→ editor_entry
+        "editor_entry": "editor_entry",
         # 🔴 'ask' 必落真节点（ask_for_image），不能直连 END —— 否则首轮无节点产消息，回复为空
         "ask": "ask_for_image",
         # 🔴 身份硬闸：无登录态 → 提示重登（同上，必落真节点）
@@ -7431,6 +7617,12 @@ graph.add_edge("exec_reorder", END)
 # 整改3·解法修正：节点内已逐题重写解析 + 重跑闸B（每题 check 已定）→ 过 assemble 收口快照
 # （刷新头部 chip/状态计数 + 题型规范 + artifact 整帧）。
 graph.add_edge("exec_solution_only", "assemble")
+
+# 🔴 PRD-A-021 S1·editor_entry 出口：内容变动（清了 check）→ solve_explain 重验 + 发真「程序验算」帧
+#   → assemble 收口快照（solve_explain→assemble 既有边）；无未判题/无题 → END（已自带 check / 友好提示）。
+graph.add_conditional_edges(
+    "editor_entry", after_editor_entry, {"solve_explain": "solve_explain", "done": END}
+)
 
 # 答疑/clarify → END（不改 items，回等待下一句）
 graph.add_edge("answer_question", END)
