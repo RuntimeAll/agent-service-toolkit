@@ -291,6 +291,10 @@ def test_artifact_payload_never_leaks_internal_item_keys():
         "dna_dirty", "dirty_dims", "mother_dirty_dims", "can_undo_regen",
         # 🔴 PRD-C-100 BC2 变式配图 OSS url（FE 会话恢复保持配图态）
         "figure_url",
+        # 🔴 PRD-A-018 治本A figure_spec（出题产配图决策，会话恢复保留 + compose 取来照画）
+        "figure_spec",
+        # 🔴 PRD-A-021 R2b·U1 生成态配图 PNG base64（刷新/切 tab 从 state 重建配图，不丢生成态图）
+        "figure_base64",
         # 🔴 PRD-C-100 BC3 已入库题在库 id（FE 进 A-015 编辑器）+ 手动排版印记（FE 重生前二次确认）
         "question_id", "manual_block",
     }

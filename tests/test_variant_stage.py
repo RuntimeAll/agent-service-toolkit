@@ -541,6 +541,10 @@ def test_assemble_emits_artifact_snapshot_with_contract_fields(monkeypatch):
         "can_undo_regen": False,
         # PRD-C-100 BC2：变式配图 OSS url（裸 item 无图 → None）。
         "figure_url": None,
+        # 🔴 PRD-A-018 治本A figure_spec（裸 item 无 → None）。
+        "figure_spec": None,
+        # 🔴 PRD-A-021 R2b·U1 生成态配图 PNG base64（裸 item 无 → None）。
+        "figure_base64": None,
         # PRD-C-100 BC3：在库 id（无 _persist_id → None）+ 手动排版印记（无 → False）。
         "question_id": None,
         "manual_block": False,
@@ -621,6 +625,10 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
         "can_undo_regen": False,
         # PRD-C-100 BC2：变式配图 OSS url（裸 item 无图 → None）。
         "figure_url": None,
+        # 🔴 PRD-A-018 治本A figure_spec（裸 item 无 → None）。
+        "figure_spec": None,
+        # 🔴 PRD-A-021 R2b·U1 生成态配图 PNG base64（裸 item 无 → None）。
+        "figure_base64": None,
         # PRD-C-100 BC3：在库 id（无 _persist_id → None）+ 手动排版印记（无 → False）。
         "question_id": None,
         "manual_block": False,

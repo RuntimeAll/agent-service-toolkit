@@ -251,6 +251,11 @@ _ITEMS_PRESERVE_ALWAYS: tuple[str, ...] = (
 )
 _ITEMS_PRESERVE_IF_SAME_STEM: tuple[str, ...] = (
     "figure_url",       # 变式配图 OSS url：仅题面未变才续（题面变=旧图失效，不嫁接）
+    # 🔴 PRD-A-021 R2b·U1：生成态配图 PNG base64。旧实现配图 base64 仅活在 FE 内存
+    #   （variantFigures[idx].png），刷新/切 tab 即丢，且只在入库动作才传 OSS——生成态配图
+    #   永不落 checkpoint。现把 base64 也按 figure_url 同口径走 reducer 续上（仅题面未变才续，
+    #   题面变=重生=旧图失效不嫁接）→ FE 造图后写一次 state，刷新即从 checkpoint 取回。
+    "figure_base64",
 )
 
 
@@ -1472,6 +1477,11 @@ def _artifact_payload(
         #   传 OSS → 经 /variant/set-figure-url 回写 state.items[i].figure_url）。入库时
         #   build_create_bo 据它产 A-015 image 块；透传给 FE 用于会话恢复后保持配图态。缺则 None。
         cell["figure_url"] = str(it.get("figure_url") or "") or None
+        # 🔴 PRD-A-021 R2b·U1：生成态配图 PNG base64 透传（会话恢复/刷新重建配图显示态）。
+        #   旧实现生成态 base64 仅活在 FE 内存 variantFigures[idx].png，切 tab/刷新即丢且只在入库才
+        #   传 OSS。现 FE 造图认账后回写 state（经 set-figure-url 带 figure_base64）→ 落 checkpoint →
+        #   /variant/artifact 恢复时随帧透出，FE 无 OSS url 也能从 base64 重建配图。缺 → None。
+        cell["figure_base64"] = str(it.get("figure_base64") or "") or None
         # 🔴 PRD-A-018 治本A·figure_spec 透传（出题节点产的配图自然语言描述）：随帧上屏 + 会话恢复保留，
         #   供 compose 从 state 取来照画（service /variant/compose-figure 自取，FE 不必传）。展示/内部键，
         #   不入 biz_question 旧字段（同 figure_url；build_create_bo 显式白名单天然不外漏）。缺则 None。
@@ -6744,16 +6754,28 @@ def edit_item_state(
 
 
 def set_item_figure_state(
-    state: VariantState, index: int, figure_url: str | None
+    state: VariantState, index: int, figure_url: str | None,
+    figure_base64: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
-    """PRD-C-100 BC2：把变式配图 OSS url 回写进 state.items[index-1].figure_url（零 LLM）。
+    """PRD-C-100 BC2 + PRD-A-021 R2b·U1：把变式配图回写进 state.items[index-1]（零 LLM）。
 
-    FE 流程：compose_variant_figure 产 PNG base64 → 老师认账 → FE 用 uploadMotherImage 把 base64
-    传 OSS 拿 https url → 调本端点回写 state → 入库时 build_create_bo 据 figure_url 产 A-015 image 块。
-    figure_url=None/空 → 清掉配图（老师撤图）。url 仅收 https（与 build_block_json._is_oss_https 同口径）。
+    两类配图态（可单独或一并回写）：
+      · figure_url（入库态 OSS url）：FE 入库时 uploadMotherImage 传 OSS 拿 https url 回写 →
+        入库时 build_create_bo 据它产 A-015 image 块。仅收 https。
+      · figure_base64（生成态 PNG base64）：🔴 R2b·U1 —— compose_variant_figure 产的 base64
+        老师认账后**立即**回写 state（不等入库），落 checkpoint → 刷新/切 tab 从 state 取回，
+        治「生成态配图只在 FE 内存、刷新即丢」根因。入库时若仅有 base64 无 url，persist 侧
+        会 server-side 上 OSS 转 url（见 persist_items），故 base64 也是入库兜底来源。
+
+    撤图语义（老师撤图）：figure_url 与 figure_base64 都传 None/空 → 两态都清。
+    仅传其一为 None 而另一非空 → 只更/只清传入的那一态（区分「撤 OSS url 但留 base64」等场景）。
+    🔴 reducer：figure_url/figure_base64 均挂 PRESERVE_IF_SAME_STEM（题面变=旧图失效不嫁接）。
 
     返回 (update, edited_item, error)：index 越界 → ({}, None, 错误串) 让端点回 400。
-    figure_url 是展示/入库增强键，不入 biz_question 旧字段（仅 blockJson 用），不触碰 check/验算态。
+    这俩是展示/入库增强键，不入 biz_question 旧字段（仅 blockJson 用），不触碰 check/验算态。
+
+    🔴 兼容：figure_base64 缺省（旧调用方只传 figure_url）→ 不动 base64（按 figure_url 单态语义，
+       与 BC2 旧行为字节级一致）。
     """
     items = list(state.get("items") or [])
     if not isinstance(index, int) or index < 1 or index > len(items):
@@ -6761,12 +6783,21 @@ def set_item_figure_state(
     url = str(figure_url or "").strip()
     if url and not url.startswith("https://"):
         return {}, None, "figure_url 必须是 https OSS 地址"
+    b64 = str(figure_base64 or "").strip()
     new_items = [dict(it) for it in items]
     it = new_items[index - 1]
+    # figure_url 态：非空设、空清（与 BC2 旧语义一致；旧调用方不传 base64 时仅此分支生效）
     if url:
         it["figure_url"] = url
     else:
         it.pop("figure_url", None)
+    # figure_base64 态（R2b·U1）：仅当调用方**显式传了** figure_base64 形参时才动它
+    #   （None=未传=不碰，保旧调用兼容；空串=显式撤=清；非空=写生成态 base64）。
+    if figure_base64 is not None:
+        if b64:
+            it["figure_base64"] = b64
+        else:
+            it.pop("figure_base64", None)
     return {"items": new_items}, it, None
 
 

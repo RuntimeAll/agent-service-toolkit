@@ -279,6 +279,51 @@ class RuoyiClient:
         """
         return await self.teacher_post("/teacher/question/update", body)
 
+    async def upload_image(self, png_bytes: bytes, *, filename: str = "variant_fig.png") -> str:
+        """🔴 PRD-A-021 R2b·U1：把配图 PNG 字节上 OSS，返回公网 https url（multipart 上传）。
+
+        端点 = FE uploadMotherImage 同一个：POST /teacher/variant/upload-image（form-data file=...），
+        envelope {code:1, response:{id, url}}。FE 用它把生成态 base64 转 OSS；toolkit 入库兜底
+        路径（item 仅有 figure_base64 无 figure_url 时）server-side 复用此端点把 base64 转 url，
+        让入库 image 块永不丢图（撤掉「base64 入库前必经 FE set-figure-url」的隐含前置）。
+
+        🔴 仅此一处 toolkit 直传 OSS（此前 toolkit 零 OSS 上传，全靠 FE）；走与入库同一双头鉴权
+           + 同一 token（owner=登录老师）。失败抛 RuoyiError，调用方降级（不抛断入库主链）。
+        """
+        await self._ensure_token()
+        # multipart：不能带 Content-Type: application/json（httpx 按 files= 自动设 multipart 边界）
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "clientid": settings.RUOYI_CLIENT_ID,
+        }
+        files = {"file": (filename, png_bytes, "image/png")}
+        resp = await self._client.post(
+            "/teacher/variant/upload-image", files=files, headers=headers
+        )
+        if resp.status_code == 401:
+            if self._forwarded:
+                raise RuoyiError("upload-image 401：登录老师 token 失效，请重新登录后再试")
+            self._token = None
+            await self.login()
+            headers["Authorization"] = f"Bearer {self._token}"
+            resp = await self._client.post(
+                "/teacher/variant/upload-image", files=files, headers=headers
+            )
+        try:
+            data = resp.json()
+        except Exception:
+            raise RuoyiError(
+                f"upload-image 响应非 JSON: status={resp.status_code} body={resp.text[:200]}"
+            )
+        if data.get("code") != 1:
+            raise RuoyiError(
+                f"upload-image 非 code==1: code={data.get('code')} msg={data.get('message') or data.get('msg')}"
+            )
+        url = str((data.get("response") or {}).get("url") or "").strip()
+        if not url:
+            raise RuoyiError("upload-image 返回空 url")
+        return url
+
     # === PRD-C-100 B4 记忆层 + 经验层（走 HTTP，不直连 MySQL；端点并行建，调不通即降级）===
     async def _teacher_get(self, path: str, params: dict | None = None) -> Any:
         """GET /teacher/** 解 envelope（code==1 取 response）。失败抛 RuoyiError（调用方降级）。"""
@@ -900,6 +945,35 @@ def _extract_new_id(resp: Any) -> Any:
     return resp if resp is not None else None
 
 
+async def _flush_item_figure_base64_to_oss(
+    item: dict[str, Any], client: "RuoyiClient"
+) -> None:
+    """🔴 PRD-A-021 R2b·U1 入库兜底：item 有生成态 figure_base64 但没 figure_url（FE 未单独
+       调 set-figure-url 转 OSS / 或纯 toolkit 链路）→ server-side 上 OSS 拿 https url 写回
+       item.figure_url，让 build_create_bo 产 A-015 image 块、入库永不丢图。
+
+    就地改 item（同函数内 build_create_bo 立即消费）。base64 解码失败 / 上传失败 → 静默跳过
+    （留 figure_url 缺位，该题入库无 image 块，但题正文照常落 = G11 不卡入库主链）。
+    已有 figure_url（FE 已转过 OSS）→ 不重传，直接用既有 url。
+    """
+    if item.get("figure_url"):
+        return  # FE 已转 OSS（或老路径），不重传
+    b64 = str(item.get("figure_base64") or "").strip()
+    if not b64:
+        return
+    try:
+        import base64 as _b64
+        # data: 前缀容错（FE 可能存裸 base64，也可能存 data:image/png;base64,xxx）
+        if b64.startswith("data:"):
+            b64 = b64.split(",", 1)[-1]
+        png_bytes = _b64.b64decode(b64)
+        url = await client.upload_image(png_bytes)
+        if url:
+            item["figure_url"] = url
+    except Exception:  # noqa: BLE001 — 解码/上传失败 → 跳过 image 块，题正文照常入库
+        return
+
+
 async def persist_items(
     items: list[dict[str, Any]], facts: dict[str, Any], token: str | None = None
 ) -> list[dict[str, Any]]:
@@ -940,6 +1014,8 @@ async def persist_items(
         #    🔴 缺口10·覆盖原行：item 带 _persist_id（已入库、重生后再入库）→ update by id；否则 create。
         for item in items:
             persist_id = item.get("_persist_id")
+            # 🔴 R2b·U1：入库前把生成态 figure_base64 兜底转 OSS url（FE 未转过时）→ 不丢图。
+            await _flush_item_figure_base64_to_oss(item, client)
             try:
                 if persist_id:
                     new_id = _extract_new_id(await client.update_question(build_update_bo(item, facts, persist_id)))

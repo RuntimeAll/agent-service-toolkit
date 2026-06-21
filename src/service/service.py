@@ -945,29 +945,35 @@ async def variant_verify_one(input: VariantVerifyOneInput) -> dict[str, Any]:
 
 
 class VariantSetFigureUrlInput(BaseModel):
-    """PRD-C-100 BC2：变式配图 OSS url 回写请求（零 LLM）。index=1-based。
+    """PRD-C-100 BC2 + PRD-A-021 R2b·U1：变式配图回写请求（零 LLM）。index=1-based。
 
-    FE 先把 compose_variant_figure 产的 PNG base64 经 uploadMotherImage 传 OSS 拿 https url，
-    再调本端点把 url 回写进 state.items[index-1].figure_url → 入库时进 A-015 image 块。
-    figure_url=None/空 = 撤掉配图。
+    两类配图态（可单传或一并传）：
+      · figure_url：FE 入库时 uploadMotherImage 传 OSS 拿 https url → 入库进 A-015 image 块。
+      · figure_base64：🔴 R2b·U1 —— compose 产的生成态 PNG base64，老师认账后**立即**回写 state
+        （不等入库）→ 落 checkpoint，刷新/切 tab 从 state 取回（治生成态配图只在 FE 内存即丢）。
+    撤图 = 两者都传 None/空。figure_base64 形参缺省（旧 FE 只传 url）→ 不碰 base64（向后兼容）。
     """
 
     thread_id: str
     index: int
     figure_url: str | None = None
+    figure_base64: str | None = None
 
 
 @router.post("/variant/set-figure-url")
 async def variant_set_figure_url(input: VariantSetFigureUrlInput) -> dict[str, Any]:
-    """变式配图 OSS url 回写（零 LLM）：把 https OSS url 存进 state.items[i].figure_url。
+    """变式配图回写（零 LLM）：把 figure_url（https OSS）/ figure_base64（生成态 PNG）存进
+    state.items[i]，落 checkpoint（走 items merge reducer，刷新不丢）。
 
-    index 越界 → 400；figure_url 非 https → 400。回写后入库（build_create_bo）据它产 image 块。
-    与编辑器三端点同直连范式（aget_state → 纯逻辑 → aupdate_state → _artifact_payload）。
+    index 越界 → 400；figure_url 非 https → 400。回写后入库时 build_create_bo 据 figure_url 产
+    image 块（仅 base64 无 url 时 persist 侧 server-side 上 OSS 兜底）。与编辑器三端点同直连范式。
     """
     from agents.variant import set_item_figure_state
 
     def _fn(values):
-        update, _item, error = set_item_figure_state(values, input.index, input.figure_url)
+        update, _item, error = set_item_figure_state(
+            values, input.index, input.figure_url, figure_base64=input.figure_base64
+        )
         return update, error
 
     return await _variant_apply(input.thread_id, _fn)

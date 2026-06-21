@@ -101,10 +101,68 @@ def build_mother_prompt(
         book = dna_extract._book_of(pid)
         return f"{pid} {name}（册：{book}）" if book else f"{pid} {name}"
 
+    from core.settings import settings as _settings
+    _sentinel = getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
     kp_pool_text = "\n".join(_row(pid, name) for pid, name in leaf_pool) or "（空）"
     vocab_text = "、".join(model_vocab or []) or "（无快照，简单题模型候选留空数组）"
     exam_types = "/".join(dna_extract.EXAM_TYPES)
     chapter_line = f"确认章：{chapter_text}" if chapter_text else "确认章：（未细化到章，按年级册范围）"
+
+    # 🔴 R2b·U8 输出段两版：哨兵框（richText 三段走 ⟦STEM⟧/⟦ANSWER⟧/⟦ANALYSIS⟧ 原文，绕 JSON 转义）
+    #   / 旧式整 JSON。按 settings.MOTHER_RICHTEXT_SENTINEL 选；解析侧 parse_or_repair_entry 通吃两版。
+    if _sentinel:
+        output_block = """================ 输出（先一个 JSON，紧跟三个哨兵框；不要解释、不要 markdown fence） ================
+题面/答案/解析含 $LaTeX$/换行/<table> 天然带 JSON 元字符，**别塞进 JSON 字符串**（一处转义坏整对象断），改用哨兵框**原文**输出（框内随便写 LaTeX/换行/HTML，不转义）。先输出 JSON（richText 三段留空串占位）：
+{
+  "has_figure": true/false,
+  "richText": {"stem": "", "answer": "", "analysis": ""},
+  "solvedAnswer": "你一步步解出的最终答案(简短)",
+  "dna": {
+    "primaryKp": {"id": "池内叶子id 或 空串", "name": "考点名"},
+    "secondaryKps": [{"id": "池内id", "name": "名"}],
+    "qtype": "选择/填空/解答",
+    "assessmentType": "上述闭集10之一",
+    "solutionSkeleton": ["步骤1", "步骤2(最难一步用【】整步包住)"],
+    "hardPointCount": 0,
+    "breakthroughPoints": [],
+    "scenario": "一句话场景 或 纯代数",
+    "difficulty": 1,
+    "tags": ["3~6个检索标签,禁近义增生"],
+    "modelCandidates": []
+  }
+}
+紧接着 JSON **之后**输出三个哨兵框：
+⟦STEM⟧
+（题干原文：Markdown+行内$LaTeX$+必要时<table>，直接换行，无需转义）
+⟦/STEM⟧
+⟦ANSWER⟧
+（标准答案原文）
+⟦/ANSWER⟧
+⟦ANALYSIS⟧
+（解析原文：最终干净解法，不写草稿/试错）
+⟦/ANALYSIS⟧
+🔴 三段各自独立成框、缺一不可；框标签照抄、不改写。"""
+    else:
+        output_block = """================ 输出 ================
+只输出一个 JSON（不要解释、不要 markdown fence），结构：
+{
+  "has_figure": true/false,
+  "richText": {"stem": "题干(Markdown+行内$LaTeX$)", "answer": "标准答案", "analysis": "解析(含解题过程)"},
+  "solvedAnswer": "你一步步解出的最终答案",
+  "dna": {
+    "primaryKp": {"id": "池内叶子id 或 空串", "name": "考点名"},
+    "secondaryKps": [{"id": "池内id", "name": "名"}],
+    "qtype": "选择/填空/解答",
+    "assessmentType": "上述闭集10之一",
+    "solutionSkeleton": ["步骤1", "步骤2(最难一步用【】整步包住)"],
+    "hardPointCount": 0,
+    "breakthroughPoints": [],
+    "scenario": "一句话场景 或 纯代数",
+    "difficulty": 1,
+    "tags": ["3~6个检索标签,禁近义增生"],
+    "modelCandidates": []
+  }
+}"""
 
     return f"""你是浙教版初中数学命题专家 + 题库打标师。看这张母题图，**先真正把题解出来**（一步步算到最终答案，不许抄图、不许跳步），**再据你的解答**做 10 维 DNA 打标。母题是所有变式的基准，解错则全部变式跟着错——务必稳准。
 
@@ -139,26 +197,7 @@ def build_mother_prompt(
 🔴 数学式用行内 $...$；换行用标准 \\n；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数必须配对完整（下游有机器闸逐项检，坏 LaTeX 会被打回）。
 🔴 has_figure：题面真含图形/图表/几何图填 true；只是拍照的纯文本题填 false。
 
-================ 输出 ================
-只输出一个 JSON（不要解释、不要 markdown fence），结构：
-{{
-  "has_figure": true/false,
-  "richText": {{"stem": "题干(Markdown+行内$LaTeX$)", "answer": "标准答案", "analysis": "解析(含解题过程)"}},
-  "solvedAnswer": "你一步步解出的最终答案",
-  "dna": {{
-    "primaryKp": {{"id": "池内叶子id 或 空串", "name": "考点名"}},
-    "secondaryKps": [{{"id": "池内id", "name": "名"}}],
-    "qtype": "选择/填空/解答",
-    "assessmentType": "上述闭集10之一",
-    "solutionSkeleton": ["步骤1", "步骤2(最难一步用【】整步包住)"],
-    "hardPointCount": 0,
-    "breakthroughPoints": [],
-    "scenario": "一句话场景 或 纯代数",
-    "difficulty": 1,
-    "tags": ["3~6个检索标签,禁近义增生"],
-    "modelCandidates": []
-  }}
-}}"""
+{output_block}"""
 
 
 # ---------------------------------------------------------------------------
@@ -182,12 +221,17 @@ async def solve_and_label(
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": image_url}},
     ])
+    # 🔴 R2b·U8：哨兵模式（build_mother_prompt 已含哨兵框指令）→ 不下发 response_format
+    #   （json_schema 拒尾随哨兵文本）；关时维持旧式整 JSON + response_format 硬锁（字节级不变）。
+    from core.settings import settings as _settings
+    _sentinel = getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
     kw: dict[str, Any] = dict(
         model=model,
         temperature=MOTHER_OPUS_TEMPERATURE,
-        response_format=RESPONSE_FORMAT,
         timeout=MOTHER_OPUS_TIMEOUT_S,
     )
+    if not _sentinel:
+        kw["response_format"] = RESPONSE_FORMAT
     if max_tokens and max_tokens > 0:
         kw["max_tokens"] = max_tokens
     return await invoke([msg], **kw)

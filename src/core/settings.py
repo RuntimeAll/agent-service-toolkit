@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     #   母题节点 = 宽护栏防失控不截断（D6，非省钱杠杆）；定 12288 ≈ 2.4× 实测峰值，留思考型偶发头。
     #   .env MOTHER_OPUS_MAX_TOKENS 可覆盖（生产期按真实分布调）。
     MOTHER_OPUS_MAX_TOKENS: int = 12288
+    # 🔴 PRD-A-021 R2b·U8·免转义哨兵框开关（默认关，需 live-LLM 冒烟确认中转站对「JSON+尾随哨兵
+    #   文本」的容忍度后再开）：开 → 母题入口 prompt 让 opus 把 richText 三段走 ⟦STEM⟧/⟦ANSWER⟧/
+    #   ⟦ANALYSIS⟧ 哨兵框原文输出（绕 JSON 转义坑）+ **不下发 response_format**（json_schema 会强制
+    #   整段为合法 JSON、拒尾随文本）；解析侧 extract_sentinel_richtext 原文抠段 + 瘦 JSON 解结构维。
+    #   关 → 维持旧式整 JSON + response_format 硬锁 10 维（解析侧哨兵提取器仍在但不命中=回退，0 行为变更）。
+    #   🔴 翻转前置：用真母题图冒烟一轮，确认中转站不因尾随哨兵文本整体拒答/截断 JSON（详见交付物）。
+    MOTHER_RICHTEXT_SENTINEL: bool = False
     # 🔴 PRD-C-100 B3·造图翻命令模型（§10 契约「opus 翻 GeoGebra 命令」）：默认 opus（命令质量稳，
     #   且当前促销价 opus 0.007/0.035 比 gpt-5.4 0.0108/0.0648 还便宜）。成本敏感期可经 .env 切
     #   VARIANT_MODEL_FIGURE=gpt-5.4-mini。造图翻命令走 relay_pool 落 conv_trace(label=figure_geogebra)。

@@ -80,12 +80,16 @@ RESPONSE_FORMAT_ENTRY: dict[str, Any] = {
 #   多用户共享缓存——多用户接缝预留）。entry 前缀 ~1500 token < opus 4096 缓存门槛（单用户期不命中，
 #   D7 接缝优先、省钱推多用户期；conv_trace.cached_tokens 记录对账）。画图链/图片重生不挂缓存。
 # ---------------------------------------------------------------------------
-def _build_entry_system_prefix() -> str:
+def _build_entry_system_prefix(*, sentinel: bool = False) -> str:
     """稳定系统前缀（模块加载期算一次，字节级稳定）。仅依赖闭集常量（EXAM_TYPES/_GRADE_BOOKS），
-    绝不内插 utterance/teacher_id/时间戳/随机。"""
+    绝不内插 utterance/teacher_id/时间戳/随机。
+
+    🔴 R2b·U8：sentinel=True → richText 三段走免转义哨兵框（settings.MOTHER_RICHTEXT_SENTINEL 开时用）；
+       sentinel=False（默认）→ 旧式整 JSON（response_format 硬锁 10 维，字节级不变）。两版都模块加载期
+       各算一次缓存（前缀字节稳定 = aigeek 缓存友好），运行期按 settings 选。"""
     exam_types = "/".join(dna_extract.EXAM_TYPES)
     books = "、".join(_GRADE_BOOKS)
-    return f"""你是浙教版初中数学命题专家 + 题库打标师。看这张母题图，按顺序做三件事并一次输出：
+    tmpl = f"""你是浙教版初中数学命题专家 + 题库打标师。看这张母题图，按顺序做三件事并一次输出：
 ① **判年级册 + 章 + 置信度**（判定母题属于哪个教材册、哪一章，给整体置信 0~1，拿不准给候选）；
 ② **真正把题解出来**（一步步算到最终答案，不许抄图、不许跳步）；
 ③ **据你的解答做 10 维 DNA 打标**（母题是所有变式的基准，解错则全变式跟着错——务必稳准）。
@@ -110,10 +114,18 @@ def _build_entry_system_prefix() -> str:
 10. modelCandidates 解题模型（克制）：真有可复用套路才给候选名（简单题空数组），只给名不给 M-id。
 
 ================ 富文本红线（题面/答案/解析） ================
-🔴 数学式用行内 $...$；换行 \\n；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数配对完整（下游有机器闸逐项检）。
+🔴 数学式用行内 $...$；换行用真实换行（直接回车，不要写字面 \\n）；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数配对完整（下游有机器闸逐项检）。
 🔴 **analysis/解析 = 给学生看的最终干净解法,不是草稿**：数学式/符号优先用 $LaTeX$ 表达、推导紧凑；**只写正确的最终推导链,禁止写试错/回头/『等等重新算』/反复估算/自我纠正等思考过程**（那些在你心里算，别外吐）。低冗余、省 token、一遍到底。
 🔴 has_figure：题面真含图形/图表/几何图填 true；只是拍照的纯文本题填 false。
+{{rich_output_block}}"""
+    block = (_RICH_BLOCK_SENTINEL if sentinel else _RICH_BLOCK_JSON).replace(
+        "{{", "{"
+    ).replace("}}", "}")
+    return tmpl.replace("{rich_output_block}", block)
 
+
+# richText + 输出格式段（两版：免转义哨兵框 / 旧式整 JSON），按 settings.MOTHER_RICHTEXT_SENTINEL 选。
+_RICH_BLOCK_JSON = """
 ================ 输出（只输出一个 JSON，不要解释、不要 markdown fence） ================
 {{
   "gradeBook": "六册之一 或 空串",
@@ -139,9 +151,67 @@ def _build_entry_system_prefix() -> str:
   }}
 }}"""
 
+_RICH_BLOCK_SENTINEL = """
+================ 🔴 免转义哨兵框（题面/答案/解析三段——务必照此格式，防 JSON 转义坏整对象） ================
+题面/答案/解析含 $LaTeX$、换行、<table> 等天然带 JSON 元字符（反斜杠/引号），塞进 JSON 字符串极易因一处转义坏 → 整个对象解析失败。**所以这三段不要塞进 JSON 字符串**，改用下面的哨兵框**原文**输出（框内随便写 LaTeX/换行/HTML，不用转义）：
+⟦STEM⟧
+（题干原文：Markdown + 行内 $LaTeX$ + 必要时 <table>，直接换行，无需任何转义）
+⟦/STEM⟧
+⟦ANSWER⟧
+（标准答案原文）
+⟦/ANSWER⟧
+⟦ANALYSIS⟧
+（解析原文：最终干净解法，不写草稿/试错）
+⟦/ANALYSIS⟧
+🔴 三段各自独立成框，缺一不可；框标签 ⟦STEM⟧/⟦/STEM⟧ 照抄、不要改写。
 
-# 🔴 稳定系统前缀（模块加载期算一次，字节级稳定 = 缓存前缀；多用户期跨老师逐字节相同可共享）。
-ENTRY_SYSTEM_PREFIX: str = _build_entry_system_prefix()
+================ 输出格式（先一个 JSON，紧跟三个哨兵框；不要 markdown fence、不要前言） ================
+先输出结构化 JSON（richText 三段在 JSON 里留空串占位，真内容走下方哨兵框）：
+{{
+  "gradeBook": "六册之一 或 空串",
+  "chapter": "章名 或 空串",
+  "gradeCandidates": [],
+  "chapterCandidates": [],
+  "confidence": 0.0,
+  "has_figure": true/false,
+  "richText": {{"stem": "", "answer": "", "analysis": ""}},
+  "solvedAnswer": "你一步步解出的最终答案(简短，一行)",
+  "dna": {{
+    "primaryKp": {{"id": "", "name": "真实考点名"}},
+    "secondaryKps": [],
+    "qtype": "选择/填空/解答",
+    "assessmentType": "上述闭集10之一",
+    "solutionSkeleton": ["步骤1", "步骤2(最难一步用【】整步包住)"],
+    "hardPointCount": 0,
+    "breakthroughPoints": [],
+    "scenario": "一句话场景 或 纯代数",
+    "difficulty": 1,
+    "tags": ["3~6个检索标签"],
+    "modelCandidates": []
+  }}
+}}
+紧接着 JSON **之后**输出三个哨兵框（⟦STEM⟧…⟦/STEM⟧、⟦ANSWER⟧…⟦/ANSWER⟧、⟦ANALYSIS⟧…⟦/ANALYSIS⟧），框内放三段富文本原文。"""
+
+
+# 两版前缀模块加载期各算一次（_build_entry_system_prefix 内部已注入对应 rich_output_block）。
+# 🔴 _build_entry_system_prefix() 无参（=sentinel=False）返回的就是 JSON 版完整前缀（与本量字节级
+#   相同，test_prefix_idempotent 据此校验）。
+ENTRY_SYSTEM_PREFIX_JSON: str = _build_entry_system_prefix(sentinel=False)
+ENTRY_SYSTEM_PREFIX_SENTINEL: str = _build_entry_system_prefix(sentinel=True)
+
+
+def _entry_prefix() -> str:
+    """运行期按 settings 选前缀（两版均模块加载期算好，字节稳定 = 缓存友好）。"""
+    from core import settings as _settings  # 注意：core 重导出的是 Settings 实例（非模块）
+    return (
+        ENTRY_SYSTEM_PREFIX_SENTINEL
+        if getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
+        else ENTRY_SYSTEM_PREFIX_JSON
+    )
+
+
+# 🔴 兼容旧引用（单测 / build_entry_prompt 壳）：默认指向 JSON 版（旧行为字节级一致）。
+ENTRY_SYSTEM_PREFIX: str = ENTRY_SYSTEM_PREFIX_JSON
 
 
 def build_entry_messages(
@@ -157,9 +227,17 @@ def build_entry_messages(
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
     if utterance:
+        # 🔴 R2b·U8：哨兵模式输出 = JSON + 三哨兵框（不是「只一个 JSON」），措辞按模式区分，
+        #   否则与 system 段的哨兵框指令打架。两版都强调「不据此出变式/不输出数组/不写前言」。
+        from core import settings as _settings  # core 重导出的是 Settings 实例（非模块）
+        _sentinel = getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
+        _fmt_hint = (
+            "按系统约定的「JSON + 三哨兵框」格式输出"
+            if _sentinel else "**只输出一个 JSON 对象**"
+        )
         var_text_segs.append(
             "【老师附带要求（仅作背景语境参考，不抽配方）：本步只给"
-            "母题本身打标，**只输出一个 JSON 对象**，不要据此出变式、不要输出数组或多个对象、不要写前言】"
+            f"母题本身打标，{_fmt_hint}，不要据此出变式、不要输出数组或多个对象、不要写前言】"
             f"{utterance}"
         )
     if teacher_memory:  # B4 记忆注入（后置，不进缓存前缀）
@@ -167,7 +245,7 @@ def build_entry_messages(
     if var_text_segs:
         parts.append({"type": "text", "text": "\n".join(var_text_segs)})
     parts.append({"type": "image_url", "image_url": {"url": image_url}})
-    return [SystemMessage(content=ENTRY_SYSTEM_PREFIX), HumanMessage(content=parts)]
+    return [SystemMessage(content=_entry_prefix()), HumanMessage(content=parts)]
 
 
 async def _to_b64_data_url(url: str) -> str:
@@ -276,10 +354,83 @@ def _unwrap_obj(parsed: Any) -> Any:
     return parsed
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-A-021 R2b·U8·免转义哨兵框（治「richText 含 $LaTeX$+\n+<table> 天然带 JSON 元字符
+#   → 一处转义坏 json.loads 整对象断 → +100s LLM 修复往返 → 仍不行 +几百s 重读图」惩罚链）
+#
+# 根因：stem/answer/analysis 三段富文本是破损重灾区（反斜杠/引号/换行/HTML 全往 JSON 字符串里塞）。
+# 方案：让 opus 把这三段**移出 JSON 字符串**，用唯一哨兵分隔符切出来（原文，不转义）；其余结构化
+#   字段（判章/dna/has_figure/solvedAnswer）仍正常 JSON（它们短、无元字符、转义稳）。
+# 解析：先按哨兵正则抠出三段原文 → 从文本里删掉哨兵块 → 剩下的瘦 JSON（richText 三段为空占位）
+#   干净 json.loads → 把抠出的三段塞回 parsed["richText"]。三段彼此独立：一段哨兵缺/坏不连累另两段。
+# 哨兵选 ⟦⟧ 双角括号 + 全大写英文标签（U+27E6/U+27E7，数学/中文题面/LaTeX/HTML 都不会出现），
+#   配 json 字段名 richText_blocks 关联。无哨兵（旧式整 JSON / mock 测试）→ 提取器返回 None，
+#   调用方回退既有 _parse_json 路径（向后兼容，0 行为变更）。
+# ---------------------------------------------------------------------------
+RICHTEXT_SENTINELS: dict[str, str] = {"stem": "STEM", "answer": "ANSWER", "analysis": "ANALYSIS"}
+# ⟦TAG⟧ ... ⟦/TAG⟧（DOTALL，非贪婪；段内含换行/反斜杠/引号/HTML 原样捕获，零转义）
+_SENTINEL_RE = {
+    key: re.compile(r"⟦" + tag + r"⟧(.*?)⟦/" + tag + r"⟧", re.DOTALL)
+    for key, tag in RICHTEXT_SENTINELS.items()
+}
+_ANY_SENTINEL_RE = re.compile(
+    r"⟦/?(?:" + "|".join(RICHTEXT_SENTINELS.values()) + r")⟧", re.DOTALL
+)
+
+
+def extract_sentinel_richtext(text: str) -> dict[str, Any] | None:
+    """免转义哨兵框解析：从 opus 文本抠出 ⟦STEM⟧/⟦ANSWER⟧/⟦ANALYSIS⟧ 三段原文 + 解析剩余瘦 JSON。
+
+    返回合并后的 dict（含 richText 三段 + 结构化字段），或 None（无任何哨兵 = 旧式整 JSON，
+    调用方回退既有 _parse_json）。三段彼此独立：缺一段则该段为空字符串、不影响另两段/结构化字段。
+    🔴 纯函数（除正则）可单测；不调 LLM、不抛（解不出剩余 JSON 仍返回带三段的 dict，结构字段尽力而为）。
+    """
+    if not text or "⟦" not in text:
+        return None
+    seg: dict[str, str] = {}
+    hit = False
+    for key, rx in _SENTINEL_RE.items():
+        m = rx.search(text)
+        if m:
+            hit = True
+            seg[key] = m.group(1).strip()
+    if not hit:
+        return None
+    # 从文本里删掉哨兵块（连同标签）→ 剩下结构化瘦 JSON。先删整块，再清残留孤立标签。
+    stripped = text
+    for rx in _SENTINEL_RE.values():
+        stripped = rx.sub("", stripped)
+    stripped = _ANY_SENTINEL_RE.sub("", stripped)
+    # 解析剩余瘦 JSON（结构化字段）；解不出 → 空 dict（仍交付三段富文本，宁丢结构维不丢题面）。
+    base: dict[str, Any] = {}
+    try:
+        import json as _json
+        s, e = stripped.find("{"), stripped.rfind("}")
+        if s >= 0 and e > s:
+            parsed = _json.loads(_repair_json_quotes(stripped[s : e + 1]))
+            if isinstance(parsed, dict):
+                base = parsed
+    except Exception:  # noqa: BLE001 — 结构化段坏：三段富文本仍交付（U8 宁丢结构维不丢题面）
+        base = {}
+    # 三段塞回 richText（覆盖瘦 JSON 里的空占位；段缺则不写，留瘦 JSON 占位/缺省）
+    rich = dict(base.get("richText") or {}) if isinstance(base.get("richText"), dict) else {}
+    for key in RICHTEXT_SENTINELS:
+        if key in seg:
+            rich[key] = seg[key]
+    base["richText"] = rich
+    return base
+
+
 async def parse_or_repair_entry(opus_text: str, V: Any) -> Any:
     """母题 opus 文本 → dict 的「解析 + 自愈」单一口径（B2 抽取，入口/classify 重锚共用）。
+    🔴 R2b·U8 免转义哨兵框优先：opus 用哨兵框分隔 richText 三段 → extract_sentinel_richtext 原文
+       抠段 + 瘦 JSON 解结构 → 绕开三段富文本转义坑（不再因一处转义坏整对象断）。无哨兵则回退：
     ① _parse_json（含数组解包）→ ② 失败则 _repair_entry_json（确定性引号修复 + LLM 兜底）→ 数组解包。
     返回 dict（成功）或 None（彻底解不出）。**只修解析、不重调 opus**（重调由调用方循环管）。"""
+    # R2b·U8：哨兵框优先（命中即免转义抠段，根治三段富文本破损）
+    sent = extract_sentinel_richtext(opus_text)
+    if isinstance(sent, dict):
+        return sent
     parsed = _unwrap_obj(V._parse_json(opus_text))
     if isinstance(parsed, dict):
         return parsed
@@ -485,13 +636,17 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     #   （几何压轴常见，C-010 §② 失败带反馈 retry≤2 范式）。绝不静默退 gpt——母题唯一安全网。
     entry: Any = None
     opus_exc: Exception | None = None
+    # 🔴 R2b·U8：哨兵模式 = 输出 JSON + 尾随哨兵框 → **不能下发 response_format**（json_schema 强制
+    #   整段合法 JSON、拒尾随文本）；关时维持旧式整 JSON + response_format 硬锁 10 维（字节级不变）。
+    _sentinel_mode = getattr(V.settings, "MOTHER_RICHTEXT_SENTINEL", False)
+    _rf = None if _sentinel_mode else RESPONSE_FORMAT_ENTRY
     for _attempt in range(2):
         try:
             opus_text = await V._ainvoke_text(
                 messages, model=opus_model,
                 max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
-                response_format=RESPONSE_FORMAT_ENTRY,
+                response_format=_rf,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
                 on_reasoning=V._emit_reasoning,  # D18 思考流式（aigeek/sui-xiang 当前未吐=dormant）
             )
@@ -501,9 +656,13 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 V._emit_stage("classify", "锚定考点", "running", "母题读图重试中…")
                 continue
             break
+        # 🔴 R2b·U8 免转义哨兵框优先：opus 哨兵框分隔 richText 三段 → 原文抠段 + 瘦 JSON 解结构，
+        #   绕开三段富文本转义坑（不再因一处转义坏整对象断 → 省 +100s LLM 修复往返）。无哨兵则回退。
+        parsed = extract_sentinel_richtext(opus_text)
         # 解析自愈（B2 共用口径 parse_or_repair_entry）：数组解包（id=1383/1384）→ 引号修复 +
         #   LLM 兜底（id=1399）。🔴 传 V 修原 _repair_json_via_llm 引用未定义模块级 V 的 NameError 隐患。
-        parsed = V._parse_json(opus_text)
+        if not isinstance(parsed, dict):
+            parsed = V._parse_json(opus_text)
         if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
             parsed = parsed[0]
         if not isinstance(parsed, dict):
