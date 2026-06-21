@@ -976,19 +976,24 @@ _LITERAL_NL_RE = re.compile(r"\\n(?![a-z])")
 _MATH_SPLIT_RE = re.compile(r"(\$\$[\s\S]+?\$\$|\$[^\n$]+?\$)")
 # 裸间距命令：\quad \qquad \, \; \! \:（后接非字母边界，防误伤 \quadword 之类）
 _BARE_SPACING_RE = re.compile(r"\\(?:qquad|quad)(?![a-zA-Z])|\\[,;!:]")
-# 🔴 2026-06-21（PRD-A-018 用户终审）：LLM 常把无参几何符号命令粘住点标签，如把 $\angle BOD$
-#   写成 $\angleBOD$ → KaTeX 当未定义控制序列 → 整段红字裸显示。后跟大写字母必是标签，插空格修复。
-#   仅无参符号命令（不含 \vec/\overrightarrow 带参）。FE mathNormalize.ts GLUED_GEOM_RE 同口径。
+# 🔴 2026-06-21（PRD-A-018 用户终审，DB 挖真值定位）：LLM 产 $...$ 时**闭合 $ 前留空格**，如
+#   `$\angle 1 = 44^\circ $`。markdown-it-katex 要求闭合 $ 前非空白（防误匹配货币）→ 整段不被识别
+#   为公式、裸显示源码。**真根因** = trim 掉 $...$ 内首尾空白。兼带防御：粘连几何命令补空格、裸 °→^\circ。
+#   与 FE mathNormalize.ts fixGluedInsideMath 同口径。
 _GLUED_GEOM_RE = re.compile(r"\\(angle|triangle|parallel|nparallel|perp|cong|simeq|odot)(?=[A-Z])")
-# 数学段内裸 ° → ^\circ（KaTeX 数学模式不认裸 °）。
 _BARE_DEGREE_RE = re.compile("°")
 
 
 def _fix_glued_inside_math(s: str) -> str:
-    """修 $...$ **内**常见 LLM LaTeX 脏写：粘连几何命令补空格、裸 ° → ^\\circ。段外不碰。"""
+    """修 $...$ **内**常见 LLM LaTeX 脏写：trim 首尾空白(真根因)、粘连几何命令补空格、裸 °→^\\circ。段外不碰。"""
     parts = _MATH_SPLIT_RE.split(s)
     for i in range(1, len(parts), 2):  # 奇数下标 = 数学段（含定界符）
-        parts[i] = _BARE_DEGREE_RE.sub(r"^\\circ ", _GLUED_GEOM_RE.sub(r"\\\1 ", parts[i]))
+        seg = parts[i]
+        dd = seg.startswith("$$")
+        inner = seg[2:-2] if dd else seg[1:-1]
+        fixed = _BARE_DEGREE_RE.sub(r"^\\circ ", _GLUED_GEOM_RE.sub(r"\\\1 ", inner)).strip()
+        if fixed:
+            parts[i] = f"$${fixed}$$" if dd else f"${fixed}$"
     return "".join(parts)
 
 
