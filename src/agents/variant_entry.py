@@ -383,6 +383,31 @@ def decide_confirm(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-A-021 R2a·闸1（B5）·变式入口可选预设年级/章注入
+#   老师在 FE 已选好母题范围（年级册 + 章 id）→ 经 config.configurable 传入：
+#     preset_grade_book：年级册**人话名**（如「八年级下册」），可空；
+#     preset_chapter_id：章节叶子/章 id（biz_subject id，4 位=年级册 / 7 位=章 / 完整=叶子），可空。
+#   命中任一 → 视作「老师已定范围」：**跳过 classify-grade 那次 LLM 判定**（直接用预设当 grade_book）
+#   + **不弹「确定范围」确认闸**（needs_confirm 强制 False），以老师选择为准。
+#   🔴 防空跑（铁律）：预设须保证后续 solve/dna 有合法范围——
+#     · preset_chapter_id 在 → 作 confirmed_chapter_id 注入，_finalize_high_conf 用其前 4 位当
+#       grade_code 圈池、用其作闸B 锚定前缀（与 classify 确认章路径同口径）；
+#     · 仅给 preset_grade_book（无 chapter_id）→ 回退用 grade_book 名归一 grade_code 圈年级池
+#       （anchor 前缀退年级册），仍是合法范围。
+#   没传任何预设 → 返回 None，入口维持原 classify + 确认闸路径，行为字节级不变。
+# ---------------------------------------------------------------------------
+def read_preset(config: RunnableConfig | None) -> dict[str, str] | None:
+    """从 config.configurable 取老师预设范围。返回
+       {grade_book:str, chapter_id:str}（任一可为空串，但至少一个非空才返回 dict）；都没传 → None。"""
+    conf = ((config or {}).get("configurable") or {}) if config else {}
+    grade_book = str(conf.get("preset_grade_book") or "").strip()
+    chapter_id = str(conf.get("preset_chapter_id") or "").strip()
+    if not grade_book and not chapter_id:
+        return None
+    return {"grade_book": grade_book, "chapter_id": chapter_id}
+
+
 def _match_kp_in_pool(name: str, leaf_pool: list[tuple[str, str]]) -> str | None:
     """开集 kp 名 → 年级叶子池 id（高置信路径后锚）。精确名匹配优先，退包含匹配（最短名优先=最细叶子）。
     锚不到 → None（mother_opus.anchor_to_chapter 据此走「宁空不凑」need_anchor_review）。"""
@@ -507,6 +532,19 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     has_figure = bool(entry.get("has_figure"))  # 🔴 仅记录，不 reject（反转 C-017 带图打回）
     decision = decide_confirm(entry)
 
+    # 🔴 R2a·闸1（B5）：老师预设了年级/章 → 以老师选择为准，跳过确认闸（needs_confirm=False）+
+    #   把预设范围覆盖进 decision（不再采信 opus 判的年级/章；opus 的解题/DNA 仍复用）。
+    #   preset_chapter_id 经 base_out.confirmed_chapter_id 注入 → _finalize_high_conf 用它当
+    #   grade_code 前缀 + 闸B 锚定前缀（与 classify 确认章路径同口径，不空跑）。
+    preset = read_preset(config)
+    if preset:
+        if preset.get("grade_book"):
+            decision["grade_book"] = preset["grade_book"]
+            decision["grade_candidates"] = [preset["grade_book"]]
+        decision["needs_confirm"] = False
+        decision["confidence"] = max(float(decision.get("confidence") or 0.0), CONF_CONFIRM_THRESHOLD)
+        decision["reason"] = "老师已预设年级/章（跳过确认）"
+
     # 出题配方旋钮（与 analyze 同口径）：utterance 非空 → 独立纯文本抽取（数量词稳）；纯贴图不抽。
     knobs: dict[str, Any] = {}
     if user_text:
@@ -525,7 +563,9 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         "mother_precheck": None,
         "awaiting_mother_confirm": False,
         "mother_rejected": False,
-        "confirmed_chapter_id": None,
+        # 🔴 R2a·闸1（B5）：预设章 id → 落 confirmed_chapter_id（= 老师确认章语境，_finalize_high_conf
+        #   据此用预设章前缀圈池/锚定；预设仅给年级册名时为空串，退年级册 code 圈池）。
+        "confirmed_chapter_id": (preset.get("chapter_id") or None) if preset else None,
         "confirmed_grade_book_id": None,
         # 🔴 M4/PRD-A-018·新母题入口必清旧轮残留 items（与 mother_dna 被本轮覆盖对齐）：
         #   同一 thread（会话级，贴新图不换 thread——PF-1 实测）先对图A 出过变式（items 非空）后直接贴图B
@@ -537,6 +577,10 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         "manual_order": False,
         "dropped_notes": [],
         "main_kp_prev": None,
+        # 🔴 R2a·闸3/闸4：新母题轮清上一轮的闸断标记（章冲突闸断 / 读图低置信拦截一次性标记），
+        #   否则同 thread 第二张图带 stale True → 该拦的不拦 / 该闸的不闸。
+        "_bug03_gated_chapter": None,
+        "_lowconf_blocked": False,
         # B1a：暂存 opus 一把判定（has_figure 给 B3 切图判定；entry_opus 给 confirm-resume 兜底）
         "mother_has_figure": has_figure,
         "entry_decision": decision,
@@ -599,6 +643,10 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             prov_dna["solved_answer"] = V._sanitize_rich_text(prov_solved)
         prov_dna["dna"] = prov_dna_obj
         prov_dna["mother_solve_source"] = "opus"
+        # 🔴 R2a·闸2（B5b）首解范围指纹（写点①·低置信路）：记首解所在年级册 4 位 code 前缀。
+        #   低置信路常无法判出年级册（decision.grade_book 空）→ 空 fp。空 fp 的比较策略见 _should_resolve
+        #   （空 fp 不判「册变」，只靠「首解没锚牢」子集触发重解，不撞 B2 死循环）。
+        prov_dna["_solve_range_fp"] = V._grade_to_code(decision.get("grade_book")) or ""
         return {
             **base_out,
             "analysis": {
@@ -646,10 +694,18 @@ async def _finalize_high_conf(
 
     include_review_books = V._wants_review_books(V._latest_human_text(state.get("messages", [])))
 
-    # 年级 code：opus 判的 gradeBook 归一 4 位 code（落空退粗考点反查）
-    grade_code = V._grade_to_code(decision["grade_book"])
-    if not grade_code:
-        grade_code = await V._resolve_grade_code(analysis)
+    # 🔴 R2a·闸1（B5）：预设章 id（base_out.confirmed_chapter_id，老师已选范围）= 锚定事实源，
+    #   压过 opus 图读 grade。前 4 位 = 年级册 code（与 classify B4-fix 确认章驱动同口径），
+    #   并作闸B 锚定前缀（收窄到预设章）。无预设章 → 退 opus gradeBook 归一 / 粗考点反查。
+    preset_chapter_id = str(base_out.get("confirmed_chapter_id") or "").strip() or None
+
+    # 年级 code：预设章前 4 位优先；否则 opus 判的 gradeBook 归一 4 位 code（落空退粗考点反查）
+    if preset_chapter_id and len(preset_chapter_id) >= 4:
+        grade_code = preset_chapter_id[:4]
+    else:
+        grade_code = V._grade_to_code(decision["grade_book"])
+        if not grade_code:
+            grade_code = await V._resolve_grade_code(analysis)
     if grade_code:
         analysis["grade"]["code"] = grade_code
 
@@ -693,6 +749,8 @@ async def _finalize_high_conf(
             early_dna["solved_answer"] = V._sanitize_rich_text(_early_solved)
         early_dna["dna"] = _early_dna_obj
         early_dna["mother_solve_source"] = "opus"
+        # 🔴 R2a·闸2（B5b）首解范围指纹（写点②·高置信空池 early 路）：记首解年级册 4 位 code。
+        early_dna["_solve_range_fp"] = str(grade_code or "")
         picker_payload = {
             "grade_book": {"id": grade_code or "", "name": decision.get("grade_book") or ""},
             "chapter": {"id": "", "name": str(decision.get("chapter") or "").strip()},
@@ -741,6 +799,8 @@ async def _finalize_high_conf(
     if solved:
         mother_dna["solved_answer"] = V._sanitize_rich_text(solved)
     mother_dna["mother_solve_source"] = "opus"
+    # 🔴 R2a·闸2（B5b）首解范围指纹（写点②·高置信成功路同口径）：记首解年级册 4 位 code。
+    mother_dna["_solve_range_fp"] = str(grade_code or "")
 
     # 🔴 开集 kp 名 → 年级叶子池后锚（高置信路径专属；id 落定后交闸B 校验前缀）
     main_kp_obj = dna.get("main_kp") or {}
@@ -764,8 +824,9 @@ async def _finalize_high_conf(
         V._emit_stage("classify", "锚定考点", "warn",
                       f"母题富文本机器检发现 {len(rt_check['issues'])} 处问题，待人工复核")
 
-    # 闸B 锚定·宁空不凑（G11，同 classify）：高置信无确认章 → 以年级册 4 位 code 作前缀
-    chapter_id = grade_code  # 高置信路径锚到年级（章为 opus 判定文本，记录不收窄前缀）
+    # 闸B 锚定·宁空不凑（G11，同 classify）：预设章 id（老师选范围）优先收窄前缀；无预设 → 年级册 4 位
+    #   code（高置信无确认章路径，章为 opus 判定文本、不收窄前缀，行为字节级不变）。
+    chapter_id = preset_chapter_id or grade_code
     dna = mother_opus.anchor_to_chapter(
         dna, chapter_id=chapter_id, leaf_pool=leaf_pool, include_review_books=include_review_books,
     )

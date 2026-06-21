@@ -14,7 +14,14 @@ import json
 
 from langchain_core.messages import HumanMessage
 
-from agents.variant import after_patch, patch, route_entry, validate_instruction
+from agents.variant import (
+    after_patch,
+    entry_lowconf_block,
+    patch,
+    route_entry,
+    validate_instruction,
+)
+from agents.variant_entry import read_preset
 
 
 def _tok(uid: int = 1) -> str:
@@ -126,3 +133,115 @@ class TestClarifyAnswerContinuation:
         merged = {**state, **update}
         # 改了年级 → items 清空 + 未确认 → after_patch 必回 classify 重锚（续出题，不掉催图）
         assert after_patch(merged) == "classify"
+
+
+class TestF2PatchClearsConfirmedChapter:
+    """🔴 R2a·F2：patch 改年级时必清 confirmed_chapter_id（防「先确认章再纠正年级」锚错册）。"""
+
+    def test_patch_grade_clears_confirmed_chapter_id(self):
+        state = _state(
+            analysis={
+                "grade": {"value": "八年级下学期", "confidence": 0.9, "code": "3082"},
+                "kp": {"value": "一元二次方程", "confidence": 0.9},
+            },
+            mother_dna={"stem": "x^2-3x+2=0"},
+            mother_confirmed=False,
+            items=[],
+            confirmed_chapter_id="3082002",  # 老师此前确认过章（旧册 3082）
+            pending={"intent": "修正", "mother_correction": {"grade": "九年级上学期", "kp": None}},
+        )
+        update = asyncio.run(patch(state, _cfg()))
+        # 🔴 改年级 → 旧确认章作废，必清（否则 classify 仍用旧章前 4 位 3082 当年级册 = 锚错册）
+        assert update.get("confirmed_chapter_id") is None
+        assert update.get("_bug03_gated_chapter") is None
+
+    def test_patch_kp_only_keeps_confirmed_chapter_id(self):
+        # 只改考点（不改年级）→ 不清 confirmed_chapter_id（章语境仍有效，只换 kp 锚定）
+        state = _state(
+            analysis={
+                "grade": {"value": "八年级下学期", "confidence": 0.9, "code": "3082"},
+                "kp": {"value": "一元二次方程", "confidence": 0.9},
+            },
+            mother_dna={"stem": "x^2-3x+2=0"},
+            mother_confirmed=False,
+            items=[],
+            confirmed_chapter_id="3082002",
+            pending={"intent": "修正", "mother_correction": {"grade": None, "kp": "二次函数"}},
+        )
+        update = asyncio.run(patch(state, _cfg()))
+        assert "confirmed_chapter_id" not in update  # 没改年级 → 不动 confirmed_chapter_id
+
+
+class TestGate4LowconfBlock:
+    """🔴 R2a·闸4（BUG-04）：读图极低置信 resume → route_entry 前置拦截（不进 classify）。"""
+
+    def _resume_state(self, confidence, chapter="第2章 一元二次方程", **kw):
+        base = _state(
+            text="确认",
+            awaiting_mother_confirm=True,
+            entry_decision={"confidence": confidence, "chapter": chapter},
+            mother_dna={"stem": "s"},
+        )
+        base.update(kw)
+        return base
+
+    def _cfg_confirm(self, chapter_id="3082002"):
+        conf = {"ruoyi_token": _tok(), "confirmed_chapter_id": chapter_id}
+        return {"configurable": conf}
+
+    def test_very_low_conf_blocks_before_classify(self):
+        st = self._resume_state(confidence=0.3)
+        assert route_entry(st, self._cfg_confirm()) == "entry_lowconf_block"
+
+    def test_chapter_unjudged_blocks(self):
+        st = self._resume_state(confidence=0.9, chapter="")  # 置信高但章未判出 → 也拦
+        assert route_entry(st, self._cfg_confirm()) == "entry_lowconf_block"
+
+    def test_normal_conf_goes_classify(self):
+        st = self._resume_state(confidence=0.7)
+        assert route_entry(st, self._cfg_confirm()) == "classify"
+
+    def test_threshold_040_not_blocked(self):
+        # 恰好 0.40 不拦（< 0.40 才拦）
+        st = self._resume_state(confidence=0.40)
+        assert route_entry(st, self._cfg_confirm()) == "classify"
+
+    def test_insist_after_block_goes_classify(self):
+        # 已拦过一次（_lowconf_blocked=True）→ 老师坚持再确认 → 放行进 classify（防永久卡死）
+        st = self._resume_state(confidence=0.3, _lowconf_blocked=True)
+        assert route_entry(st, self._cfg_confirm()) == "classify"
+
+    def test_block_node_sets_flag_and_keeps_awaiting(self):
+        st = self._resume_state(confidence=0.2)
+        out = asyncio.run(entry_lowconf_block(st, self._cfg_confirm()))
+        assert out["_lowconf_blocked"] is True
+        assert out["awaiting_mother_confirm"] is True  # 续接老师下一句
+        assert any("换" in str(m.content) for m in out["messages"])  # 建议换图
+
+    def test_no_entry_decision_does_not_block(self):
+        # 旧线程无 entry_decision → 不拦（向后兼容）
+        st = _state(
+            text="确认", awaiting_mother_confirm=True, mother_dna={"stem": "s"},
+        )
+        assert route_entry(st, self._cfg_confirm()) == "classify"
+
+
+class TestReadPreset:
+    """🔴 R2a·闸1（B5）·预设输入契约：config.configurable.preset_grade_book / preset_chapter_id。"""
+
+    def test_no_preset_returns_none(self):
+        assert read_preset({"configurable": {}}) is None
+        assert read_preset(None) is None
+
+    def test_grade_only(self):
+        p = read_preset({"configurable": {"preset_grade_book": "八年级下册"}})
+        assert p == {"grade_book": "八年级下册", "chapter_id": ""}
+
+    def test_chapter_only(self):
+        p = read_preset({"configurable": {"preset_chapter_id": "3082002"}})
+        assert p == {"grade_book": "", "chapter_id": "3082002"}
+
+    def test_both(self):
+        p = read_preset({"configurable": {
+            "preset_grade_book": "八年级下册", "preset_chapter_id": "3082002"}})
+        assert p["grade_book"] == "八年级下册" and p["chapter_id"] == "3082002"

@@ -68,6 +68,9 @@ def _make_fake_V():
         _emit_error=lambda *a, **k: emitted["errors"].append(a),
         _emit_reasoning=lambda *a, **k: None,
         _sanitize_rich_text=lambda s: s,
+        # 🔴 R2a·闸2（B5b）：低置信路写 _solve_range_fp 走 V._grade_to_code(decision.grade_book)。
+        #   本桩低置信 entry gradeBook="" → 归一空 → 空 fp（=纯文字母题空 fp 场景）。
+        _grade_to_code=lambda v: ("" if not str(v or "").strip() else "30XX"),
         join_skeleton=lambda lines: "\n".join(str(s) for s in (lines or [])),
         _parse_json=lambda t: __import__("json").loads(t),
         _extract_knobs=_extract_knobs,

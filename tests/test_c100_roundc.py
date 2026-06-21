@@ -140,24 +140,42 @@ class TestReanchorReuseFirstSolve:
         # （_emit_mother_card 在 _reanchor_reuse_first_solve 末尾调一次）
         assert out["confirmed_chapter_id"] == "3082002"
 
-    def test_reanchor_graceful_degrade_still_emits_confirmed(self, monkeypatch):
-        """极端 niche：确认章里仍无贴切叶子 → graceful 锚到确认章节点本身 + 待人审，
-        仍 mother_confirmed=True（仍能出变式，不退回 picker 死循环）。"""
+    def test_reanchor_graceful_degrade_first_gates_bug03(self, monkeypatch):
+        """🔴 R2a·闸3（BUG-03）：极端 niche·确认章里无贴切叶子（手选章↔主考点冲突）→ **首次闸断/
+        强确认**（mother_confirmed=False + 发 needConfirm + awaiting_mother_confirm=True），不再静默
+        强锚放行出锚错章的变式。仍**不重调 opus**（复用首解，B2 不破）。记下闸断章 _bug03_gated_chapter。"""
         kp = "某个题库里根本没有的怪考点"
         leaf_pool = [("3082002001", "一元二次方程的解法")]  # 没有 kp 对应叶子
         opus_spy = {"calls": 0}
-        _patch_classify_net(monkeypatch, leaf_pool=leaf_pool, opus_spy=opus_spy)
+        emitted = _patch_classify_net(monkeypatch, leaf_pool=leaf_pool, opus_spy=opus_spy)
 
         st = _first_solve_state(kp_name=kp)
         out = asyncio.run(V.classify(st, _cfg("3082002")))
 
+        assert opus_spy["calls"] == 0  # 仍不重调 opus（B2 复用不破）
+        assert out["mother_confirmed"] is False  # 🔴 首次冲突 → 闸断（不静默放行）
+        assert out["awaiting_mother_confirm"] is True
+        assert out["_bug03_gated_chapter"] == "3082002"
+        assert len(emitted["need_confirm"]) >= 1  # 发了再确认/换章的 picker
+
+    def test_reanchor_graceful_degrade_insist_confirms(self, monkeypatch):
+        """🔴 R2a·闸3（BUG-03）防死循环：老师**再确认同一章**（state._bug03_gated_chapter == 确认章）
+        → 接受强锚放行：graceful 锚到确认章节点本身 + 待人审，mother_confirmed=True（仍能出变式）。"""
+        kp = "某个题库里根本没有的怪考点"
+        leaf_pool = [("3082002001", "一元二次方程的解法")]
+        opus_spy = {"calls": 0}
+        _patch_classify_net(monkeypatch, leaf_pool=leaf_pool, opus_spy=opus_spy)
+
+        st = _first_solve_state(kp_name=kp)
+        st["_bug03_gated_chapter"] = "3082002"  # 老师已就该章闸断过一次，本轮再确认同章 = 坚持
+        out = asyncio.run(V.classify(st, _cfg("3082002")))
+
         assert opus_spy["calls"] == 0  # 仍不重调 opus
-        assert out["mother_confirmed"] is True  # graceful → 仍定死 → 仍出变式
+        assert out["mother_confirmed"] is True  # 坚持 → 接受强锚 → 仍定死 → 仍出变式
         anchored = (out["analysis"].get("kp") or {}).get("anchored") or {}
-        # 降级锚到确认章节点本身（老师亲选范围，非凭空造叶子）
-        assert anchored.get("id") == "3082002"
-        # 标了待人审
+        assert anchored.get("id") == "3082002"  # 降级锚到确认章节点本身
         assert out["mother_dna"].get("need_anchor_review") is True
+        assert out.get("_bug03_gated_chapter") is None  # 放行后清闸断标记
 
     def test_no_confirmed_chapter_does_not_trigger_reuse(self, monkeypatch):
         """对照：无确认章（首图首解语境）→ 复用闸不触发 → 走原 opus solve 路径（spy 被调）。"""
@@ -172,6 +190,45 @@ class TestReanchorReuseFirstSolve:
         out = asyncio.run(V.classify(st, {"configurable": {"ruoyi_token": "t"}}))
         assert opus_spy["calls"] == 1  # 走了原 opus solve（复用闸正确地没误触）
         assert isinstance(out, dict)
+
+
+# ===========================================================================
+# 🔴 PRD-A-021 R2a·闸2（B5b）·range-fingerprint：册变才重解 / 空 fp·同册不重解（护 B2）
+# ===========================================================================
+class TestRangeFingerprintGate:
+    def test_same_book_reuses_no_resolve(self, monkeypatch):
+        """首解 fp=3082，确认章 3082002（同册 3082）→ 不触发重解，走复用（opus 零调用，B2 字节级不变）。"""
+        kp = "一元二次方程根与系数的关系（韦达定理）"
+        leaf_pool = [("3082002005", kp)]
+        opus_spy = {"calls": 0}
+        _patch_classify_net(monkeypatch, leaf_pool=leaf_pool, opus_spy=opus_spy)
+        st = _first_solve_state(kp_name=kp)
+        st["mother_dna"]["_solve_range_fp"] = "3082"  # 首解落在 3082 册
+        out = asyncio.run(V.classify(st, _cfg("3082002")))
+        assert opus_spy["calls"] == 0  # 同册 → 复用，不重解
+
+    def test_empty_fp_reuses_no_resolve(self, monkeypatch):
+        """🔴 空 fp（纯文字母题首解判不出册）→ **不判册变**（防 B2 死循环）→ 走复用，opus 零调用。"""
+        kp = "一元二次方程根与系数的关系（韦达定理）"
+        leaf_pool = [("3082002005", kp)]
+        opus_spy = {"calls": 0}
+        _patch_classify_net(monkeypatch, leaf_pool=leaf_pool, opus_spy=opus_spy)
+        st = _first_solve_state(kp_name=kp)
+        st["mother_dna"]["_solve_range_fp"] = ""  # 空 fp
+        out = asyncio.run(V.classify(st, _cfg("3082002")))
+        assert opus_spy["calls"] == 0  # 空 fp → 不触发册变重解（B2 不破）
+
+    def test_book_changed_triggers_resolve(self, monkeypatch):
+        """首解 fp=3082，确认章 3091001（换到 3091 册）→ 册变 → 放弃复用、全量重 solve（opus 被调）。"""
+        kp = "一元二次方程根与系数的关系（韦达定理）"
+        # 新册池（确认章 3091001 前缀）；solve_and_label spy 返回最小可解析体即可
+        leaf_pool = [("3091001005", kp)]
+        opus_spy = {"calls": 0}
+        _patch_classify_net(monkeypatch, leaf_pool=leaf_pool, opus_spy=opus_spy)
+        st = _first_solve_state(kp_name=kp)
+        st["mother_dna"]["_solve_range_fp"] = "3082"  # 首解落在 3082
+        out = asyncio.run(V.classify(st, _cfg("3091001")))  # 老师把范围换到 3091 册
+        assert opus_spy["calls"] == 1  # 册变 → 重解（窄子集触发，不撞 B2）
 
 
 # ===========================================================================

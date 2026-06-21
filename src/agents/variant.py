@@ -404,6 +404,14 @@ class VariantState(MessagesState, total=False):
     mother_has_figure: bool
     entry_decision: dict[str, Any]
     _entry_finalized: bool
+    # 🔴 PRD-A-021 R2a·闸3（BUG-03）：复用首解强锚路径下「老师选定章↔AI 判主考点冲突」（章里锚不到
+    #   主考点真叶子）→ 闸断/强确认（不静默强锚放行）。记录已就该冲突闸断过的章 id；老师**再次确认
+    #   同一章**（坚持）→ 接受强锚放行，不再二次闸断（防死循环）；改成别的章 → 重新走锚定。
+    _bug03_gated_chapter: str | None
+    # 🔴 PRD-A-021 R2a·闸4（BUG-04）：母题读图置信极低（< 0.40）/ 章未判出 → resume 轮在 classify
+    #   **之前**前置拦截，建议换清晰图，不进 classify 烧 opus token。置 True = 已拦过一次；老师坚持
+    #   （再回传 confirmed_chapter_id）→ 放行进 classify（防永久卡死）。
+    _lowconf_blocked: bool
 
 
 # ---------------------------------------------------------------------------
@@ -1760,9 +1768,37 @@ def _editor_op(config: RunnableConfig | None) -> dict[str, Any] | None:
     return None
 
 
+# 🔴 PRD-A-021 R2a·闸4（BUG-04）·读图低置信前置闸阈值（用户拍板 0.40）。
+LOWCONF_BLOCK_THRESHOLD = 0.40
+
+
+def _entry_read_lowconf(state: VariantState) -> bool:
+    """母题入口读图是否「极低置信 / 章未判出」（闸4 拦截判据）。读 entry_decision 快照
+    （mother_opus_entry 入口轮写），置信 < 0.40 或 章为空 → True。无 entry_decision（旧线程/
+    回退入口）→ False（不拦，向后兼容）。"""
+    dec = state.get("entry_decision")
+    if not isinstance(dec, dict):
+        return False
+    try:
+        conf = float(dec.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    chapter_empty = not str(dec.get("chapter") or "").strip()
+    return conf < LOWCONF_BLOCK_THRESHOLD or chapter_empty
+
+
+def _should_lowconf_block(state: VariantState) -> bool:
+    """闸4 是否应在本 resume 轮拦截：读图极低置信 且 尚未拦过一次（_lowconf_blocked=False）。
+    已拦过（老师坚持再确认）→ 不再拦，放行进 classify（防永久卡死）。"""
+    return _entry_read_lowconf(state) and not state.get("_lowconf_blocked")
+
+
 def route_entry(
     state: VariantState, config: RunnableConfig
-) -> Literal["mother_opus_entry", "parse", "generate", "ask", "auth", "classify", "editor_entry"]:
+) -> Literal[
+    "mother_opus_entry", "parse", "generate", "ask", "auth", "classify",
+    "editor_entry", "entry_lowconf_block",
+]:
     # 🔴 身份硬闸（用户拍板 2026-06-11）：每次对话绑死登录老师。token 缺失/解不出 userId
     # → 一步不走（不进任何 LLM 节点，conv_trace 也不会产生无主行；表级 NOT NULL 双保险）。
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
@@ -1785,6 +1821,10 @@ def route_entry(
     if state.get("awaiting_mother_confirm"):
         cfg = (config or {}).get("configurable") or {}
         if cfg.get("confirmed_chapter_id"):
+            # 🔴 R2a·闸4（BUG-04）：进 classify 前置闸——读图极低置信/章未判出 → 拦一次建议换图，
+            #   不烧 opus token。老师坚持（再确认同一章）→ 第二轮 _lowconf_blocked 已 True，放行。
+            if _should_lowconf_block(state):
+                return "entry_lowconf_block"
             return "classify"
     # 🔴 PRD-C-017 B5·母题卡硬停闸 resume（复用 chat-resume，不引 interrupt）：上一轮 classify
     #   解出 mother_dna + 发母题卡帧后停在 awaiting_mother_review 等老师点「开始举一反三」。本轮
@@ -1801,6 +1841,8 @@ def route_entry(
         #   复用首解、重发 classify done 帧），别落 parse 僵住（旧实现只认低置信确认章，高置信改章静默回
         #   parse、classify 帧不刷 = 状态条卡死）。confirmed_chapter_id 在 → 重锚优先于 parse 分诊。
         if cfg.get("confirmed_chapter_id"):
+            if _should_lowconf_block(state):  # 🔴 闸4：高置信 await_review 改章 resume 同样前置拦截
+                return "entry_lowconf_block"
             return "classify"
         # 🔴 停在 review 但老师没点开始（发了别的话/改 DNA）→ 落 parse 分诊（既有母题纠正/
         #   答疑路径），**绝不**掉进下面「mother_confirmed → 自动 generate」把硬停闸架空。
@@ -2236,7 +2278,28 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         and _prev_main_kp
         and str(_prev_main_kp.get("name") or "").strip()
     )
+    # 🔴 R2a·闸2（B5b）·range-fingerprint：范围错位才重解（窄子集，绝不全量重解撞 B2 死循环）。
+    #   _reuse_ok 成立时再过一道「该不该刷新首解」判据——满足其一才**放弃复用、走全量重 solve**：
+    #     (a) 册变：fp 非空 且 确认章前 4 位 ≠ 首解范围指纹（_solve_range_fp），= 老师把范围换到**另一
+    #         年级册**，首解 solve/DNA 按旧册解的（学段进度/解法范围已失真）→ 须按新册重解；
+    #     (b) 首解没锚牢 **且 是同册再锚**：首解 need_anchor_review / main_kp 锚空——但**仅当不是
+    #         B2 复用语境时**才重解。
+    #   🔴🔴 B2 死循环根治不可破（红线）：_reanchor_reuse_first_solve 的全部存在意义 = 首解 opus 成功
+    #     产 DNA（_reuse_ok 已保证 stem + main_kp 有 name）但**锚不到叶子**（need_anchor_review）→ 老师
+    #     在**同册**选定章后**复用首解 + 只换锚**，绝不重 solve（重 solve niche 题会坏 JSON → 死循环）。
+    #     因此「首解没锚牢」在**同册**路径下恰恰是 B2 要复用的场景，**不得**据此重解。故 (b) 仅在「换册」
+    #     时与 (a) 合流——换册后首解锚定本就作废，重解顺理成章。同册（含空 fp）一律走复用，B2 字节级不变。
+    #   🔴 空 fp 策略（核心盲点）：纯文字母题首解判不出年级册 → _solve_range_fp 空串。**空 fp 不判册变**
+    #     （否则非空确认章前缀必 ≠ 空 fp → 每次重锚都全量回退 = 撞 B2 死循环）。空 fp → _book_changed=False
+    #     → 走复用（B2 同册路径），靠 _reanchor 内 graceful 降级兜锚不牢，不重解。
+    _resolve_needed = False
     if _reuse_ok:
+        _fp = str(mother_dna.get("_solve_range_fp") or "").strip()
+        _new_book = (confirmed_chapter_id or "")[:4] if confirmed_chapter_id else ""
+        # (a)+(b) 合流：仅「换册」触发重解（空 fp / 同册一律复用，护 B2）。换册后首解锚定作废，
+        #   连带覆盖「首解没锚牢」——新册重解一次更稳，且不在 B2 同册复用路径上，不会引死循环。
+        _resolve_needed = bool(_fp) and bool(_new_book) and _new_book != _fp
+    if _reuse_ok and not _resolve_needed:
         return await _reanchor_reuse_first_solve(
             state=state, analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
             grade_code=grade_code, chapter_id=chapter_id, leaf_pool=leaf_pool,
@@ -2314,6 +2377,9 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     if solved:
         mother_dna["solved_answer"] = _sanitize_rich_text(solved)
     mother_dna["mother_solve_source"] = "opus"  # G4 断言锚点：骨架来源 = opus 解答
+    # 🔴 R2a·闸2（B5b）首解范围指纹（写点③·classify opus-resolve 路）：记首解年级册 4 位 code。
+    #   此处 grade_code 已由确认章前 4 位 / _resolve_grade_code 定出（首解真实落册）。
+    mother_dna["_solve_range_fp"] = str(grade_code or "")
 
     # --- 🔴 闸A 富文本机器验证（G10，非 LLM）：坏 LaTeX/缺表 → 标问题（不直接放行） ---
     rt_check = mother_opus.validate_rich_text(
@@ -2549,14 +2615,57 @@ async def _reanchor_reuse_first_solve(
             qn["confidence"] = max(float(qn.get("confidence", 0) or 0), CONF_GATE)
             analysis["qtype"] = qn
 
-    confirmed = _conf_ok(analysis) and bool(kp_node.get("anchored"))
     kp_name = (analysis.get("kp") or {}).get("value") or main_kp_name or "?"
     grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
+
+    # 🔴 PRD-A-021 R2a·闸3（BUG-03）·锚定章↔主考点冲突闸断（取代旧「⚠ 警告 + 强锚放行」）：
+    #   degraded = 老师选定章里锚不到主考点真叶子 = 手选章与 AI 判主考点不一致。旧实现静默强锚到章节点
+    #   + confirmed=True → 出一组锚错章的变式。改向：**首次冲突 → 闸断/强确认**（不放行出题），把冲突
+    #   播给老师，让其「再点确认（坚持按此章出）」或「换正确的章」。**只收窄到此「复用首解强锚」危险路**——
+    #   fresh classify 路锚不到本就走 confirmed=False→clarify（安全），不在此被误伤。
+    #   防死循环：老师**第二次确认同一章**（FE 再回传同一 confirmed_chapter_id）→ 视为坚持 → 接受强锚
+    #   放行（_bug03_gated_chapter 记过该章，本轮等于）。换别的章 → 重新锚定（_should_resolve/复用再判）。
+    _bug03_insisted = bool(
+        degraded
+        and confirmed_chapter_id
+        and str(state.get("_bug03_gated_chapter") or "").strip() == str(confirmed_chapter_id).strip()
+    )
+    if degraded and not _bug03_insisted:
+        _emit_stage("classify", "锚定考点", "warn",
+                    f"所选章里没有主考点「{kp_name}」的具体叶子——请确认是否选错章")
+        _emit_stage("knobs", "解析配方", STAGE_AWAIT, "待确认章后定配方")
+        _emit_need_confirm({
+            "grade_book": {"id": grade_code or "", "name": grade_name},
+            "chapter": {"id": confirmed_chapter_id or "", "name": ""},
+            "grade_candidates": [{"id": grade_code or "", "name": grade_name}] if grade_name else [],
+            "chapter_candidates": [],
+            "confidence": 0.0,
+        })
+        gated: VariantState = {
+            "analysis": analysis,
+            "mother_dna": mother_dna,
+            "mother_confirmed": False,
+            "facts_locked": False,
+            "awaiting_mother_confirm": True,   # resume → route_entry → classify 重锚（带确认章）
+            "awaiting_mother_review": False,    # 清 stale review，防「开始举一反三」误路由
+            "confirmed_chapter_id": confirmed_chapter_id,
+            "_bug03_gated_chapter": confirmed_chapter_id,  # 记过此章，老师再确认同章即放行（防死循环）
+            "messages": [AIMessage(content=(
+                f"⚠ 你选的这一章里**没有**主考点「{main_kp_name}」对应的知识点叶子——可能选错了章。\n\n"
+                "请核对：\n"
+                "- 若**确实是这一章**（就按此章范围出题，标「锚定待人审」）→ 请**再回复一次「确认」**；\n"
+                "- 若**选错了章** → 直接告诉我正确的章，我重新锚定。"
+            ))],
+        }
+        gated["mother_confirm"] = build_mother_confirm({**state, **gated})
+        _emit_mother_card({**state, **gated})  # 母题卡仍先出（复用首解全字段，等老师定章）
+        _emit_figure_stage({**state, **gated})
+        return gated
+
+    confirmed = _conf_ok(analysis) and bool(kp_node.get("anchored"))
     _detail = f"考点「{kp_name}」·年级「{grade_name}」（复用母题首解，未重解）"
     if degraded:
-        # 🔴 BUG-03（2026-06-19）·锚定章冲突不静默放行：老师手选章里锚不到「{kp_name}」的真叶子
-        #   = 手选章与 AI 判主考点不符。仍按老师选定章范围出题（铁律④不卡死），但把冲突明确播出（detail +
-        #   AIMessage），不静默吞——让老师知道「按你选的章出，但主考点没落到该章叶子，请留意是否选错章」。
+        # 老师二次确认同章（坚持）→ 接受强锚：仍按所选章范围出题，标待人审（铁律④不卡死）。
         _detail += f"·⚠ 主考点「{kp_name}」未落到所选章的具体叶子（按所选章范围锚定·待人审）"
     _emit_stage("classify", "锚定考点", "done" if confirmed else "warn", _detail)
     recipe = knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
@@ -2577,6 +2686,8 @@ async def _reanchor_reuse_first_solve(
         "facts_locked": bool(confirmed),
         "awaiting_mother_confirm": False,
         "confirmed_chapter_id": confirmed_chapter_id,
+        # 闸3 放行后清闸断标记（下次别的纠正不带 stale）。
+        "_bug03_gated_chapter": None,
         "messages": _conflict_msgs,
     }
     out["mother_confirm"] = build_mother_confirm({**state, **out})
@@ -2665,6 +2776,40 @@ async def await_mother_review(state: VariantState, config: RunnableConfig) -> Va
         "messages": [
             AIMessage(content="请确认母题无误（见上方母题卡）：确认无误就点「开始举一反三」，开始准备生成变式；若要修改母题，直接告诉我。")
         ],
+    }
+
+
+async def entry_lowconf_block(state: VariantState, config: RunnableConfig) -> VariantState:
+    """🔴 PRD-A-021 R2a·闸4（BUG-04）·读图低置信前置闸（resume 轮·classify 之前）：母题读图置信
+    极低（< 0.40）/ 章未判出 → 拦截一次，建议老师换张清晰的图，**不进 classify、不烧 opus token**。
+
+    🔴 一次性拦截（防永久卡死）：置 _lowconf_blocked=True。老师若坚持（再回传 confirmed_chapter_id），
+       route_entry 见 _lowconf_blocked=True → _should_lowconf_block False → 放行进 classify 正常出题。
+    🔴 阶段灯中性 await（不是 warn/已中断）：这是「建议换图」的暂停，不是流程出错。
+    🔴 保持 awaiting_mother_confirm=True，让老师下一句（坚持确认 / 换图 URL）能继续被 route 接住。
+    """
+    dec = state.get("entry_decision") if isinstance(state.get("entry_decision"), dict) else {}
+    try:
+        conf = float((dec or {}).get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    _emit_stage("classify", "锚定考点", STAGE_AWAIT,
+                "这张图可能不适合做母题·建议换张清晰的图")
+    _emit_stage("knobs", "解析配方", STAGE_AWAIT, "待换图或确认后定配方")
+    body = (
+        "⚠ 我对这张图的读图把握很低"
+        f"（置信约 {conf:.2f}{'、且没判出具体章' if not str((dec or {}).get('chapter') or '').strip() else ''}）"
+        "——**可能这张图不太适合做母题**（拍得不清 / 不是标准题图 / 含大量图形）。\n\n"
+        "建议：\n"
+        "- **换一张更清晰的题目图**（直接贴新图的 OSS URL，我重新读）；\n"
+        "- 若你确认就用这张图、按你选的章继续 → **再回复一次「确认」**，我照常出变式。"
+    )
+    return {
+        # 拦过一次（坚持再确认即放行，不二次拦）。awaiting_mother_confirm 保持 True 让 resume 续接。
+        "_lowconf_blocked": True,
+        "awaiting_mother_confirm": True,
+        "awaiting_mother_review": False,
+        "messages": [AIMessage(content=body)],
     }
 
 
@@ -6260,6 +6405,19 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
     _emit_artifact({**state, "items": [], "analysis": analysis})
     # 🔴 批3：改硬锚 → 解冻（facts_locked=False），让 classify 重锚（重锚是合法锚定路径）；
     #   老师本次修正的 audit 留痕随 state 带走。
+    # 🔴 PRD-A-021 R2a·F2（与 B5b 同 PR）：patch 改**年级**时必清 confirmed_chapter_id。否则
+    #   「先确认章（state.confirmed_chapter_id 落了旧章）→ 再文字纠正年级」序列下，classify 仍读到旧
+    #   state.confirmed_chapter_id（variant.py 确认章驱动 grade_code）→ 用**旧章前 4 位**当年级册前缀 →
+    #   锚错册（老师纠正的新年级被旧章覆盖吞掉）。改年级 = 旧确认章作废，清掉它让 classify 退回按
+    #   patch 后的 analysis.grade 归一 grade_code（_resolve_grade_code），新年级真正生效。
+    #   🔴 与 B5b 先后顺序：本清在 patch 出口、先于下游 classify 读 confirmed_chapter_id；B5b 的 fp
+    #   比较读的是 mother_dna._solve_range_fp（首解写的），与 confirmed_chapter_id 是两个独立字段，
+    #   清这个不动那个，互不吞改。改年级后 confirmed_chapter_id=None → classify _reuse_ok 因
+    #   confirmed_chapter_id 为空而 False → 走全量重 solve（新册重解，正确）。
+    _patch_clear: dict[str, Any] = {}
+    if corr.get("grade"):
+        _patch_clear["confirmed_chapter_id"] = None
+        _patch_clear["_bug03_gated_chapter"] = None  # 章语境作废，连带清闸3 标记
     return {
         "analysis": analysis,
         "items": [],
@@ -6267,6 +6425,7 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
         "facts_locked": False,
         "facts_audit": audit,
         "pending": None,
+        **_patch_clear,
         # 🔴 M5/PRD-A-018：patch 改 grade/kp 清 items 后，流程实际硬停在母题卡 review（B5 硬停闸，
         #   after_patch→classify→gate_after_classify pinned→await_review），并不自动重出。旧文案承诺
         #   「重出这组变式」与硬停语义打架（两气泡矛盾）。改为与 await_review 对齐：只说重锚完、母题卡已更新，
@@ -7465,6 +7624,7 @@ graph.add_node("mother_precheck", mother_precheck_node)  # 退役（同上）
 graph.add_node("classify", classify)
 graph.add_node("await_review", await_mother_review)  # B5·母题卡硬停闸（置 awaiting_mother_review + END）
 graph.add_node("clarify", clarify)
+graph.add_node("entry_lowconf_block", entry_lowconf_block)  # 🔴 R2a·闸4·读图低置信前置拦截（建议换图，不进 classify）
 graph.add_node("generate", generate)
 graph.add_node("gene_gate", gene_gate)  # 闸A·基因闸（新变式 → 平行度比对 → 闸B）
 graph.add_node("solve_explain", solve_explain)
@@ -7500,6 +7660,8 @@ graph.set_conditional_entry_point(
         "ask": "ask_for_image",
         # 🔴 身份硬闸：无登录态 → 提示重登（同上，必落真节点）
         "auth": "require_login",
+        # 🔴 PRD-A-021 R2a·闸4（BUG-04）：读图极低置信 resume → 前置拦截建议换图（不进 classify）
+        "entry_lowconf_block": "entry_lowconf_block",
     },
 )
 graph.add_edge("ask_for_image", END)
@@ -7546,6 +7708,7 @@ graph.add_conditional_edges(
 )
 graph.add_edge("await_review", END)
 graph.add_edge("clarify", END)
+graph.add_edge("entry_lowconf_block", END)  # 🔴 R2a·闸4·拦截后 END（等老师换图 / 坚持确认）
 
 
 # generate：裸奔兜底时只吐消息、无 items → 结束；正常 → 闸A 基因闸 → 闸B solve_explain
