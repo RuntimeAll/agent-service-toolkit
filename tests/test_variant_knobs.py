@@ -365,6 +365,8 @@ def test_generate_without_user_text_keeps_legacy_prompt_and_no_knobs_call(monkey
     assert len(prompts) == 1  # no KNOBS extraction round-trip
     # B2·T1 + 整改1（2026-06-12）：GENERATE 现固定追加「确定上下文块」(_context_block) + W2 守恒
     #   硬约束段（_conservation_clause），spec 空（无 knobs）。两段并存、正交。
+    # 🔴 B3·R3a（PRD-A-021）：GENERATE 再追加「变式多样性段」(_maybe_diversity_block，n>=2 才注)，
+    #   位置在守恒/注卡段之后、spec 之前（与 variant.generate 装配顺序逐字一致）。
     facts = _mother_facts(state)
     expected = (
         GENERATE_PROMPT.format(n=3, n_normal=2, n_hard=1, **facts)
@@ -372,10 +374,12 @@ def test_generate_without_user_text_keeps_legacy_prompt_and_no_knobs_call(monkey
         + variant_mod._context_block(facts)
         + "\n\n"
         + variant_mod._conservation_clause(facts.get("dna"))
+        + variant_mod._maybe_diversity_block(facts.get("dna"), 3)
     )
-    assert prompts[0] == expected  # legacy + 确定上下文块 + W2 守恒段，无老师配方 spec
+    assert prompts[0] == expected  # legacy + 确定上下文块 + W2 守恒段 + B3 多样性段，无老师配方 spec
     assert "确定上下文" in prompts[0]  # 整改1 块确在
     assert "守恒硬约束" in prompts[0]  # W2 段确在（未被新块挤掉）
+    assert "变式多样性" in prompts[0]  # B3 段确在（n=3 默认配方也注）
     assert out["knobs"] == {}  # extracted-empty is persisted (never re-extract)
     assert out["shape_defects"] == []
     assert len(out["items"]) == 3 and "check" not in out["items"][0]

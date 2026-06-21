@@ -3168,6 +3168,116 @@ def _conservation_clause(dna: dict | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 🔴 B3·变式多样性重组（PRD-A-021 R3a）：松绑守恒段④「只换数字」导致的「变式太像」。
+#   根因 = DNA 绑死、无多样性轴 → 只能换数字。方案（用户拍板）：**骨架四维锁死**
+#   （题型 / 主考点 / 模型 / 难点），多样性来自**副考点 + 高频标签 + 场景**重组。
+#
+# 注入点语义（审计订正）：
+#   - 只注 GENERATE（首轮出题）。REGEN 是单题等价保型（注多样性自相矛盾）、ADD 来源未定，都不注。
+#   - scene 是**组级共享维**（B5-fix5「改场景全组生效」契约）→ 整组一个场景，**不给每道变式各带
+#     scene_hint**（会和组级契约打架）。多样性主载体 = **per-variant 的副考点/标签子集差异**。
+#   - 多样性主载体 = 复用**母题自身已有的副考点 + 标签**（10 维 DNA 已含 secondary_kps + tags，
+#     解题打标产出）—— 每道变式强调不同的副考点/标签子集即可拉开差异，**无需新 DB 查询**。
+#   - 稀疏数据优雅降级：母题副考点/标签太少（去重后 < 2 个差异化锚）→ 不做 per-variant 硬分派，
+#     退回「鼓励情境细节差异」软指令（绝不报错 / 绝不空转）。
+#
+# 🔴 守恒红线：本段**只在副考点切入角度 / 标签子集 / 场景细节**维放开多样性；题型 / 主考点 /
+#   模型 / 难点四维仍由 _conservation_clause + _model_cards_clause + _context_block 锁死。
+#   本段反复申明「骨架四维不许动、副考点必须仍在白名单内」，不给 opus 超纲/换骨架的口子。
+# 🔴 文本含 {…} 字面量须双写转义（本段会被拼进 .format() 的 prompt 模板）。
+# ---------------------------------------------------------------------------
+def _diversity_anchors(dna: dict | None) -> list[str]:
+    """从母题 DNA 取「多样性差异化锚」候选 = 副考点名 + 高频标签（去重、去空、保序）。纯函数·可单测。
+
+    这些是**副考点切入角度 / 标签子集**的素材：每道变式强调不同的子集 → 拉开「考法切入」差异，
+    而不只换数字。**只取母题自带的**（secondary_kps + tags，解题打标已产出）—— 不查 DB（审计定）。
+    """
+    dna = dna or {}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(s: Any) -> None:
+        name = str(s or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+
+    for s in _norm_secondary_kps(dna.get("secondary_kps")):
+        _add(s.get("name"))
+    for t in dna.get("tags") or []:
+        _add(t)
+    return out
+
+
+def _diversity_clause(dna: dict | None, n: int) -> str:
+    """🔴 B3 多样性重组段（**只 GENERATE 注入**·T1 单一事实源）。返回可拼进 .format() prompt 的文本。
+
+    机制：把母题自带的副考点 + 标签当差异化锚池，给 n 道变式做 **round-robin 子集分派** ——
+    每道强调一个不同的副考点/标签切入角度（per-variant 差异轴），同时反复锁死骨架四维。
+    锚池 < 2 个 或 n < 2 → 优雅降级为软指令（不分派、不报错）。
+
+    🔴 锚池里的「副考点」全部来自母题 DNA 白名单（secondary_kps），故强调它们**不会超纲**——
+       与守恒段①白名单正交（守恒段管「⊆ 白名单」，本段管「在白名单内换不同切入角度」）。
+    """
+    n = int(n or 0)
+    anchors = _diversity_anchors(dna)
+    lines: list[str] = [
+        "🔴 变式多样性（B3·避免「几乎只换数字」—— 变式之间必须有真实的考法切入差异）："
+    ]
+    # 骨架四维锁死申明（无论稀疏与否都喊，堵住松绑后的超纲/换骨架口子）
+    lines.append(
+        "⛔ 锁死四维（绝不许借「多样性」之名动）：**题型 / 主考点 / 解题模型 / 难点**四维全组一致、"
+        "与母题守恒（见上方守恒段与确定上下文块）。多样性**只在「副考点切入角度 / 标签子集 / "
+        "场景情境细节」**上做，不许换赛道、不许超纲、不许简化最难步。"
+    )
+    if n >= 2 and len(anchors) >= 2:
+        # per-variant round-robin 子集分派：每道题点名一个不同的差异化锚（副考点/标签切入角度）
+        assign = [anchors[i % len(anchors)] for i in range(n)]
+        bullet = "\n".join(
+            f"  - 第 {i + 1} 道：突出从「{a}」这个**副考点/角度**切入"
+            "（在主考点不变、白名单内组织题面，让这道题的考查侧重明显区别于其它变式）。"
+            for i, a in enumerate(assign)
+        )
+        lines.append(
+            "① per-variant 切入角度分派（每道强调不同的副考点/标签子集，拉开「考法」差异，"
+            "**不是**只换数字）：\n" + bullet
+        )
+        lines.append(
+            "② 即便分到同一锚，也要在**情境/设问方式/数据组织**上与其它变式明显不同；"
+            "禁止 n 道题题面骨架雷同只有数字不同。"
+        )
+    else:
+        # 稀疏降级：锚不够分派 → 软指令，鼓励情境/设问差异（仍守四维），绝不报错/空转
+        if anchors:
+            anchors_s = "、".join(anchors)
+            lines.append(
+                f"① 母题可用的副考点/标签较少（{anchors_s}）—— 在主考点不变、白名单内，"
+                "尽量让每道变式从不同的副考点/标签角度或不同情境切入，避免题面只有数字不同。"
+            )
+        else:
+            lines.append(
+                "① 母题副考点/标签信息有限 —— 请在主考点与骨架四维不变的前提下，"
+                "让每道变式在**情境设定 / 设问方式 / 数据组织**上彼此明显不同，避免只换数字的"
+                "「克隆题」（仍守上方全部守恒约束）。"
+            )
+    # scene 组级申明：不给每道各带场景（与 B5-fix5 组级契约一致）
+    scene = str((dna or {}).get("scene") or "").strip()
+    if scene:
+        lines.append(
+            f"③ 场景是**整组共享**维（当前组场景：「{scene}」）—— 全组统一在此场景下，"
+            "**不要**每道题各换一个不同的大场景（多样性靠上面的副考点/角度差异，不靠拆散组级场景）。"
+        )
+    return "\n".join(lines)
+
+
+def _maybe_diversity_block(dna: dict | None, n: int) -> str:
+    """多样性段拼接器：n<2（单题无「彼此差异」可言）→ ""（不注）；否则前缀换行接进 prompt。"""
+    if int(n or 0) < 2:
+        return ""
+    return "\n\n" + _diversity_clause(dna, n)
+
+
+# ---------------------------------------------------------------------------
 # 🔴 PRD-C-015 批3·W2' 难题注卡（模型卡片注入 GENERATE/REGEN prompt）：
 #   注卡条件矩阵（§3.2）：母题难度 ≥3（LLM rubric 档）且命中**非 M00** 模型 → 注卡；
 #   难度<3 或仅 M00 → 不注（返回 ""）。卡片文本逐字取词库表（G3）+ 反退化/反表皮缩放约束。
@@ -3906,6 +4016,9 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         + "\n\n"
         + _conservation_clause(facts.get("dna"))  # 🔴 W2 守恒硬约束注入（T1，与上块正交并存）
         + _maybe_note_card_block(facts)  # 🔴 批3·W2' 难题注卡（难度≥3+非M00 才注，含反退化约束）
+        # 🔴 B3·R3a 多样性重组（PRD-A-021）：仅 GENERATE 注入；副考点/标签 per-variant 子集差异，
+        #   场景保持组级，骨架四维仍锁。n<2 → 不注（_maybe_diversity_block 内判）。
+        + _maybe_diversity_block(facts.get("dna"), recipe["n"])
         + recipe["spec"]
     )
 
