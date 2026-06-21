@@ -13,6 +13,7 @@ mathfig 运行时（recon 定）= 进程内 `from mathfig.geogebra import render
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 # 渲染单次墙钟上限（契约：造图后处理单次≤120s）。
@@ -20,6 +21,29 @@ RENDER_TIMEOUT_S = 120
 
 # MATHFIG_NODE_CWD 默认兜底（部署经 env 覆盖）：借 codeplace-O/book-test 的 @playwright/test。
 _DEFAULT_NODE_CWD = r"d:/workplace/book-ai/codeplace-O/book-test"
+
+# 🔴 2026-06-21（用户终审「线上画图概率失败」根因·确证）：opus 翻命令时高频产出 GeoGebra
+#   **不存在的命令**（典型 `Arrow(P,Q)` —— 数轴/坐标轴箭头），引擎逐条执行时该命令失败 →
+#   n_fail>0 → 整张图被判失败丢弃（哪怕其余命令都画好、PNG 已出）。这是命令质量问题（与
+#   namespace/内存无关），涉及数轴/坐标题就触发故「概率挺高」。在渲染前做**确定性命令纠正**：
+#   把已知无效别名重写成等价合法命令，护住所有调用方（母题/变式/MCP）。
+#   - Arrow(a,b) → Vector(a,b)：GeoGebra 没有 Arrow 命令，Vector 才是画带箭头矢量的正解（实测）。
+# 形如 `name=Arrow(...)` / `Arrow(...)` 都覆盖；仅匹配作为命令名出现的 Arrow（词边界 + 紧跟 '('）。
+_CMD_REWRITES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bArrow\s*\("), "Vector("),
+]
+
+
+def _sanitize_commands(commands: list[str]) -> list[str]:
+    """渲染前确定性纠正已知无效 GeoGebra 命令别名（见 _CMD_REWRITES 注释）。
+    纯字符串重写、幂等、对不含目标别名的命令零影响。"""
+    out: list[str] = []
+    for c in commands or []:
+        s = str(c)
+        for pat, repl in _CMD_REWRITES:
+            s = pat.sub(repl, s)
+        out.append(s)
+    return out
 
 
 def _ensure_env() -> None:
@@ -88,6 +112,7 @@ def render(
        度数 / 标 α 等符号）时对该角显式覆盖。同顶点多角弧引擎自动按角大小递增半径错开（不传任何字段即生效）。
     """
     _ensure_env()
+    commands = _sanitize_commands(list(commands or []))  # 🔴 渲染前纠正无效命令别名（Arrow→Vector 等）
     try:
         render_geogebra = _load_render_geogebra()  # 进程内取（含 namespace 遮蔽兜底，见函数注释）
     except Exception as e:  # noqa: BLE001 — 引擎不可用 → 降级（不抛，调用方标 needs_figure）

@@ -60,6 +60,8 @@ _GEO_SYSTEM = (
     "让引擎算，别手填坐标——垂足用 ClosestPoint(Line(A,E),B)（求 B 到 AE 的垂足）、"
     "三点定圆用 Circle(A,B,C)（过三点画圆）、圆心用 Center(c)、垂直平分线用 PerpendicularBisector(B,N)；"
     "③ **别在 commands 里写 SetLineStyle**（会把对象渲染没）——虚线走 dashed 字段；"
+    "③b 🔴 **GeoGebra 没有 `Arrow` 命令**——数轴/坐标轴/向量的箭头一律用 **`Vector(起点,终点)`**"
+    "（如数轴正方向箭头 `Vector(A,(A+(1.5,0)))`）；写 `Arrow(...)` 必失败、整张图作废。"
     "④ 变换题的「像」、立体隐藏棱放进 dashed；⑤ 关键点放进 vals 自核；"
     "⑦ 🔴【多余点硬约束】**派生/中间点（Intersect/Midpoint/垂足 ClosestPoint/PerpendicularBisector "
     "等构造出来、仅作中间计算、题面不要求标的点）默认必须放进 hide**——它们只是引擎算坐标的脚手架，"
