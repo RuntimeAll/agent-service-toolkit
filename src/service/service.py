@@ -879,7 +879,12 @@ async def _variant_apply(thread_id: str, fn) -> dict[str, Any]:
             # 回写 checkpointer（as_node 任取一个图内节点名：编辑只覆盖 items/manual_order，
             # 后续轮 assemble/persist 读到的就是编辑后的题组；不触发图继续跑）
             await agent.aupdate_state(cfg, update, as_node="exec_reorder")
-            merged = {**values, **update}
+            # 🔴 PRD-A-021 R4·F10：与 /variant/persist 的本地 merged 口径统一——messages 在图里
+            #   是 add-reducer（append）通道，本地 {**values, **update} 若 update 带 messages 会把
+            #   整段历史**整体覆盖**成本次的几条（_artifact_payload 据此算就读到被截断的快照）。
+            #   故和 persist:538 一样剔除 messages 再 merge（aupdate_state 那侧由 LangGraph 走
+            #   reducer append，已正确，不受影响）。当前编辑 fn 不返 messages = latent，统一防回归。
+            merged = {**values, **{k: v for k, v in update.items() if k != "messages"}}
             return {"ok": True, "artifact": _artifact_payload(merged)}  # type: ignore[arg-type]
     except HTTPException:
         raise

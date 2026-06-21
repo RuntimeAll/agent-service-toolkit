@@ -180,6 +180,36 @@ def test_exec_solution_only_rewrites_solution_keeps_stem(monkeypatch):
     assert it["from_edit"] is True  # 编辑印记（闸B FAIL 不回炉换题）
 
 
+def test_exec_solution_only_resets_stale_dropped_notes(monkeypatch):
+    """🔴 PRD-A-021 R4·F8：解法修正直连 assemble（绕过 solve_explain 的 dropped_notes 复位），
+    须自行清空上一轮遗留的 dropped_notes，否则 assemble 头部把陈旧「剔除 N 道」误渲染进本轮。"""
+    async def rewrite_stub(prompt_msgs, **kwargs):
+        return '{"solvable": true, "solution": "只用一元一次方程：$x=2$"}'
+
+    async def check_stub(item, facts, idx, total):
+        item["check"] = {"badge": "ok", "verify": variant_mod.VERIFY_SYMPY_PASS, "tier": "verified"}
+        return item, None
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", rewrite_stub)
+    monkeypatch.setattr(variant_mod, "_check_one_item", check_stub)
+    monkeypatch.setattr(variant_mod, "_emit_artifact", lambda *a, **k: None)
+
+    state = {
+        "analysis": {"grade": {"value": "七年级上学期"}, "kp": {"value": "一元一次方程"}},
+        "mother_dna": {"dna": {"main_kp": {"id": "100", "name": "一元一次方程"}}},
+        "items": [{"stem": "2x=4 求 x", "answer": "x=2", "solution": "旧", "qtype": "解答"}],
+        # 上一轮 generate/验算遗留的剔除叙事（本轮解法修正不剔题，须被清掉）
+        "dropped_notes": ["第3题验算失败已剔除"],
+        "pending": {
+            "intent": INTENT_SOLUTION_ONLY,
+            "method_constraint": "只能用一元一次方程",
+            "grade_correction": None,
+        },
+    }
+    out = asyncio.run(variant_mod.exec_solution_only(state, {}))
+    assert out["dropped_notes"] == []  # 🔴 F8：陈旧剔除叙事已复位，不泄漏到本轮头部
+
+
 def test_exec_solution_only_unsolvable_regens_single_stem(monkeypatch):
     """整改3：某题新约束下不可解 → 单题重出题面（_regen_once），其余不动。"""
     async def rewrite_stub(prompt_msgs, **kwargs):

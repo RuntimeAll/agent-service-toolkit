@@ -575,6 +575,41 @@ def test_undo_regen_restores_snapshot():
     assert update["items"][0]["qtype"] == "解答"
 
 
+def test_undo_regen_restores_mother_dna_dirty_when_snapshot_was_mother_dirty():
+    """🔴 PRD-A-021 R4·F4：撤销重生须复位 mother_dna.dirty，修不变量撕裂。
+
+    场景：母题守恒维改 → 该题 dna_dirty + mother_dirty_dims（母题维波及）；重生完最后一道
+    dirty 时 regen_dirty_items 把 mother_dna.dirty 清成 False。此刻老师撤销重生 → 题回到
+    dna_dirty=True（重生前快照），mother_dna.dirty 必须随之回 True，否则出现
+    「item.dna_dirty=True 而 mother_dna.dirty=False」撕裂态（母题守恒维同步分支漏触发）。
+    """
+    snap = {"stem": "上一版", "qtype": "解答", "dna_dirty": True,
+            "mother_dirty_dims": ["secondary_kps"]}
+    items = [{"stem": "重生后", "qtype": "解答", "regen_snapshot": snap, "dna_dirty": False}]
+    state = _state(items)
+    state["mother_dna"] = {**state["mother_dna"], "dirty": False}  # 重生完已清母题脏
+    update, restored, err = undo_regen_item(state, 1)
+    assert err is None
+    assert restored["dna_dirty"] is True
+    # 🔴 F4：母题脏随之复位（不变量自洽）
+    assert update["mother_dna"]["dirty"] is True
+    # 不变量自洽：item dna_dirty 与 mother_dna.dirty 同为 True
+    assert update["items"][0]["dna_dirty"] is True
+
+
+def test_undo_regen_no_mother_dirty_leaves_mother_dna_untouched():
+    """🔴 F4 对照组：被撤销项不是因母题维脏（无 mother_dirty_dims）→ 不动 mother_dna.dirty
+    （避免误置；单题自身重生撤销与母题守恒维无关）。"""
+    snap = {"stem": "上一版", "qtype": "解答", "dna_dirty": True}  # 无 mother_dirty_dims
+    items = [{"stem": "重生后", "qtype": "解答", "regen_snapshot": snap, "dna_dirty": False}]
+    state = _state(items)
+    state["mother_dna"] = {**state["mother_dna"], "dirty": False}
+    update, restored, err = undo_regen_item(state, 1)
+    assert err is None
+    # 没碰 mother_dna（update 不含该键）
+    assert "mother_dna" not in update
+
+
 def test_undo_regen_no_snapshot_errors():
     state = _state([{"stem": "没重生过"}])
     update, restored, err = undo_regen_item(state, 1)

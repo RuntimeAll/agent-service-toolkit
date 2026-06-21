@@ -313,8 +313,19 @@ def test_every_guardrail_intent_routes_to_existing_branch():
     }
     assert set(expected) == VALID_INTENTS  # enum and routing stay in lockstep
     for intent, branch in expected.items():
-        state = {"pending": {"intent": intent, "ops": []}}
+        # 🔴 PRD-A-021 R4·F7：答疑分支现有「空题组护栏」——QA 须有题组才进 answer。
+        #   本 lockstep 测验证「每个 intent 落在存在的分支」，给一道占位题让 QA 走正常 answer。
+        state = {"pending": {"intent": intent, "ops": []}, "items": [{"stem": "x"}]}
         assert route_after_parse(state) == branch
+
+
+def test_qa_empty_items_routes_to_ask_clarify():
+    """🔴 PRD-A-021 R4·F7：答疑前置空护栏 —— items 空时 INTENT_QA 不进 answer（白烧一次 LLM），
+    改落 ask_clarify 让老师先贴图/出题。items 非空时仍正常进 answer。"""
+    empty = {"pending": {"intent": INTENT_QA, "ops": []}, "items": []}
+    assert route_after_parse(empty) == "ask_clarify"
+    nonempty = {"pending": {"intent": INTENT_QA, "ops": []}, "items": [{"stem": "x"}]}
+    assert route_after_parse(nonempty) == "answer"
 
 
 # ---------------------------------------------------------------------------

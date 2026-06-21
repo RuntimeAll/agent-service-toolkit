@@ -424,9 +424,10 @@ def test_generate_extracts_knobs_from_first_round_text(monkeypatch):
     assert "老师指定配方" in gen_prompt and "共 5 道" in gen_prompt
     assert out["shape_defects"] == []
     assert len(out["items"]) == 5
-    # recipe stamps: gate-A reads these item-level fields, never the live list index
-    assert all(it["from_recipe"] is True for it in out["items"])
-    assert [it["expected_difficulty"] for it in out["items"]] == [3, 4, 4, 4, 4]
+    # 🔴 PRD-A-021 R4·F17：from_recipe / expected_difficulty 为只写不读的死印记，已移除。
+    #   新契约 = 这两个 item 级键不再被 generate 写入（闸A 判据走 shape_check 现算，不读印记）。
+    assert all("from_recipe" not in it for it in out["items"])
+    assert all("expected_difficulty" not in it for it in out["items"])
 
 
 def test_generate_knobs_extraction_failure_falls_back_to_default(monkeypatch):
@@ -905,14 +906,16 @@ def test_exec_add_clears_stale_shape_defects_and_adds_unstamped_items(monkeypatc
     assert "from_recipe" not in out["items"][-1]  # add-round item carries no recipe stamp
 
 
-def test_exec_regenerate_clears_defects_and_carries_recipe_stamps(monkeypatch):
+def test_exec_regenerate_clears_defects_and_drops_dead_recipe_stamps(monkeypatch):
     async def fake_llm(messages, retry=True, **kwargs):
         return json.dumps(dict(_ITEM_JSON, stem="重出的题"), ensure_ascii=False)
 
     monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    # 🔴 PRD-A-021 R4·F17：即使旧 state 残留死印记 from_recipe/expected_difficulty，重出后
+    #   strip-tuple 不再 carry 它们（死键已退役）；_seq/persisted 等真簿记仍跟题走。
     items = [
         {"stem": "v1", "qtype": "解答", "difficulty": 4, "level": "hard",
-         "from_recipe": True, "expected_difficulty": 4, "check": {"badge": "ok"}}
+         "from_recipe": True, "expected_difficulty": 4, "_seq": 7, "check": {"badge": "ok"}}
     ]
     out = asyncio.run(
         exec_regenerate(_edit_state([{"action": "regenerate", "index": 1}], items=items), {})
@@ -920,8 +923,31 @@ def test_exec_regenerate_clears_defects_and_carries_recipe_stamps(monkeypatch):
     assert out["shape_defects"] == []
     new_item = out["items"][0]
     assert new_item["stem"] == "重出的题" and "check" not in new_item
-    # stamps follow the item (it still occupies the original plan slot)
-    assert new_item["from_recipe"] is True and new_item["expected_difficulty"] == 4
+    # 死印记不再 carry（F17）；真簿记键 _seq 仍跟题
+    assert "from_recipe" not in new_item and "expected_difficulty" not in new_item
+    assert new_item["_seq"] == 7
+
+
+def test_exec_regenerate_threads_pending_extra_constraints(monkeypatch):
+    """🔴 PRD-A-021 R4·F5：改造约束别吞半截 —— pending 级 extra_constraints/comp 须透传进
+    REGEN 题面的「额外要求」（旧实现只用 per-target op.note，完全丢弃 pending 级约束）。"""
+    captured = {}
+
+    async def fake_llm(messages, retry=True, **kwargs):
+        captured["prompt"] = messages[0].content
+        return json.dumps(dict(_ITEM_JSON, stem="重出"), ensure_ascii=False)
+
+    monkeypatch.setattr(variant_mod, "_ainvoke_text", fake_llm)
+    items = [{"stem": "原题", "qtype": "解答", "difficulty": 3, "level": "normal"}]
+    state = _edit_state([{"action": "regenerate", "index": 1, "note": "数字简单点"}], items=items)
+    # 注入 pending 级改造约束（extra_constraints + comp）
+    state["pending"]["extra_constraints"] = ["只能用配方法"]
+    state["pending"]["comp"] = "与原题对比难度提升"
+    asyncio.run(exec_regenerate(state, {}))
+    prompt = captured["prompt"]
+    # per-target note 与 pending 级约束都进了「额外要求」
+    assert "数字简单点" in prompt
+    assert "只能用配方法" in prompt and "与原题对比难度提升" in prompt
 
 
 def test_exec_regenerate_change_qtype_via_note(monkeypatch):

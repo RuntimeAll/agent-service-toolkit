@@ -3617,9 +3617,9 @@ def recipe_from_knobs(knobs: dict[str, Any] | None, mother_difficulty: Any = Non
     """🔴 纯函数：knobs → generate 配方（n/n_normal/n_hard + 老师配方段 spec + 递增预期档位）。
 
     knobs 空 → 与旧默认完全等价：n=3、2 普 1 难、spec=""（行为不变的回归锚点）。
-    递增计划：从母题难度起逐题 +1、封顶 DIFFICULTY_CAP。expected_difficulties 只用于
-    prompt 文案 + n_hard 推算；闸A/代码闸的同尺判据 = generate 落在 item 级的
-    expected_difficulty 印记 + shape_check(mother_difficulty) 现算（二者公式一致）。
+    递增计划：从母题难度起逐题 +1、封顶 DIFFICULTY_CAP。expected_difficulties（复数）只用于
+    prompt 文案 + n_hard 推算；闸A/代码闸的同尺判据 = shape_check(mother_difficulty) 现算。
+    （R4·F17：item 级 expected_difficulty 单数印记原只写不读、已移除，不再是判据来源。）
     """
     knobs = knobs or {}
     if not knobs:
@@ -4065,17 +4065,14 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     # 🔴 思维外放（用户反馈 2026-06-11）：JSON token 对用户是乱码不外放，但流内数
     # "stem" 出现次数 → 思路条实时跳「正在写第 n/N 道」+ 当前题干前几个字，等待不再是黑盒。
     total_n = int(recipe["n"])
-    md_i = _to_int(mother_d) or 3
-    increasing = bool(knobs) and knobs.get("difficulty_plan") == PLAN_INCREASING
+    # 🔴 PRD-A-021 R4·F17：md_i / increasing 原仅供已退役的 from_recipe/expected_difficulty
+    #   印记计算，随死印记一并移除（无其它消费方）。
 
     def _stamp_recipe(item: dict[str, Any], idx: int) -> dict[str, Any]:
-        # 🔴 配方印记落 item 级（闸A 改判段只作用于产生该配方的这一轮生成的题）：
-        #   from_recipe = 本轮按老师配方生成；expected_difficulty = 递增计划该题预期档
-        #   （跟题走，remove 位移/add 追加不会错档；编辑轮新增题无印记 → 不被旧计划误改判）。
-        if knobs:
-            item["from_recipe"] = True
-            if increasing:
-                item["expected_difficulty"] = min(md_i + idx, DIFFICULTY_CAP)
+        # 🔴 PRD-A-021 R4·F17：from_recipe / expected_difficulty 为只写不读的死印记
+        #   （全仓无任何读方，仅在各处 strip 元组里被 pop 掉）→ 已停写。本 shim 现为 identity，
+        #   保留以不扰动两处调用点（4186 仍承担 _normalize 包装、4308 的幂等回填语义）。
+        #   注意：recipe 级 `expected_difficulties`（复数·喂 prompt）是另一个 LIVE 键，未动。
         return item
 
     # ── P2 流内 eager（PRD-C-012）：增量发现完整新题 → 立即 spawn 闸链 task ──
@@ -5912,6 +5909,11 @@ def route_after_parse(
     if intent == INTENT_CONFIRM:
         return "save"
     if intent == INTENT_QA:
+        # 🔴 PRD-A-021 R4·F7：答疑前置空护栏 —— 无题组（items 空）时进 answer 会拿空题组白烧一次
+        #   LLM（ANSWER_PROMPT 的 brief/detail 全空，答了个寂寞）。空题组 → 落 ask_clarify 让老师先
+        #   贴图/出题，不进 answer。（save 侧 persist_to_bank 已自带空护栏:6664；此处补 answer 侧。）
+        if not (state.get("items") or []):
+            return "ask_clarify"
         return "answer"
     return "ask_clarify"
 
@@ -6008,7 +6010,15 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
     budget = _budget_bind(state)  # P13：携带编辑轮预算（REGEN 调 LLM，记票）
     facts = _mother_facts(state)
     items = list(state.get("items") or [])
-    ops = (state.get("pending") or {}).get("ops") or []
+    pending = state.get("pending") or {}
+    ops = pending.get("ops") or []
+    # 🔴 PRD-A-021 R4·F5：改造约束别吞半截 —— pending 级 extra_constraints / comp（老师本轮
+    #   说的「其余自由约束 + 对比/补充句」）原 exec_regenerate 完全丢弃（只用 per-target op.note）。
+    #   比照 exec_add:6153 口径，折进每道重出题的额外要求（per-target note 仍叠加在前）。
+    _pending_extra_bits = list(pending.get("extra_constraints") or [])
+    if pending.get("comp"):
+        _pending_extra_bits.append(str(pending["comp"]))
+    pending_extra = "；".join(_pending_extra_bits)
     targets = []
     notes: dict[int, str] = {}
     for op in ops:
@@ -6024,6 +6034,8 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
 
     for t in targets:
         old = items[t]
+        # 🔴 F5：本题额外要求 = per-target note + pending 级 extra_constraints/comp（任一为空跳过）。
+        extra_req = "；".join(s for s in (notes.get(t), pending_extra) if s)
         # BUG-001 AC1：note 里含「改成X题」→ 抽出目标题型覆盖 REGEN 的 qtype（REGEN_PROMPT 把
         #   qtype 钉死成入参，不覆盖则改题型形同没改）。抽不出 → 沿用原题型（行为不变）。
         target_qtype = _qtype_from_note(notes.get(t)) or old.get("qtype") or facts["qtype"]
@@ -6034,7 +6046,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                         kp_name=facts["kp_name"],
                         grade=facts["grade"],
                         stem=(old.get("stem") or "")
-                        + (f"\n额外要求：{notes[t]}" if t in notes else ""),
+                        + (f"\n额外要求：{extra_req}" if extra_req else ""),
                         level=old.get("level") or "normal",
                         qtype=target_qtype,
                         difficulty=old.get("difficulty") or 3,
@@ -6070,7 +6082,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
             # 配方印记 + 入库簿记跟题走（PRD-A-018 M1②：比照 exec_solution_only:5763 /
             #   regen_dirty_items:6871，carry _seq/persisted/_persist_id；不 carry → 重出后该题
             #   persisted/_persist_id 丢失 → 再入库走 create 重复落行）。
-            for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id", "level"):
+            for k in ("_seq", "persisted", "_persist_id", "level"):  # R4·F17: 去死键 from_recipe/expected_difficulty
                 if old.get(k) is not None:
                     new_item[k] = old[k]
             # 已入库题被改造重出 → 内容已变 → 标「内容已编辑待覆盖」，入库走 _persist_id 覆盖原行。
@@ -6410,7 +6422,7 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
             return warn_it
         draft["from_edit"] = True
         draft["edit_note"] = seed["edit_note"]
-        for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id", "level"):
+        for k in ("_seq", "persisted", "_persist_id", "level"):  # R4·F17: 去死键 from_recipe/expected_difficulty
             if it.get(k) is not None:
                 draft[k] = it[k]
         draft.pop("check", None)
@@ -6434,6 +6446,10 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
     # 🔴 解法修正改了题集内容（解析/个别题面）→ 清陈旧缺陷外显，回 assemble 收口快照
     update["items"] = list(new_items)
     update["shape_defects"] = []
+    # 🔴 PRD-A-021 R4·F8：解法修正只改解析/原位重出、不剔题，且本节点直连 assemble（绕过
+    #   solve_explain 那处的 dropped_notes 复位）。若不在此复位，上一轮 generate/验算遗留的
+    #   dropped_notes 会被 assemble 当本轮「剔除 N 道」误渲染进头部。本轮无剔除 → 显式清空。
+    update["dropped_notes"] = []
     return update
 
 
@@ -7443,7 +7459,7 @@ async def revise_item(
         if it.get("edit_note"):
             draft["edit_note"] = it["edit_note"]
         # 配方印记跟题走（重出仍占原计划槽位）
-        for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id"):
+        for k in ("_seq", "persisted", "_persist_id"):  # R4·F17: 去死键 from_recipe/expected_difficulty
             if it.get(k) is not None:
                 draft[k] = it[k]
         draft.pop("check", None)  # 清旧 check → _check_one_item 重判（闸B sympy）
@@ -7679,7 +7695,7 @@ async def regen_dirty_items(
                     continue
                 draft["from_edit"] = True
                 # 配方印记 + 入库簿记跟题走（重出仍占原槽位；_persist_id 留着 → 入库走覆盖）
-                for k in ("from_recipe", "expected_difficulty", "_seq", "persisted", "_persist_id", "level"):
+                for k in ("_seq", "persisted", "_persist_id", "level"):  # R4·F17: 去死键 from_recipe/expected_difficulty
                     if old.get(k) is not None:
                         draft[k] = old[k]
                 draft.pop("check", None)
@@ -7740,7 +7756,22 @@ def undo_regen_item(
     new_items = [dict(it) for it in items]
     restored = copy.deepcopy(snap)
     new_items[index - 1] = restored  # 整体回上版（含 dirty 状态、manual 印记，与重生前一致）
-    return {"items": new_items}, restored, None
+    update: VariantState = {"items": new_items}
+    # 🔴 PRD-A-021 R4·F4：撤销重生须同步复位 mother_dna.dirty，否则不变量自相矛盾。
+    #   场景：母题守恒维改 → mark_mother_dirty 标该题 dna_dirty + mother_dirty_dims，且 mother_dna.dirty=True；
+    #   regen_dirty_items 重生完最后一道 dirty → 把 mother_dna.dirty 清成 False（7734）。此时老师撤销重生 →
+    #   restored 又带回 dna_dirty=True（这是「重生前」快照），但旧实现只回 items、不回 mother_dna.dirty →
+    #   出现「item.dna_dirty=True 而 mother_dna.dirty=False」的撕裂态：母题守恒维同步分支（keyed on
+    #   mother_dna.dirty）漏触发。入库侧有 persist_dirty_guard 的 dna_dirty 闸双保险兜底（不会脏入库），
+    #   但不变量须自洽 → 这里按「被撤销项若是因母题维脏（带 mother_dirty_dims）而 dna_dirty」回置 mother_dna.dirty。
+    #   🔴 与 B7 不打架：B7（改主考点/维）在各自 turn 把 dirty 置 True（前向），本处 undo 在另一 turn 因
+    #   un-regen 回 True（后向），方向一致、均朝「有脏待重生」收敛，互不吞（B7 不在 undo 路径上跑）。
+    if restored.get("dna_dirty") and (restored.get("mother_dirty_dims") or []):
+        md = dict(state.get("mother_dna") or {})
+        if md and not md.get("dirty"):
+            md["dirty"] = True
+            update["mother_dna"] = md
+    return update, restored, None
 
 
 # --- 输入边界兜底（设计 §6）：没图/无在途母题/无题组 → 催图 ------------------
@@ -7781,11 +7812,11 @@ async def ask_for_image(state: VariantState, config: RunnableConfig) -> VariantS
 # ---------------------------------------------------------------------------
 graph = StateGraph(VariantState)
 # 🔴 PRD-C-100 B1a 塌缩入口：mother_opus_entry 替代 analyze+mother_precheck（新图入口）。
-#   analyze/mother_precheck 节点保留（不删函数）但已从新图主路径退役（route_entry 不再路由到它们）；
-#   classify 保留 = 低置信确认 resume 的「+1 次 opus 池注入重锚」路径（D3）。
+#   🔴 PRD-A-021 R4·F19：旧 analyze/mother_precheck 退役节点 + 其 edge + path_map 死映射已删
+#   （route_entry 不再路由到它们，节点不可达 = 编译期死岛）。两函数体仍保留 = 防引用 / 留档，
+#   但不再注册进图。注意：`analyze` 字符串在 variant_model("analyze") 模型槽 + conv_trace marker
+#   处仍 LIVE，未动。classify 保留 = 低置信确认 resume 的「+1 次 opus 池注入重锚」路径（D3）。
 graph.add_node("mother_opus_entry", mother_opus_entry)
-graph.add_node("analyze", analyze)  # 退役（保留防引用；route_entry 不再进）
-graph.add_node("mother_precheck", mother_precheck_node)  # 退役（同上）
 graph.add_node("classify", classify)
 graph.add_node("await_review", await_mother_review)  # B5·母题卡硬停闸（置 awaiting_mother_review + END）
 graph.add_node("clarify", clarify)
@@ -7814,7 +7845,8 @@ graph.set_conditional_entry_point(
     {
         # 🔴 PRD-C-100 B1a：新图入口 → 塌缩节点（替 analyze）
         "mother_opus_entry": "mother_opus_entry",
-        "analyze": "analyze",  # 退役映射保留（防御）
+        # 🔴 PRD-A-021 R4·F19：'analyze':'analyze' 死映射已删（route_entry 永不返回 'analyze'，
+        #   节点也已退役不再注册 → 留着会 path_map 目标悬空编译报错）。
         "generate": "generate",
         "parse": "parse_instruction",
         # 🔴 B2·母题确认 resume（config 回传确认章 id）→ 直奔 classify（带确认章接闸B）
@@ -7851,21 +7883,9 @@ graph.add_conditional_edges(
 )
 
 
-# analyze：非题目图/读图失败 → 直接 END（已吐友好报错）；成功 → mother_precheck（B2 前置判）
-def after_analyze(state: VariantState) -> Literal["mother_precheck", "done"]:
-    # analyze 友好报错时会塞 messages（且未产 analysis）→ 结束本轮等待
-    if not state.get("analysis"):
-        return "done"
-    return "mother_precheck"
-
-
-graph.add_conditional_edges(
-    "analyze", after_analyze, {"mother_precheck": "mother_precheck", "done": END}
-)
-
-# mother_precheck（B2）：带图打回 → END（reject 已发）；否则发 needConfirm 停等确认 → END
-# （复用 clarify→END chat-resume，下一轮老师确认经 config 回传确认章 id → route 直奔 classify）。
-graph.add_edge("mother_precheck", END)
+# 🔴 PRD-A-021 R4·F19：旧 analyze→mother_precheck 退役链的 after_analyze 路由 + 两条 edge
+#   （analyze→{mother_precheck,END}、mother_precheck→END）已删（节点已退役，留着 = 引用未知节点
+#   编译报错）。新图入口走 mother_opus_entry（见上 after_mother_entry）。
 # 🔴 B5·classify 不再直连 generate：定死 → await_review（母题卡硬停闸，置 awaiting_mother_review
 #   + END，等老师点「开始举一反三」经 route_entry resume → generate）；没定死 → clarify。
 graph.add_conditional_edges(
