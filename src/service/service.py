@@ -746,10 +746,12 @@ async def variant_artifact(input: ChatHistoryInput) -> dict[str, Any]:
             config=RunnableConfig(configurable={"thread_id": input.thread_id})
         )
         values: dict[str, Any] = state_snapshot.values or {}
-        if not values.get("items"):
-            return {"items": [], "header": {"recipe": None, "kp": None, "grade": None}}
         from agents.variant import _artifact_payload
 
+        # 🔴 2026-06-21（用户终审「刷新就没了」）：原来 items 空就早返回空 header → 有母题卡但**还没
+        #   生成变式**（用户没点「开始举一反三」）的会话，刷新后右栏母题卡丢失。改为始终走
+        #   _artifact_payload —— 它 header.mother_card = _build_mother_card(state)（sticky，items 空时
+        #   out_items=[] 也正常；无 mother_dna 时返 None，FE 兼容显空态）。让母题卡随会话恢复。
         return _artifact_payload(values)  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"variant_artifact error: {e}")
