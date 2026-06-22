@@ -323,6 +323,10 @@ def merge_items(old: Any, new: Any) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 class VariantState(MessagesState, total=False):
     image_url: str | None
+    # 🔴 PRD-A-022 批2·D8：母题「切图」OSS https url（toolkit crop_mother_figure 产 → FE 上 OSS
+    #   → 经 /variant/set-mother-figure 回写）。build_mother_bo 入库优先取它（切图），缺则不带图
+    #   （D8 不退原图兜底）。语义同变式 figure_url，但这是顶层 scalar、单次写定，无需 reducer。
+    mother_figure_url: str | None
     images_count: int
     questions_in_image: int
     # analysis：年级/考点(kp)/题型(qtype) 各带置信
@@ -3085,6 +3089,8 @@ def _mother_facts(state: VariantState) -> dict:
         "mother_structure": mdna.get("structure"),
         "kp_confidence": (kp.get("confidence") if isinstance(kp, dict) else None),
         "image_url": state.get("image_url"),
+        # 🔴 PRD-A-022 批2·D8：母题切图 OSS url（build_mother_bo 入库优先取它，缺则不带图）。
+        "mother_figure_url": state.get("mother_figure_url"),
         # 🔴 B1 全维 DNA 穿进 BO（T3）：副 kp/标签/骨架/场景/考察类型/难点 + 锚定审计
         "dna": dna,
     }
@@ -7044,6 +7050,24 @@ def edit_item_state(
     # check 置中性：手动编辑、验算待重跑（清旧 verify/badge/tier，避免徽章误导）
     it["check"] = {"tier": TIER_MANUAL}
     return {"items": new_items}, it, None
+
+
+def set_mother_figure_state(
+    state: VariantState, figure_url: str | None,
+) -> tuple[dict[str, Any], str | None]:
+    """PRD-A-022 批2·D8：把母题「切图」OSS https url 回写进顶层 state.mother_figure_url（零 LLM）。
+
+    FE 在母题切图就绪（autoCropMotherFigure/cropMotherFigure 拿到 base64）后上 OSS 拿 https url，
+    调本端点回写 → 落 checkpoint。下游 build_mother_bo 据 facts.mother_figure_url 入库切图（D8：
+    缺则不带图、绝不退原图兜底）。撤图 = 传 None/空 → 清空。仅收 https（与变式 figure_url 同口径）。
+
+    返回 (update, error)：figure_url 非 https → ({}, 错误串) 让端点回 400。
+    """
+    url = str(figure_url or "").strip()
+    if url and not url.startswith("https://"):
+        return {}, "figure_url 必须是 https OSS 地址"
+    # 非空设、空清（顶层 scalar，单次写定，无 items reducer 参与）
+    return {"mother_figure_url": (url or None)}, None
 
 
 def set_item_figure_state(

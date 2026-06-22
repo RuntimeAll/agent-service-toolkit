@@ -884,13 +884,17 @@ def build_mother_bo(facts: dict[str, Any]) -> dict[str, Any]:
     # 🔴 NOT NULL 列：锚定失败(None)必兜底 "0"（未分类），绝不漏列致 INSERT NULL → 500（同 build_create_bo）。
     msid = facts.get("subject_id")
     bo["subjectId"] = str(msid) if msid else UNCLASSIFIED_SUBJECT_ID
-    if facts.get("image_url"):
-        bo["stemImg"] = facts["image_url"]  # 母题图落题干图字段
+    # 🔴 PRD-A-022 批2·D8：母题图入库取「切图」(mother_figure_url)，**不取原图**(image_url)。
+    #   切图 = crop_mother_figure 切出的母题图形（FE 上 OSS 回写 facts.mother_figure_url）；
+    #   缺切图则**不带图**（D8 拍板：不退原图兜底）。原 facts.image_url(原图) 的两处取图已废。
+    mother_fig = facts.get("mother_figure_url")
+    if mother_fig:
+        bo["stemImg"] = mother_fig  # 母题切图落题干图字段
     _apply_labels(bo, facts, item=None, role="mother")
-    # 🔴 BC2：母题题面 → A-015 block JSON（题干+选项+母题图）。母题图 url = facts.image_url
-    #   （老师上传/贴的 OSS https，已在 state；非 https 则 build_block_json 自动不进 image 块）。
+    # 🔴 BC2 + D8：母题题面 → A-015 block JSON（题干+选项+母题切图）。图 url = facts.mother_figure_url
+    #   （切图 OSS https；缺/非 https 则 build_block_json 自动不进 image 块 = 不带图，不退原图）。
     block_json = build_block_json(
-        facts.get("stem"), facts.get("qtype"), image_url=facts.get("image_url")
+        facts.get("stem"), facts.get("qtype"), image_url=mother_fig
     )
     if block_json:
         bo["blockJson"] = block_json

@@ -1015,6 +1015,33 @@ async def variant_set_figure_url(input: VariantSetFigureUrlInput) -> dict[str, A
     return await _variant_apply(input.thread_id, _fn)
 
 
+class VariantSetMotherFigureInput(BaseModel):
+    """PRD-A-022 批2·D8：母题「切图」OSS url 回写请求（零 LLM）。
+
+    figure_url = FE 母题切图就绪后 uploadMotherImage 上 OSS 拿的 https url。回写顶层
+    state.mother_figure_url，入库时 build_mother_bo 优先据它落切图（缺则不带图，不退原图）。
+    撤图 = figure_url 传 None/空。
+    """
+
+    thread_id: str
+    figure_url: str | None = None
+
+
+@router.post("/variant/set-mother-figure")
+async def variant_set_mother_figure(input: VariantSetMotherFigureInput) -> dict[str, Any]:
+    """母题切图回写（零 LLM）：把切图 OSS https url 存进 state.mother_figure_url，落 checkpoint。
+
+    figure_url 非 https → 400。回写后 assemble 自动落母题草稿 / 全部入库 promote 时
+    build_mother_bo 据 facts.mother_figure_url 产母题图（D8 切图，缺则不带图）。
+    """
+    from agents.variant import set_mother_figure_state
+
+    def _fn(values):
+        return set_mother_figure_state(values, input.figure_url)
+
+    return await _variant_apply(input.thread_id, _fn)
+
+
 class VariantMarkManualBlockInput(BaseModel):
     """PRD-C-100 BC3：标/清「老师手动排版过」印记（零 LLM）。index=1-based。
 
