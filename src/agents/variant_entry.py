@@ -80,26 +80,56 @@ RESPONSE_FORMAT_ENTRY: dict[str, Any] = {
 #   多用户共享缓存——多用户接缝预留）。entry 前缀 ~1500 token < opus 4096 缓存门槛（单用户期不命中，
 #   D7 接缝优先、省钱推多用户期；conv_trace.cached_tokens 记录对账）。画图链/图片重生不挂缓存。
 # ---------------------------------------------------------------------------
-def _build_entry_system_prefix(*, sentinel: bool = False) -> str:
+def _build_entry_system_prefix(*, sentinel: bool = False, preset: bool = False) -> str:
     """稳定系统前缀（模块加载期算一次，字节级稳定）。仅依赖闭集常量（EXAM_TYPES/_GRADE_BOOKS），
     绝不内插 utterance/teacher_id/时间戳/随机。
 
     🔴 R2b·U8：sentinel=True → richText 三段走免转义哨兵框（settings.MOTHER_RICHTEXT_SENTINEL 开时用）；
-       sentinel=False（默认）→ 旧式整 JSON（response_format 硬锁 10 维，字节级不变）。两版都模块加载期
-       各算一次缓存（前缀字节稳定 = aigeek 缓存友好），运行期按 settings 选。"""
+       sentinel=False（默认）→ 旧式整 JSON（response_format 硬锁 10 维，字节级不变）。
+    🔴 preset=True（用户拍板·两 prompt 隔离）：老师已在系统中定好年级 → **砍掉①判年级整段**，让模型把
+       全部注意力放在读图 + 解题（年级册由人类消息后置给出）。四版（json/sentinel × preset/非preset）
+       均模块加载期各算一次缓存（前缀字节稳定 = aigeek 缓存友好），运行期按 settings + preset 选。"""
     exam_types = "/".join(dna_extract.EXAM_TYPES)
     books = "、".join(_GRADE_BOOKS)
-    tmpl = f"""你是浙教版初中数学命题专家 + 题库打标师。看这张母题图，按顺序做三件事并一次输出：
-① **判年级册 + 章 + 置信度**（判定母题属于哪个教材册、哪一章，给整体置信 0~1，拿不准给候选）；
-② **真正把题解出来**（一步步算到最终答案，不许抄图、不许跳步）；
-③ **据你的解答做 10 维 DNA 打标**（母题是所有变式的基准，解错则全变式跟着错——务必稳准）。
-================ 判年级册 + 章（闭集 + 候选） ================
-- gradeBook **只能从这 6 册选一个**：{books}。判不出 → 留空串 ""、confidence 给低、gradeCandidates 给你最可能的 1~2 个。
-- chapter：章名（如「第2章 一元二次方程」）；判不出留空。**章有歧义（说不清是哪一章）→ chapterCandidates 给 ≥2 个**。
-- confidence：对「年级册+章」判定的整体把握 0~1（不是解题把握）。**没十足把握就给低（<0.8），别硬撑高分。**
-
-================ 学段锁死红线 ================
-🔴 解法不得超出你判定年级的进度（不许用更高年级才学的定理/方法绕过）；考点落在该年级/章范围内。
+    # 🔴 解题纪律（含读图：阴影/填充可能多块，逐块圈定完整范围——治「只数一块阴影算错面积」3-vs-1 误读）。
+    #   preset / 非 preset 共用。
+    solve_discipline = (
+        "（一步步算到最终答案，不许抄图、不许跳步）。🔴 **解题纪律（直接决定母题对错，务必照做）**："
+        "**先把图读准再列式**——看清图中**到底哪些区域被标成阴影/填充/打斜线**，阴影**可能由多块组成**"
+        "（如两个图形各自露在外面的部分都算阴影），务必逐块圈定阴影的**完整**范围、别只数其中一块就列式；"
+        "条件/图形含义拿不准时按最自然的一种解释取定**并解到底**、别中途乱换解释；一步步推出干净答案后"
+        "**即定稿收手**——**信任你自己的正确推导，绝不为了凑某个心里预设的「标准答案/期望值」而推翻已得到的"
+        "正确结论、来回改答案、反复自我怀疑兜圈子**；与直觉不符最多复核一遍，确认无误就以你的推导为准、不再动摇。"
+    )
+    if preset:
+        head = (
+            "你是浙教版初中数学**解题专家** + 题库打标师。🔴 本题**年级册已由老师在系统中确定**"
+            "（下方人类消息给出），你**绝不再自行判定年级册**——gradeBook 直接照老师给的原样填、confidence 给 1.0、"
+            "gradeCandidates / chapterCandidates 留空数组（章 chapter 可据题如实填）。把全部精力放在两件事"
+            "（🔴 母题解题是地基，③打标全建立在②你解对的基础上）：\n"
+            f"② **像严谨的解题者那样真正把题解出来**{solve_discipline}\n"
+            "③ **据你②解出的答案做 10 维 DNA 打标**（母题是所有变式的基准，解错则全变式跟着错——务必稳准）。"
+        )
+        grade_block = ""
+        stage_lock_who = "老师确定的"
+    else:
+        head = (
+            "你是浙教版初中数学**解题专家** + 题库打标师。看这张母题图，按顺序做三件事并一次输出"
+            "（🔴 母题解题是地基，③打标全建立在②你解对的基础上）：\n"
+            "① **判年级册 + 章 + 置信度**（判定母题属于哪个教材册、哪一章，给整体置信 0~1，拿不准给候选）；\n"
+            f"② **像严谨的解题者那样真正把题解出来**{solve_discipline}\n"
+            "③ **据你②解出的答案做 10 维 DNA 打标**（母题是所有变式的基准，解错则全变式跟着错——务必稳准）。"
+        )
+        grade_block = (
+            "================ 判年级册 + 章（闭集 + 候选） ================\n"
+            f"- gradeBook **只能从这 6 册选一个**：{books}。判不出 → 留空串 \"\"、confidence 给低、gradeCandidates 给你最可能的 1~2 个。\n"
+            "- chapter：章名（如「第2章 一元二次方程」）；判不出留空。**章有歧义（说不清是哪一章）→ chapterCandidates 给 ≥2 个**。\n"
+            "- confidence：对「年级册+章」判定的整体把握 0~1（不是解题把握）。**没十足把握就给低（<0.8），别硬撑高分。**\n\n"
+        )
+        stage_lock_who = "你判定"
+    tmpl = f"""{head}
+{grade_block}================ 学段锁死红线 ================
+🔴 解法不得超出{stage_lock_who}年级的进度（不许用更高年级才学的定理/方法绕过）；考点落在该年级/章范围内。
 
 ================ 10 维逐维规则（开集打标，kp 写真实考点名） ================
 1. primaryKp 主考点：写**真实考点名**（id 留空串，由系统后锚到题库叶子）：{{"id":"","name":"一元二次方程的根的判别式"}}。
@@ -198,24 +228,98 @@ _RICH_BLOCK_SENTINEL = """
 #   相同，test_prefix_idempotent 据此校验）。
 ENTRY_SYSTEM_PREFIX_JSON: str = _build_entry_system_prefix(sentinel=False)
 ENTRY_SYSTEM_PREFIX_SENTINEL: str = _build_entry_system_prefix(sentinel=True)
+# 🔴 preset 版（老师已定年级 → 砍①判年级，专注读图解题）：四版各模块加载期算一次缓存。
+ENTRY_SYSTEM_PREFIX_JSON_PRESET: str = _build_entry_system_prefix(sentinel=False, preset=True)
+ENTRY_SYSTEM_PREFIX_SENTINEL_PRESET: str = _build_entry_system_prefix(sentinel=True, preset=True)
 
 
-def _entry_prefix() -> str:
-    """运行期按 settings 选前缀（两版均模块加载期算好，字节稳定 = 缓存友好）。"""
+def _entry_prefix(preset: bool = False) -> str:
+    """运行期按 settings + preset 选前缀（四版均模块加载期算好，字节稳定 = 缓存友好）。
+    preset=True（老师已定年级）→ 砍①判年级的独立前缀。"""
     from core import settings as _settings  # 注意：core 重导出的是 Settings 实例（非模块）
-    return (
-        ENTRY_SYSTEM_PREFIX_SENTINEL
-        if getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
-        else ENTRY_SYSTEM_PREFIX_JSON
-    )
+    _sent = getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
+    if preset:
+        return ENTRY_SYSTEM_PREFIX_SENTINEL_PRESET if _sent else ENTRY_SYSTEM_PREFIX_JSON_PRESET
+    return ENTRY_SYSTEM_PREFIX_SENTINEL if _sent else ENTRY_SYSTEM_PREFIX_JSON
 
 
 # 🔴 兼容旧引用（单测 / build_entry_prompt 壳）：默认指向 JSON 版（旧行为字节级一致）。
 ENTRY_SYSTEM_PREFIX: str = ENTRY_SYSTEM_PREFIX_JSON
 
 
+# ===========================================================================
+# 🔴 PRD-A-021 R5（用户拍板 2026-06-22「拆两轮：①解题 ②富文本打标」）：把母题单调用拆成
+#   R1 解题轮（纯解题·流式·宁慢求准）+ R2 结构化打标轮（接 R1 权威解答·忠实富文本+10维打标+切图）。
+#   动机：单调用让模型边解题边打标边判年级，注意力过载 → 解题崩坏（已验算出 1 却硬填幻觉 12）、
+#   单轮 117s 黑屏干等。拆开后 R1 全部注意力放解题（public_stream 流式吐到对话气泡=看得见思路），
+#   R2 只忠实整理+打标（不重解、不改答案），解题对错与结构化解耦。
+# ===========================================================================
+# R1 解题轮系统前缀（字节稳定·无 preset 分版：年级册仅作学段红线，经人类消息后置注入）。
+_SOLVE_SYSTEM_PREFIX: str = (
+    "你是浙教版初中数学**解题专家**。看这张母题图，你只做**一件事**：把这道题**准确地解出来**。"
+    "不打标、不判年级册、不输出 JSON——就是踏实把题解对。\n\n"
+    "================ 🔴 解题纪律（宁愿慢，也要准——直接决定母题对错，务必照做） ================\n"
+    "- **慢没关系，务必准。** 一步步算到最终答案，不许抄图、不许跳步。\n"
+    "- **先把图读准再列式**：看清图中**到底哪些区域被标成阴影/填充/打斜线**；阴影**可能由多块组成**"
+    "（如两个图形各自露在外面的部分都算阴影），逐块圈定阴影的**完整**范围，别只数其中一块就列式。\n"
+    "- 条件/图形含义拿不准时，按最自然的一种解释取定并**解到底**，别中途乱换解释。\n"
+    "- 关键步骤**代入原题验算**核对。\n"
+    "- 🔴 **数学题没有「标准答案应该是多少」的预设。** 代入验算通过的结果就是**唯一终答**；"
+    "**禁止因为「感觉太小/太大/不合常理/经验上这类题不会这样」而推翻已验算通过的正确结论、来回改答案、"
+    "反复自我怀疑兜圈子**。与直觉不符，最多复核一遍；确认无误，就以你的推导为准、不再动摇。\n"
+    "- 学段红线：解法不超出该年级进度（人类消息给了年级册就按它，否则按题目自然学段），"
+    "不许用更高年级才学的定理/方法绕过。\n\n"
+    "================ 输出 ================\n"
+    "写**给学生看的干净解题过程**（最终正确推导链，紧凑、一遍到底；数学式用行内 $...$，换行直接回车，"
+    "禁裸 LaTeX 命令）。**最后一行**用固定标记给出最终答案（供系统提取，务必照写、独占一行）：\n"
+    "【最终答案】<这里写最简短的最终答案，一行写完>"
+)
+
+
+def build_solve_messages(
+    *, image_url: str, utterance: str | None = None, teacher_memory: str | None = None,
+    preset_grade_book: str | None = None,
+) -> list[Any]:
+    """R1 解题轮消息：稳定 system 前缀（解题纪律）‖ 变量后缀（题图 + 年级学段约束 + 背景语境 + 记忆）。"""
+    from langchain_core.messages import SystemMessage
+
+    parts: list[dict[str, Any]] = []
+    var_text_segs: list[str] = []
+    if preset_grade_book:
+        var_text_segs.append(
+            f"【学段约束】本题年级册 = 「{preset_grade_book}」，解法不得超出该册进度。"
+        )
+    if utterance:
+        var_text_segs.append(f"【老师附带的背景语境（参考，不影响解题本身）】{utterance}")
+    if teacher_memory:
+        var_text_segs.append(f"【该老师的偏好/纠正记忆（参考，不强制）】\n{teacher_memory}")
+    if var_text_segs:
+        parts.append({"type": "text", "text": "\n".join(var_text_segs)})
+    parts.append({"type": "image_url", "image_url": {"url": image_url}})
+    return [SystemMessage(content=_SOLVE_SYSTEM_PREFIX), HumanMessage(content=parts)]
+
+
+_FINAL_ANSWER_RE = re.compile(r"【最终答案】\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _extract_solved_answer(text: str) -> str:
+    """从 R1 解题正文抠出【最终答案】标记内容（取最后一处）；无标记 → 空串（R2 退兜底，不崩）。"""
+    if not text:
+        return ""
+    hits = _FINAL_ANSWER_RE.findall(text)
+    return hits[-1].strip() if hits else ""
+
+
+def _strip_final_answer_marker(text: str) -> str:
+    """喂 R2 的 R1 解答正文：去掉【最终答案】标记行（最终答案另以结构化字段单独给 R2）。"""
+    if not text:
+        return ""
+    return _FINAL_ANSWER_RE.sub("", text).strip()
+
+
 def build_entry_messages(
     *, image_url: str, utterance: str | None = None, teacher_memory: str | None = None,
+    preset_grade_book: str | None = None,
 ) -> list[Any]:
     """B2 缓存接缝：稳定 system 前缀 ‖ 变量 user 后缀（题图 + query + teacher 记忆**后置**）。
 
@@ -226,6 +330,14 @@ def build_entry_messages(
 
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
+    _preset = bool(preset_grade_book)
+    if _preset:
+        # 🔴 preset（用户拍板·两 prompt 隔离）：年级册由老师确定，注入人类消息后缀（per-request，不进缓存
+        #   前缀）；系统前缀已用 preset 版（砍①判年级）。让模型直接采用、专注读图解题。
+        var_text_segs.append(
+            f"【🔴 老师已确定】本题年级册 = 「{preset_grade_book}」。gradeBook 直接填它、confidence=1.0、"
+            "gradeCandidates/chapterCandidates 留空，**不要再自行判定年级册**；把全部注意力放在看清图中阴影/条件、严谨解题上。"
+        )
     if utterance:
         # 🔴 R2b·U8：哨兵模式输出 = JSON + 三哨兵框（不是「只一个 JSON」），措辞按模式区分，
         #   否则与 system 段的哨兵框指令打架。两版都强调「不据此出变式/不输出数组/不写前言」。
@@ -245,7 +357,134 @@ def build_entry_messages(
     if var_text_segs:
         parts.append({"type": "text", "text": "\n".join(var_text_segs)})
     parts.append({"type": "image_url", "image_url": {"url": image_url}})
-    return [SystemMessage(content=_entry_prefix()), HumanMessage(content=parts)]
+    return [SystemMessage(content=_entry_prefix(preset=_preset)), HumanMessage(content=parts)]
+
+
+# ===========================================================================
+# 🔴 R5·R2 结构化打标轮（解题已由 R1 完成，权威解答经人类消息注入）：忠实整理富文本 + 10维打标。
+#   与 R1 隔离=R2 系统前缀**不含解题纪律**（不再诱导重解），只讲「忠实整理 + 打标 + 判章」。
+#   richText.analysis = 把 R1 已给的正确解法理顺成给学生看的干净链路（忠实，不重推、不改答案）。
+# ===========================================================================
+def _build_struct_label_prefix(*, sentinel: bool = False, preset: bool = False) -> str:
+    """R2 结构化打标系统前缀（字节稳定，四版 sentinel×preset 各模块加载期算一次）。
+    preset=True → 砍①判年级（老师已定）；解题始终已给（R1 权威解答），故无解题纪律段。"""
+    exam_types = "/".join(dna_extract.EXAM_TYPES)
+    books = "、".join(_GRADE_BOOKS)
+    if preset:
+        head = (
+            "你是浙教版初中数学**题库打标师**。🔴 本题**年级册已由老师确定**（下方人类消息给出）"
+            "+ **解题已由解题专家完成**（下方人类消息附**权威解答**）。你**绝不重新解题、绝不改动答案与解题路径**，"
+            "gradeBook 直接照老师给的填、confidence=1.0、gradeCandidates/chapterCandidates 留空（章 chapter 可如实填）。"
+            "只做两件事：\n"
+            "② **忠实把已给的权威解答整理成富文本三段**（题面/答案/解析）——只做排版结构化与誊清，"
+            "**数学结论/最终答案/解题路径一字不改，不补漏、不润色、不重新推导**；analysis 就是把已给解法理顺成"
+            "给学生看的干净链路；solvedAnswer 直接填已给的最终答案。\n"
+            "③ **据已解出的答案做 10 维 DNA 打标**（母题是所有变式的基准，务必稳准）。"
+        )
+        grade_block = ""
+        stage_lock_who = "老师确定的"
+    else:
+        head = (
+            "你是浙教版初中数学**题库打标师**。🔴 本题**解题已由解题专家完成**（下方人类消息附**权威解答**）——"
+            "你**绝不重新解题、绝不改动答案与解题路径**。按顺序做三件事并一次输出：\n"
+            "① **判年级册 + 章 + 置信度**（判定母题属于哪个教材册、哪一章，给整体置信 0~1，拿不准给候选）；\n"
+            "② **忠实把已给的权威解答整理成富文本三段**（题面/答案/解析）——只做排版结构化与誊清，"
+            "**数学结论/最终答案/解题路径一字不改，不补漏、不润色、不重新推导**；analysis 就是把已给解法理顺成"
+            "给学生看的干净链路；solvedAnswer 直接填已给的最终答案。\n"
+            "③ **据已解出的答案做 10 维 DNA 打标**（母题是所有变式的基准，务必稳准）。"
+        )
+        grade_block = (
+            "================ 判年级册 + 章（闭集 + 候选） ================\n"
+            f"- gradeBook **只能从这 6 册选一个**：{books}。判不出 → 留空串 \"\"、confidence 给低、gradeCandidates 给你最可能的 1~2 个。\n"
+            "- chapter：章名（如「第2章 一元二次方程」）；判不出留空。**章有歧义（说不清是哪一章）→ chapterCandidates 给 ≥2 个**。\n"
+            "- confidence：对「年级册+章」判定的整体把握 0~1（不是解题把握）。**没十足把握就给低（<0.8），别硬撑高分。**\n\n"
+        )
+        stage_lock_who = "你判定"
+    tmpl = f"""{head}
+{grade_block}================ 学段锁死红线 ================
+🔴 考点/解法落在{stage_lock_who}年级范围内（解题已给，此处只核对打标的学段归属）。
+
+================ 10 维逐维规则（开集打标，kp 写真实考点名） ================
+1. primaryKp 主考点：写**真实考点名**（id 留空串，由系统后锚到题库叶子）：{{"id":"","name":"一元二次方程的根的判别式"}}。
+2. secondaryKps 副考点 0~3：与主不同体系才算，同样 {{"id":"","name":"..."}}；没有就空数组。
+3. qtype 题型：选择/填空/解答 之一（闭集）。
+4. assessmentType 考察类型：**闭集10选1** = {exam_types}。
+5. solutionSkeleton 解法骨架：**据已给权威解答**抽解题步骤序列；**最难的那一步用【】整步包住**（至多一处）。是变式守恒基因。
+6. hardPointCount + breakthroughPoints 难点（克制·宁空不凑）：基础/纯套公式/直接计算/概念辨析/送分题 → breakthroughPoints **必空**、hardPointCount=0；🔴 hardPointCount **必须等于** breakthroughPoints 数组长度。
+7. scenario 场景：一句话场景 或 "纯代数"。
+8. difficulty 难度四档（按构造断言）：1★送分(无难点+概念辨析/单步)；2★★常规(无难点+{{直接计算·公式套用·性质判定}}+多步)；3★★★(1难点 或 {{证明推理·应用建模·探究归纳}} 或 骨架含【最难步】)；4★压轴(≥2难点 或 多突破口综合)。
+9. tags 标签 3~6：检索标签（求什么/用什么定理/什么方法/什么场景）；禁近义增生。
+10. modelCandidates 解题模型（克制）：真有可复用套路才给候选名（简单题空数组），只给名不给 M-id。
+
+================ 富文本红线（题面/答案/解析） ================
+🔴 数学式用行内 $...$；换行用真实换行（直接回车，不要写字面 \\n）；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数配对完整（下游有机器闸逐项检）。
+🔴 **analysis/解析 = 把已给权威解答誊成给学生看的干净最终解法**：数学式优先 $LaTeX$、推导紧凑；**忠实已给解法，只写正确的最终推导链，禁止改答案/改路径，禁止写试错/回头/反复估算等草稿过程**。
+🔴 has_figure：题面真含图形/图表/几何图填 true；只是拍照的纯文本题填 false。
+{{rich_output_block}}"""
+    block = (_RICH_BLOCK_SENTINEL if sentinel else _RICH_BLOCK_JSON).replace(
+        "{{", "{"
+    ).replace("}}", "}")
+    return tmpl.replace("{rich_output_block}", block)
+
+
+STRUCT_SYSTEM_PREFIX_JSON: str = _build_struct_label_prefix(sentinel=False)
+STRUCT_SYSTEM_PREFIX_SENTINEL: str = _build_struct_label_prefix(sentinel=True)
+STRUCT_SYSTEM_PREFIX_JSON_PRESET: str = _build_struct_label_prefix(sentinel=False, preset=True)
+STRUCT_SYSTEM_PREFIX_SENTINEL_PRESET: str = _build_struct_label_prefix(sentinel=True, preset=True)
+
+
+def _struct_prefix(preset: bool = False) -> str:
+    """运行期按 settings + preset 选 R2 结构化打标前缀。"""
+    from core import settings as _settings
+    _sent = getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
+    if preset:
+        return STRUCT_SYSTEM_PREFIX_SENTINEL_PRESET if _sent else STRUCT_SYSTEM_PREFIX_JSON_PRESET
+    return STRUCT_SYSTEM_PREFIX_SENTINEL if _sent else STRUCT_SYSTEM_PREFIX_JSON
+
+
+def build_struct_messages(
+    *, image_url: str, solved_solution: str, solved_answer: str,
+    utterance: str | None = None, teacher_memory: str | None = None,
+    preset_grade_book: str | None = None,
+) -> list[Any]:
+    """R2 结构化打标消息：稳定 system 前缀 ‖ 变量后缀（题图 + 🔴R1 权威解答 + 年级 + 背景 + 记忆）。
+
+    solved_solution = R1 解题正文（已去【最终答案】标记）；solved_answer = R1 抠出的最终答案。
+    二者作「权威解答」注入人类消息，R2 据此忠实整理 + 打标，绝不重解。
+    """
+    from langchain_core.messages import SystemMessage
+
+    _preset = bool(preset_grade_book)
+    parts: list[dict[str, Any]] = []
+    var_text_segs: list[str] = []
+    # 🔴 R1 权威解答（核心注入）：放最前，明确「照此整理打标，不重解、不改答案」。
+    _ans_line = f"最终答案 = {solved_answer}\n\n" if solved_answer else ""
+    var_text_segs.append(
+        "【🔴 本题解题已由解题专家完成·以下为权威解答（照此忠实整理富文本 + 打标，**绝不重新解题、"
+        f"绝不改动答案与解题路径**；solvedAnswer 直接填下方最终答案）】\n{_ans_line}解题过程：\n{solved_solution}"
+    )
+    if _preset:
+        var_text_segs.append(
+            f"【🔴 老师已确定】本题年级册 = 「{preset_grade_book}」。gradeBook 直接填它、confidence=1.0、"
+            "gradeCandidates/chapterCandidates 留空，不要再自行判定年级册。"
+        )
+    if utterance:
+        from core import settings as _settings
+        _sentinel = getattr(_settings, "MOTHER_RICHTEXT_SENTINEL", False)
+        _fmt_hint = (
+            "按系统约定的「JSON + 三哨兵框」格式输出"
+            if _sentinel else "**只输出一个 JSON 对象**"
+        )
+        var_text_segs.append(
+            "【老师附带要求（仅作背景语境参考，不抽配方）：本步只给"
+            f"母题本身打标，{_fmt_hint}，不要据此出变式、不要输出数组或多个对象、不要写前言】"
+            f"{utterance}"
+        )
+    if teacher_memory:
+        var_text_segs.append(f"【该老师的偏好/纠正记忆（参考，不强制）】\n{teacher_memory}")
+    parts.append({"type": "text", "text": "\n\n".join(var_text_segs)})
+    parts.append({"type": "image_url", "image_url": {"url": image_url}})
+    return [SystemMessage(content=_struct_prefix(preset=_preset)), HumanMessage(content=parts)]
 
 
 async def _to_b64_data_url(url: str) -> str:
@@ -609,8 +848,6 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             "messages": [AIMessage(content="今日 AI 额度已用尽，举一反三暂停以控成本，请稍后或明日再试。")],
         }
 
-    V._emit_stage("classify", "锚定考点", "running", "opus 读图判章 + 解题打标…")
-
     user_text = V._strip_urls(V._latest_human_text(state.get("messages", [])))
     # B2 缓存接缝：稳定 system 前缀 ‖ 变量 user 后缀（题图+query+teacher记忆后置）。
     # 🔴 B4 记忆注入（走 RuoYi HTTP，只取 enabled，停用不注入 G14/G9）；放变量后缀（多用户接缝，
@@ -627,40 +864,85 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     # 🔴 2026-06-17：sui-xiang(kiro 逆向站)主站不抓远程图 URL，母题图必须 base64 内嵌；
     #   下载失败 → 原 url 兜底（aigeek failover 仍可用远程 URL，不破熔断备用路径）。
     img_for_llm = await _to_b64_data_url(url)
-    messages = build_entry_messages(
-        image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
-    )
+    _preset_for_prompt = read_preset(config)
+    _preset_grade = (_preset_for_prompt or {}).get("grade_book")
     opus_model = V.settings.variant_model("mother_solve_label")  # fail-fast 已锁 opus
-    # 🔴 2026-06-17：母题「opus 调用 + 解析」失败重试一次（治 sui-xiang 逆向站静默截断/瞬时坏 JSON）。
-    #   relay_pool 已对「200+空内容」failover 到 aigeek；此处兜「200+截断后非空但解不出」的残缺返回
-    #   （几何压轴常见，C-010 §② 失败带反馈 retry≤2 范式）。绝不静默退 gpt——母题唯一安全网。
+
+    # =========================================================================
+    # 🔴 R5·R1 解题轮（纯解题·public_stream 流式吐对话气泡=看得见思路·宁慢求准）。
+    #   只解题、不打标、不判年级册、不出 JSON → 模型全部注意力在「把题解对」；解题正文流式透前端。
+    # =========================================================================
+    V._emit_stage("classify", "锚定考点", "running", "① 解题中（一步步算，求稳准）…")
+    solve_messages = build_solve_messages(
+        image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
+        preset_grade_book=_preset_grade,
+    )
+    solved_text = ""
+    solve_exc: Exception | None = None
+    for _attempt in range(2):  # 解题轮失败/空返回重试一次（治 sui-xiang 瞬时截断/空返回）
+        try:
+            solved_text = await V._ainvoke_text(
+                solve_messages, model=opus_model,
+                max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
+                temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
+                timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
+                public_stream=True,  # 🔴 解题正文流式吐前端打字机（看得见思路·不干等 117s）
+                on_reasoning=V._emit_reasoning,
+            )
+        except Exception as e:  # noqa: BLE001 — 解题轮调用异常（超时/全站失败）
+            solve_exc = e
+            if _attempt == 0:
+                V._emit_stage("classify", "锚定考点", "running", "母题读图解题重试中…")
+                continue
+            break
+        if solved_text and solved_text.strip():
+            solve_exc = None
+            break
+        if _attempt == 0:
+            V._emit_stage("classify", "锚定考点", "running", "解题空返回，重读一次…")
+    if not (solved_text and solved_text.strip()):
+        V._emit_stage("classify", "锚定考点", "error", "母题解题失败（opus 超时/空返回）")
+        V._emit_error("mother_solve_failed",
+                      f"母题解题失败（{str(solve_exc)[:80] if solve_exc else '空返回'}），请重试或换更清晰的图。")
+        return {
+            "image_url": url, "_entry_finalized": False,
+            "messages": [AIMessage(content="母题解题失败了（opus 超时或空返回），请重试或换一张更清晰的题目图。")],
+        }
+    solved_answer = _extract_solved_answer(solved_text)
+    solved_solution = _strip_final_answer_marker(solved_text)
+
+    # =========================================================================
+    # 🔴 R5·R2 结构化打标轮（接 R1 权威解答 → 忠实富文本三段 + 10 维 DNA 打标 + 判章；绝不重解）。
+    #   solvedAnswer 终钉 = R1 抠出的最终答案（R2 只整理打标，无权改答案）。
+    # =========================================================================
+    V._emit_stage("classify", "锚定考点", "running", "② 富文本整理 + 打标分类…")
+    struct_messages = build_struct_messages(
+        image_url=img_for_llm, solved_solution=solved_solution, solved_answer=solved_answer,
+        utterance=user_text or None, teacher_memory=teacher_memory, preset_grade_book=_preset_grade,
+    )
     entry: Any = None
     opus_exc: Exception | None = None
     # 🔴 R2b·U8：哨兵模式 = 输出 JSON + 尾随哨兵框 → **不能下发 response_format**（json_schema 强制
-    #   整段合法 JSON、拒尾随文本）；关时维持旧式整 JSON + response_format 硬锁 10 维（字节级不变）。
+    #   整段合法 JSON、拒尾随文本）；关时维持旧式整 JSON + response_format 硬锁 10 维。
     _sentinel_mode = getattr(V.settings, "MOTHER_RICHTEXT_SENTINEL", False)
     _rf = None if _sentinel_mode else RESPONSE_FORMAT_ENTRY
     for _attempt in range(2):
         try:
             opus_text = await V._ainvoke_text(
-                messages, model=opus_model,
+                struct_messages, model=opus_model,
                 max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                 response_format=_rf,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
-                on_reasoning=V._emit_reasoning,  # D18 思考流式（aigeek/sui-xiang 当前未吐=dormant）
             )
-        except Exception as e:  # noqa: BLE001 — opus 调用异常（超时/全站失败）
+        except Exception as e:  # noqa: BLE001 — 结构化轮调用异常
             opus_exc = e
             if _attempt == 0:
-                V._emit_stage("classify", "锚定考点", "running", "母题读图重试中…")
+                V._emit_stage("classify", "锚定考点", "running", "富文本打标重试中…")
                 continue
             break
-        # 🔴 R2b·U8 免转义哨兵框优先：opus 哨兵框分隔 richText 三段 → 原文抠段 + 瘦 JSON 解结构，
-        #   绕开三段富文本转义坑（不再因一处转义坏整对象断 → 省 +100s LLM 修复往返）。无哨兵则回退。
+        # 🔴 免转义哨兵框优先：抠三段 richText 原文 + 瘦 JSON 解结构（绕三段富文本转义坑）。
         parsed = extract_sentinel_richtext(opus_text)
-        # 解析自愈（B2 共用口径 parse_or_repair_entry）：数组解包（id=1383/1384）→ 引号修复 +
-        #   LLM 兜底（id=1399）。🔴 传 V 修原 _repair_json_via_llm 引用未定义模块级 V 的 NameError 隐患。
         if not isinstance(parsed, dict):
             parsed = V._parse_json(opus_text)
         if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
@@ -671,8 +953,8 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         if isinstance(parsed, dict):
             entry, opus_exc = parsed, None
             break
-        if _attempt == 0:  # 解析+修复仍失败 → 重读母题一次（截断/坏 JSON 多为瞬时）
-            V._emit_stage("classify", "锚定考点", "running", "解析失败，重读母题…")
+        if _attempt == 0:  # 解析+修复仍失败 → 重整一次（截断/坏 JSON 多为瞬时）
+            V._emit_stage("classify", "锚定考点", "running", "解析失败，重整一次…")
     if not isinstance(entry, dict):
         if opus_exc is not None:
             V._emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")
@@ -681,12 +963,17 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 "image_url": url, "_entry_finalized": False,
                 "messages": [AIMessage(content="母题读图解题失败了（opus 超时或异常），请重试或换一张更清晰的题目图。")],
             }
-        V._emit_stage("classify", "锚定考点", "error", "母题解题打标解析失败")
-        V._emit_error("mother_opus_parse_fail", "母题解题打标结果解析失败，请重试。")
+        V._emit_stage("classify", "锚定考点", "error", "母题富文本打标解析失败")
+        V._emit_error("mother_opus_parse_fail", "母题富文本打标结果解析失败，请重试。")
         return {
             "image_url": url, "_entry_finalized": False,
-            "messages": [AIMessage(content="母题解题打标结果没解析出来，请重试。")],
+            "messages": [AIMessage(content="母题富文本打标结果没解析出来，请重试。")],
         }
+
+    # 🔴 R5：solvedAnswer 终钉 = R1 解题轮抠出的最终答案（R2 只整理打标，无权改答案）——
+    #   根治「推导出 1 却硬填幻觉 12」的答案-推导矛盾（解题已在 R1 隔离完成、答案不再被打标轮改写）。
+    if solved_answer:
+        entry["solvedAnswer"] = solved_answer
 
     has_figure = bool(entry.get("has_figure"))  # 🔴 仅记录，不 reject（反转 C-017 带图打回）
     decision = decide_confirm(entry)
@@ -1032,6 +1319,34 @@ async def _finalize_high_conf(
     confirmed = V._conf_ok(analysis) and bool((analysis.get("kp") or {}).get("anchored"))
     kp_name = (analysis.get("kp") or {}).get("value") or "?"
     grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
+    # 🔴 R2a·闸1(B5) 隔离修复（用户反馈「选了年级-章节还弹确认弹窗·两个 prompt 要隔离」+「为什么没定死」）：
+    #   老师已预设章范围 → 即便 opus 考点没锚到库里真叶子（范围内未命中），也**绝不再弹确认**。
+    #   复用 _reanchor_reuse_first_solve 的 graceful 降级（variant.py:2569-2578）：把 main_kp 锚到**所选
+    #   章节点本身**（preset_chapter_id，= 老师亲选范围、非凭空造叶子）+ need_anchor_review=True（母题卡
+    #   显「锚定待人审」），并写 analysis.kp.anchored.code → 让出题闸（generate 查 dim1_kp_id=anchored.code,
+    #   variant.py:3068/3977）放行、母题「定死」可出题。老师后续仍可经 DNA「改考点」修正到真叶子。
+    #   只在「考点未锚到叶子」这一种 not-confirmed 上放行；叶子池整体不可用（上面 881 早退）不在此列。
+    # 🔴 用户反馈（2026-06-22）「选了年级章节还弹窗（因为系统里面默认选择了）」：preset 必须**无条件**
+    #   隔离确认闸——即便 opus 这轮解题崩坏、primaryKp 名都没解出（_pkp 空），也不再弹。退而求其次用
+    #   预设章自身名兜底（chapter 文本 / 预设章名），绝不因 _pkp 空回退到弹窗（那等于没隔离）。
+    if not confirmed and preset_chapter_id:
+        _pkp = (
+            (dna.get("main_kp") or {}).get("name")
+            or main_kp_obj.get("name")
+            or str(decision.get("chapter") or "").strip()
+            or "（待人审锚定考点）"
+        )
+        dna["main_kp"] = {"id": preset_chapter_id, "name": _pkp}  # 章级锚定（老师亲选章，非造叶子）
+        dna["need_anchor_review"] = True
+        mother_dna["need_anchor_review"] = True
+        mother_dna["dna"] = dna  # 回写（dna 同引用，显式确保下游 dim1_kp_id 取到章级锚）
+        analysis["kp"] = {
+            "value": _pkp,
+            "confidence": max(float((analysis.get("kp") or {}).get("confidence", 0) or 0), V.CONF_GATE),
+            "anchored": {"id": preset_chapter_id, "code": str(preset_chapter_id), "name": _pkp},
+        }
+        confirmed = True
+        kp_name = _pkp
     V._emit_stage("classify", "锚定考点", "done" if confirmed else "warn",
                   f"考点「{kp_name}」·年级「{grade_name}」")
     recipe = V.knobs_desc(base_out.get("knobs")) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
