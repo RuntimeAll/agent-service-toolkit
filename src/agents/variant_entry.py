@@ -945,7 +945,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                 response_format=_rf,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
-                prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题打标轮同走 aigeek（与 R1 同站一致）
+                # 🔴 用户拍板（2026-06-22）：只有「解题」需要 aigeek，打标轮走默认 sui-xiang（不传 prefer_relay）。
             )
         except Exception as e:  # noqa: BLE001 — 结构化轮调用异常
             opus_exc = e
