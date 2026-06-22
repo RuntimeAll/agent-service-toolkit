@@ -237,6 +237,10 @@ class Settings(BaseSettings):
     #   该站不可用仍正常 failover（参数被忽略、思考块不显示，不报错）。RELAY_POOL 改名时 .env 同步覆盖。
     THINKING_RELAY: str = "aigeek"
     THINKING_EFFORT: str = "low"  # extended-thinking 强度（low 最干净，实测有效）
+    # 🔴 PRD-A-021 R5（用户 2026-06-22 实验）：母题解题轮(R1)+打标轮(R2) 优先走的中转站（仍是 opus，
+    #   只换网关试解题准度）。prefer_relay 把同名站提到候选首位、其余仍按序 failover（站挂了不卡死）。
+    #   空串/None → 不指定、走 RELAY_POOL 默认序（sui-xiang 主）。仅影响母题 opus 两轮，变式/造图不变。
+    MOTHER_SOLVE_RELAY: str | None = "aigeek"
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
     # 用于算 conv_trace.cost_yuan（实际消费）。留空 → cost 记 NULL（不瞎猜价）。
     RELAY_PRICES: str | None = None

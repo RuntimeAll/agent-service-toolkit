@@ -902,6 +902,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
                 public_stream=True,  # 🔴 解题正文流式吐前端打字机（看得见思路·不干等 117s）
                 on_reasoning=V._emit_reasoning,
+                prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题解题轮优先走 aigeek（仍 opus·只换网关）
             )
         except Exception as e:  # noqa: BLE001 — 解题轮调用异常（超时/全站失败）
             solve_exc = e
@@ -949,6 +950,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                 response_format=_rf,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
+                prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题打标轮同走 aigeek（与 R1 同站一致）
             )
         except Exception as e:  # noqa: BLE001 — 结构化轮调用异常
             opus_exc = e

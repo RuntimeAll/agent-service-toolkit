@@ -920,6 +920,7 @@ async def _ainvoke_text(
     temperature: float | None = None,
     response_format: dict[str, Any] | None = None,
     timeout: float | None = None,
+    prefer_relay: str | None = None,
 ) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
@@ -951,7 +952,8 @@ async def _ainvoke_text(
     #   🔴 graceful：开了但优先站不可用 → relay_pool 正常 failover 回 kiro，参数被忽略、无 reasoning 帧，
     #      思考块不显示、绝不报错/不中断（prefer 只改尝试顺序，不改 failover 语义）。
     _thinking = bool(conf.get("thinking_stream"))
-    _prefer_relay = settings.THINKING_RELAY if _thinking else None
+    # 🔴 调用点显式 prefer_relay（如母题解题轮指定 aigeek）优先；否则思考链开时用 THINKING_RELAY；都没有 → None。
+    _prefer_relay = prefer_relay or (settings.THINKING_RELAY if _thinking else None)
     _reasoning_effort = settings.THINKING_EFFORT if _thinking else None
     # 🔴 思考链开 + 调用点没显式挂 on_reasoning → 默认挂 _emit_reasoning，让本轮所有 LLM 调用的 reasoning
     #   都外显（老师开了就想看思考；reasoning 走独立 custom 通道，不混 intent/outline 正文，判决永不采信）。
