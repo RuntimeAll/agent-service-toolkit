@@ -294,6 +294,41 @@ def build_solve_messages(
     return [SystemMessage(content=_SOLVE_SYSTEM_PREFIX), HumanMessage(content=parts)]
 
 
+# ===========================================================================
+# 🔴 R6·富文本化轮（独立异步任务·与 R1 解题并发·走 sui-xiang 默认网关）：
+#   用户 2026-06-22 拍板的三步编排第①步。职责 = **只忠于原文誊抄母题题面**为富文本
+#   （LaTeX/必要 HTML），让题目能被系统索引/识别 + 给一个干净题面。
+#   🔴 极简无噪音（仓库「忠于原文·禁单题型噪音」原则）：禁解题、禁打标、禁补漏、禁判章、
+#      禁输出题面之外任何东西。relay=None（默认 sui-xiang，不走 MOTHER_SOLVE_RELAY）。
+#   产物作为最终 entry.stem 的权威来源（非空时覆盖 R2 誊抄的 stem）。
+# ===========================================================================
+_RICHTEXT_SYSTEM_PREFIX: str = (
+    "你是题面誊抄员。把图中这道题的**题面**一字不差地誊抄成富文本，**只做誊抄这一件事**。\n\n"
+    "【铁律】\n"
+    "- 忠于原文：照图中原题逐字誊抄题面，不要解题、不要补条件、不要改写、不要省略。\n"
+    "- 数学式用行内 $...$；换行用真实换行（直接回车，不要写字面 \\n）。\n"
+    "- 禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数配对完整。\n"
+    "- 题面含表格 → 用 <table> 还原，不要拍平成文字。\n\n"
+    "【输出】\n"
+    "只输出题面富文本本身，不写任何前言/解题/答案/分类/标签/说明。"
+)
+
+
+def build_richtext_messages(
+    *, image_url: str, utterance: str | None = None, teacher_memory: str | None = None,
+) -> list[Any]:
+    """R6 富文本化轮消息：极简稳定 system 前缀（只誊抄题面）‖ 变量后缀（题图）。
+
+    🔴 极简无噪音：不注入解题纪律 / 年级章约束 / 打标规则；utterance/记忆仅作弱背景（多数轮为空）。
+    """
+    from langchain_core.messages import SystemMessage
+
+    parts: list[dict[str, Any]] = []
+    # 富文本化只誊抄题面，utterance/记忆与题面誊抄无关 → 默认不注入（保持 prompt 极简无噪音）。
+    parts.append({"type": "image_url", "image_url": {"url": image_url}})
+    return [SystemMessage(content=_RICHTEXT_SYSTEM_PREFIX), HumanMessage(content=parts)]
+
+
 _FINAL_ANSWER_RE = re.compile(r"【最终答案】\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -864,46 +899,108 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     opus_model = V.settings.variant_model("mother_solve_label")  # fail-fast 已锁 opus
 
     # =========================================================================
-    # 🔴 R5·R1 解题轮（纯解题·public_stream 流式吐对话气泡=看得见思路·宁慢求准）。
-    #   只解题、不打标、不判年级册、不出 JSON → 模型全部注意力在「把题解对」；解题正文流式透前端。
+    # 🔴 R6 三步编排（用户 2026-06-22 拍板）：① 富文本化(sui-xiang·只誊抄题面) ∥ ② R1解题(aigeek)
+    #   **并发跑**（asyncio.gather，富文本化不阻塞解题）；两者完成后 → ③ R2打标(sui-xiang)。
+    #   富文本化跑完即 emit 一帧让 FE 用富文本题面替换原图占位；其结果作为最终 entry.stem 权威来源。
+    #   富文本化失败/空 → 回退用 R2 的 stem（绝不卡死主链；只有 R1 解题失败才硬终止）。
     # =========================================================================
+    # 🔴 R6 进度条新 stage 帧契约（2026-06-22 拍板，定题中阶段对齐重构后母题编排）：
+    #   母题阶段不再都塞单一 classify key，拆成各轮独立 key（进度条真值源）：
+    #     · richtext（富文本化·异步组）：_run_richtext 开始 running → 跑完 done（失败 warn，不卡主链）。
+    #     · solve（解题·主步骤）：_run_solve 开始 running → 跑完 done（失败已硬终止）。
+    #     · label（深度解析/打标·主步骤）：R2 轮 running → done。
+    #     · figure-mother（切图·异步组）：FE 经 upsertFigureStage 自发，toolkit 不发。
+    #     · review（确认母题·闸）：await_mother_review 发 await → 老师点开始 done（沿用既有）。
+    #   旧 classify 帧继续发（向后兼容 + 仍驱动「读图锚定」legacy/低置信路径），新 key 是 dingNodes 真值源。
     V._emit_stage("classify", "锚定考点", "running", "① 解题中（一步步算，求稳准）…")
-    solve_messages = build_solve_messages(
-        image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
-        preset_grade_book=_preset_grade, preset_chapter=_preset_chapter,
-    )
-    solved_text = ""
-    solve_exc: Exception | None = None
-    for _attempt in range(2):  # 解题轮失败/空返回重试一次（治 sui-xiang 瞬时截断/空返回）
+    V._emit_stage("richtext", "富文本化", "running", "誊抄题面为富文本（异步·并行）…")
+    V._emit_stage("solve", "解题", "running", "一步步算，求稳准…")
+
+    # --- ① 富文本化任务（独立异步·sui-xiang 默认网关 = prefer_relay=None；不走 MOTHER_SOLVE_RELAY） ---
+    async def _run_richtext() -> str:
+        rt_messages = build_richtext_messages(
+            image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
+        )
         try:
-            solved_text = await V._ainvoke_text(
-                solve_messages, model=opus_model,
+            txt = await V._ainvoke_text(
+                rt_messages, model=opus_model,
                 max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
-                public_stream=True,  # 🔴 解题正文流式吐前端打字机（看得见思路·不干等 117s）
-                on_reasoning=V._emit_reasoning,
-                prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题解题轮优先走 aigeek（仍 opus·只换网关）
+                prefer_relay=None,  # 🔴 默认走 sui-xiang（RELAY_POOL[0]），不走 aigeek
             )
-        except Exception as e:  # noqa: BLE001 — 解题轮调用异常（超时/全站失败）
-            solve_exc = e
+        except Exception:  # noqa: BLE001 — 富文本化失败绝不卡主链，回退 R2 stem
+            V._emit_stage("richtext", "富文本化", "warn", "富文本化失败，回退 R2 题面（不影响出题）")
+            return ""
+        stem = V._sanitize_rich_text((txt or "").strip())
+        if not (stem and str(stem).strip()):
+            V._emit_stage("richtext", "富文本化", "warn", "富文本化空返回，回退 R2 题面（不影响出题）")
+            return ""
+        # 轻量验证（非空已过；富文本机器检失败仅告警、不阻塞、不丢结果）。
+        try:
+            _rt_chk = mother_opus.validate_rich_text({"stem": stem})
+            if not _rt_chk["ok"]:
+                V._emit_stage("classify", "锚定考点", "running",
+                              f"题面富文本机器检 {len(_rt_chk['issues'])} 处小问题（不阻塞）")
+        except Exception:  # noqa: BLE001
+            pass
+        # 早帧：FE 占位区把原图替换成富文本题面（解题/打标还在跑时就能读到干净题面）。
+        V._emit_richtext_stem(str(stem))
+        V._emit_stage("richtext", "富文本化", "done", "题面已整理为富文本")
+        return str(stem)
+
+    # --- ② R1 解题轮（纯解题·aigeek·public_stream 流式吐对话气泡=看得见思路·宁慢求准） ---
+    async def _run_solve() -> tuple[str, Exception | None]:
+        solve_messages = build_solve_messages(
+            image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
+            preset_grade_book=_preset_grade, preset_chapter=_preset_chapter,
+        )
+        _txt = ""
+        _exc: Exception | None = None
+        for _attempt in range(2):  # 解题轮失败/空返回重试一次（治瞬时截断/空返回）
+            try:
+                _txt = await V._ainvoke_text(
+                    solve_messages, model=opus_model,
+                    max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
+                    temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
+                    timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
+                    public_stream=True,  # 🔴 解题正文流式吐前端打字机（看得见思路·不干等 117s）
+                    on_reasoning=V._emit_reasoning,
+                    prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题解题轮走 aigeek（仍 opus·只换网关）
+                )
+            except Exception as e:  # noqa: BLE001 — 解题轮调用异常（超时/全站失败）
+                _exc = e
+                if _attempt == 0:
+                    V._emit_stage("classify", "锚定考点", "running", "母题读图解题重试中…")
+                    continue
+                break
+            if _txt and _txt.strip():
+                _exc = None
+                break
             if _attempt == 0:
-                V._emit_stage("classify", "锚定考点", "running", "母题读图解题重试中…")
-                continue
-            break
-        if solved_text and solved_text.strip():
-            solve_exc = None
-            break
-        if _attempt == 0:
-            V._emit_stage("classify", "锚定考点", "running", "解题空返回，重读一次…")
+                V._emit_stage("classify", "锚定考点", "running", "解题空返回，重读一次…")
+        return _txt, _exc
+
+    # 并发：富文本化 ∥ 解题（gather；富文本化内已吞异常，return_exceptions 兜底解题侧不被波及）。
+    _rt_res, _solve_res = await asyncio.gather(
+        _run_richtext(), _run_solve(), return_exceptions=True,
+    )
+    richtext_stem: str = _rt_res if isinstance(_rt_res, str) else ""
+    if isinstance(_solve_res, tuple):
+        solved_text, solve_exc = _solve_res
+    else:  # _run_solve 抛了未捕获异常（理论不至于，gather 兜底）
+        solved_text, solve_exc = "", (_solve_res if isinstance(_solve_res, Exception) else None)
+
     if not (solved_text and solved_text.strip()):
         V._emit_stage("classify", "锚定考点", "error", "母题解题失败（opus 超时/空返回）")
+        V._emit_stage("solve", "解题", "warn", "母题解题失败（opus 超时/空返回）")
         V._emit_error("mother_solve_failed",
                       f"母题解题失败（{str(solve_exc)[:80] if solve_exc else '空返回'}），请重试或换更清晰的图。")
         return {
             "image_url": url, "_entry_finalized": False,
             "messages": [AIMessage(content="母题解题失败了（opus 超时或空返回），请重试或换一张更清晰的题目图。")],
         }
+    V._emit_stage("solve", "解题", "done", "母题已解出")
     solved_answer = _extract_solved_answer(solved_text)
     solved_solution = _strip_final_answer_marker(solved_text)
 
@@ -912,6 +1009,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     #   solvedAnswer 终钉 = R1 抠出的最终答案（R2 只整理打标，无权改答案）。
     # =========================================================================
     V._emit_stage("classify", "锚定考点", "running", "② 富文本整理 + 打标分类…")
+    V._emit_stage("label", "深度解析", "running", "深度解析 + 10 维打标分类…")
     struct_messages = build_struct_messages(
         image_url=img_for_llm, solved_solution=solved_solution, solved_answer=solved_answer,
         utterance=user_text or None, teacher_memory=teacher_memory,
@@ -931,7 +1029,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                 response_format=_rf,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
-                prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题打标轮也走 aigeek（用户 2026-06-22 拍板）
+                prefer_relay=None,  # 🔴 R6（2026-06-22 拍板）：打标轮改走 sui-xiang（默认网关·仍 opus·只换网关）
             )
         except Exception as e:  # noqa: BLE001 — 结构化轮调用异常
             opus_exc = e
@@ -956,17 +1054,30 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     if not isinstance(entry, dict):
         if opus_exc is not None:
             V._emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")
+            V._emit_stage("label", "深度解析", "warn", "深度解析/打标失败（opus 超时/异常）")
             V._emit_error("mother_opus_failed", f"母题读图解题失败（{str(opus_exc)[:80]}），请重试或换更清晰的图。")
             return {
                 "image_url": url, "_entry_finalized": False,
                 "messages": [AIMessage(content="母题读图解题失败了（opus 超时或异常），请重试或换一张更清晰的题目图。")],
             }
         V._emit_stage("classify", "锚定考点", "error", "母题富文本打标解析失败")
+        V._emit_stage("label", "深度解析", "warn", "深度解析/打标结果解析失败")
         V._emit_error("mother_opus_parse_fail", "母题富文本打标结果解析失败，请重试。")
         return {
             "image_url": url, "_entry_finalized": False,
             "messages": [AIMessage(content="母题富文本打标结果没解析出来，请重试。")],
         }
+    V._emit_stage("label", "深度解析", "done", "深度解析 + 10 维打标完成")
+
+    # 🔴 R6（2026-06-22 拍板）：富文本化轮（sui-xiang·只誊抄题面）的结果 = 最终 entry.stem 权威源。
+    #   非空 → 覆盖 R2 誊抄的 stem（下游 _finalize_high_conf / early_dna 统一从 entry.richText.stem
+    #   回填 mother_dna["stem"]，故只需在此处覆盖一处）；为空 → 保留 R2 的 stem 作兜底（绝不卡死）。
+    if richtext_stem and richtext_stem.strip():
+        _rich = entry.get("richText")
+        if not isinstance(_rich, dict):
+            _rich = {}
+        _rich["stem"] = richtext_stem
+        entry["richText"] = _rich
 
     # 🔴 R5：solvedAnswer 终钉 = R1 解题轮抠出的最终答案（R2 只整理打标，无权改答案）——
     #   根治「推导出 1 却硬填幻觉 12」的答案-推导矛盾（解题已在 R1 隔离完成、答案不再被打标轮改写）。

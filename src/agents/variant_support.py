@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
@@ -24,6 +25,8 @@ from agents.qtype_format import (
     format_by_qtype,
 )
 from core import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1075,8 +1078,18 @@ async def persist_items(
             and (facts.get("stem") or "").strip()
         ):
             try:
-                await client.promote_question(facts["mother_question_id"])
-                receipts.append({"ok": True, "id": facts["mother_question_id"], "role": "mother", "promoted": True})
+                # 🔴 PRD-A-022 批1 掉图回归修复：promote 只翻 status 不写内容，但母题切图
+                #   （mother_figure_url → stemImg + blockJson）是 assemble 落草稿之后才产的，
+                #   草稿行无图。故**先 update 写就绪的图，再 promote 翻 status**。
+                mid = facts["mother_question_id"]
+                try:
+                    mbo = build_mother_bo(facts)
+                    mbo["id"] = int(mid) if str(mid).isdigit() else mid
+                    await client.update_question(mbo)
+                except Exception as ue:  # noqa: BLE001 — update 失败仍 promote（草稿正文已在，别卡发布）
+                    logger.warning("母题入库前 update 写图失败（仍 promote）: %s", ue)
+                await client.promote_question(mid)
+                receipts.append({"ok": True, "id": mid, "role": "mother", "promoted": True})
             except Exception as e:  # noqa: BLE001 — 母题 promote 失败：变式仍照常落
                 receipts.append({"ok": False, "error": f"母题发布失败：{e}", "role": "mother"})
         # 🔴 PRD-C-015 批4·缺口10·母题已入库 + 母题 DNA 改了（mother_dirty）→ update role=mother 行
@@ -1102,7 +1115,15 @@ async def persist_items(
             await _flush_item_figure_base64_to_oss(item, client)
             try:
                 if publish and draft_id and not already_published:
-                    # 草稿 → 发布：promote 原行 status 0→1（id 不变，回执 id = draft_id）。
+                    # 草稿 → 发布：先 update 写就绪图，再 promote 翻 status 0→1（id 不变）。
+                    # 🔴 PRD-A-022 批1 掉图回归修复：变式图（item.figure_url → blockJson image 块）
+                    #   是 assemble 落草稿之后才产的，草稿行无图；promote 只翻 status 不写内容 →
+                    #   入库后掉图。故先 update_question(build_update_bo 经 build_create_bo 把 figure_url
+                    #   写进 blockJson)，再 promote。
+                    try:
+                        await client.update_question(build_update_bo(item, facts, draft_id))
+                    except Exception as ue:  # noqa: BLE001 — update 失败仍 promote（草稿正文已在，别卡发布）
+                        logger.warning("变式入库前 update 写图失败（仍 promote）draft_id=%s: %s", draft_id, ue)
                     await client.promote_question(draft_id)
                     receipts.append({"ok": True, "id": draft_id, "role": "variant", "promoted": True})
                 elif persist_id:

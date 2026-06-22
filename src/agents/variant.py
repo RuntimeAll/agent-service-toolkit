@@ -1342,6 +1342,25 @@ def _emit_reasoning(text: str) -> None:
         pass
 
 
+def _emit_richtext_stem(stem: str) -> None:
+    """🔴 R6 富文本化早帧（2026-06-22 三步编排第①步）：富文本化任务跑完即发，让 FE 占位区
+    尽早把母题原图替换成富文本题面（KaTeX 渲染），老师在解题/打标还在跑时就能读到干净题面。
+
+    契约 = ChatMessage(role="custom", content=[{"richtextStem": {"stem": <富文本题面>}}])
+      → 服务层 custom_data.richtextStem，FE pickRichtextStem 解析。
+    同 _emit_stage 双层静默吞（无 runtime context / writer 抛 → no-op，不炸节点）；空串不发。"""
+    if not stem or not stem.strip():
+        return
+    try:
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        writer(ChatMessage(content=[{"richtextStem": {"stem": stem}}], role="custom"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------------
 # artifact 快照帧（PRD-C-011 Bucket 3）：FE 题卡数据源 = 本帧，不 parse markdown。
 # 契约（BE/FE 严格一致）：ChatMessage(role="custom", content=[{"artifact": {
@@ -2866,7 +2885,8 @@ async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
         "confidence" in pin["reasons"]
         and float(q.get("confidence", 0) or 0) < CONF_GATE
     ):
-        asks.append(f"题型我读着像「{q.get('value') or '?'}」，对吗？")
+        _qtype_guess = q.get('value') or "新定义/非常规题，按解答处理可以吗？"
+        asks.append(f"题型我没把准（看着像「{_qtype_guess}」），对吗？")
     if not asks:
         asks.append("我对母题 DNA 还不够确定，请确认下年级/考点/题型再继续。")
 
@@ -3901,11 +3921,49 @@ def _normalize_generated_item(it: dict[str, Any], facts: dict) -> dict[str, Any]
 
 
 def _parse_generated_items(text: str, facts: dict) -> list[dict[str, Any]]:
-    """generate/重试共用：LLM 返回文本 → 规整 items（check 待 solve_explain 填）。"""
+    """generate/重试共用：LLM 返回文本 → 规整 items（check 待 solve_explain 填）。
+
+    🔴 PRD-A-023 B4/B8：opus 在「新定义题」术语处写**未转义 ASCII 双引号**（如 `的"$k$ 倍点"`）
+       破坏 JSON 字符串 → 裸 `json.loads` 炸 → 0 道。母题入口已有确定性解药
+       `_repair_json_quotes`（无副作用、不花钱、纯字符级扫描修引号），此处接进：
+       直接 parse 解出空时，先修引号再 parse 一次（参照 _repair_entry_json 用法）。
+    """
     data = _parse_json(text)
-    if not isinstance(data, list):
-        data = (data or {}).get("items") if isinstance(data, dict) else None
-    return [_normalize_generated_item(it, facts) for it in data or [] if isinstance(it, dict)]
+    extracted = _extract_items(data)
+    if extracted:
+        return [_normalize_generated_item(it, facts) for it in extracted if isinstance(it, dict)]
+    # 直接 parse 为空 → 引号修复后再试一次（确定性，懒导入防循环）
+    try:
+        from agents.variant_entry import _repair_json_quotes  # 懒导入防循环
+        repaired = _repair_json_quotes(text or "")
+    except Exception:  # noqa: BLE001 — 修复是兜底不是关卡，失败回落空
+        repaired = ""
+    if repaired and repaired != (text or ""):
+        data2 = _parse_json(repaired)
+        extracted2 = _extract_items(data2)
+        if extracted2:
+            _facts_log.warning(
+                "parse_generated_items: 引号修复救活 %d 道（修复前 0 道，根因=未转义引号）",
+                len(extracted2),
+            )
+            return [_normalize_generated_item(it, facts) for it in extracted2 if isinstance(it, dict)]
+    # 修复后仍空 → 区分「引号修复后仍空=多半截断」vs「修复前就空」便于后续观测
+    if text and text.strip():
+        _facts_log.warning(
+            "parse_generated_items: 解析为 0 道（引号修复亦未救活，疑似 JSON 截断/半截；text len=%d）",
+            len(text),
+        )
+    return []
+
+
+def _extract_items(data: Any) -> list[Any] | None:
+    """从已解析对象取 items 数组：顶层是数组直接用；是 {"items":[...]} 取之；否则 None。"""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        items = data.get("items")
+        return items if isinstance(items, list) else None
+    return None
 
 
 def _iter_complete_items(acc: str) -> list[dict[str, Any]]:
@@ -3937,10 +3995,23 @@ def _iter_complete_items(acc: str) -> list[dict[str, Any]]:
             start = stack.pop()
             if start <= consumed_end:
                 continue  # 包着已接受 item 的外层对象 → 不重复计
+            seg = acc[start : i + 1]
             try:
-                obj = json.loads(acc[start : i + 1])
-            except Exception:  # noqa: BLE001 — 闭合但不是合法 JSON → 不算（半截/脏文本）
-                continue
+                obj = json.loads(seg)
+            except Exception:  # noqa: BLE001 — 闭合但 json.loads 不过
+                # 🔴 PRD-A-023 B8：未转义引号致单题 json.loads 炸 → eager 上屏 0 道、右栏不增量。
+                #   套确定性引号修复再试一次（闭合花括号已配平，仅引号脏 → 修复后多可解）；
+                #   仍失败才算半截/脏文本不计。
+                obj = None
+                try:
+                    from agents.variant_entry import _repair_json_quotes  # 懒导入防循环
+                    repaired = _repair_json_quotes(seg)
+                    if repaired and repaired != seg:
+                        obj = json.loads(repaired)
+                except Exception:  # noqa: BLE001 — 修复亦失败 → 真半截/脏文本，跳过
+                    obj = None
+                if not isinstance(obj, dict):
+                    continue
             if isinstance(obj, dict) and "stem" in obj:
                 out.append(obj)
                 consumed_end = i
