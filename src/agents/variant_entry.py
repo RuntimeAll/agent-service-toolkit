@@ -91,15 +91,11 @@ def _build_entry_system_prefix(*, sentinel: bool = False, preset: bool = False) 
        均模块加载期各算一次缓存（前缀字节稳定 = aigeek 缓存友好），运行期按 settings + preset 选。"""
     exam_types = "/".join(dna_extract.EXAM_TYPES)
     books = "、".join(_GRADE_BOOKS)
-    # 🔴 解题纪律（含读图：阴影/填充可能多块，逐块圈定完整范围——治「只数一块阴影算错面积」3-vs-1 误读）。
-    #   preset / 非 preset 共用。
+    # 解题纪律（通用·preset/非preset 共用；不掺单一题型操作）。
     solve_discipline = (
-        "（一步步算到最终答案，不许抄图、不许跳步）。🔴 **解题纪律（直接决定母题对错，务必照做）**："
-        "**先把图读准再列式**——看清图中**到底哪些区域被标成阴影/填充/打斜线**，阴影**可能由多块组成**"
-        "（如两个图形各自露在外面的部分都算阴影），务必逐块圈定阴影的**完整**范围、别只数其中一块就列式；"
-        "条件/图形含义拿不准时按最自然的一种解释取定**并解到底**、别中途乱换解释；一步步推出干净答案后"
-        "**即定稿收手**——**信任你自己的正确推导，绝不为了凑某个心里预设的「标准答案/期望值」而推翻已得到的"
-        "正确结论、来回改答案、反复自我怀疑兜圈子**；与直觉不符最多复核一遍，确认无误就以你的推导为准、不再动摇。"
+        "（一步步算到最终答案，不抄图、不跳步，关键步代入原题验算）。🔴 **解题纪律**：含图先看清图中"
+        "图形/标注/已知量再列式；条件拿不准时取最自然的一种解释解到底、不中途乱换；验算通过的结果即唯一终答，"
+        "不要因「感觉不对/不合常理」推翻已验算的正确结论、反复改答案。"
     )
     if preset:
         head = (
@@ -254,40 +250,41 @@ ENTRY_SYSTEM_PREFIX: str = ENTRY_SYSTEM_PREFIX_JSON
 #   单轮 117s 黑屏干等。拆开后 R1 全部注意力放解题（public_stream 流式吐到对话气泡=看得见思路），
 #   R2 只忠实整理+打标（不重解、不改答案），解题对错与结构化解耦。
 # ===========================================================================
-# R1 解题轮系统前缀（字节稳定·无 preset 分版：年级册仅作学段红线，经人类消息后置注入）。
+# R1 解题轮系统前缀（字节稳定·三段式：角色 + 通用解题纪律 + 输出规范；不掺任何单一题型特化）。
 _SOLVE_SYSTEM_PREFIX: str = (
-    "你是浙教版初中数学**解题专家**。看这张母题图，你只做**一件事**：把这道题**准确地解出来**。"
-    "不打标、不判年级册、不输出 JSON——就是踏实把题解对。\n\n"
-    "================ 🔴 解题纪律（宁愿慢，也要准——直接决定母题对错，务必照做） ================\n"
-    "- **慢没关系，务必准。** 一步步算到最终答案，不许抄图、不许跳步。\n"
-    "- **先把图读准再列式**：看清图中**到底哪些区域被标成阴影/填充/打斜线**；阴影**可能由多块组成**"
-    "（如两个图形各自露在外面的部分都算阴影），逐块圈定阴影的**完整**范围，别只数其中一块就列式。\n"
-    "- 条件/图形含义拿不准时，按最自然的一种解释取定并**解到底**，别中途乱换解释。\n"
-    "- 关键步骤**代入原题验算**核对。\n"
-    "- 🔴 **数学题没有「标准答案应该是多少」的预设。** 代入验算通过的结果就是**唯一终答**；"
-    "**禁止因为「感觉太小/太大/不合常理/经验上这类题不会这样」而推翻已验算通过的正确结论、来回改答案、"
-    "反复自我怀疑兜圈子**。与直觉不符，最多复核一遍；确认无误，就以你的推导为准、不再动摇。\n"
-    "- 学段红线：解法不超出该年级进度（人类消息给了年级册就按它，否则按题目自然学段），"
-    "不许用更高年级才学的定理/方法绕过。\n\n"
-    "================ 输出 ================\n"
-    "写**给学生看的干净解题过程**（最终正确推导链，紧凑、一遍到底；数学式用行内 $...$，换行直接回车，"
-    "禁裸 LaTeX 命令）。**最后一行**用固定标记给出最终答案（供系统提取，务必照写、独占一行）：\n"
-    "【最终答案】<这里写最简短的最终答案，一行写完>"
+    "你是浙教版初中数学**解题专家**。把这道题准确解出来（含图先看清图中的图形、标注与已知量再列式）。\n\n"
+    "【解题纪律（通用）】\n"
+    "- 读图要**看全**：图中被标记/着色/所求的目标区域到底由哪些部分组成（可能不止一块），严格按图判断、别想当然只取一块；已知量与目标量都读全、别遗漏。\n"
+    "- 一步步推导到最终答案，不抄图、不跳步；关键步代入原题验算核对。\n"
+    "- 慢没关系、务必准：验算通过的结果即唯一终答，不要因「感觉不对/不合常理」推翻已验算的正确结论、反复改答案。\n"
+    "- 条件含义拿不准时取最自然的一种解释解到底，不中途乱换。\n"
+    "- 解法不超出给定年级学段（人类消息给了年级/章就按它）。\n\n"
+    "【输出】\n"
+    "先写给学生看的干净解题过程（数学式用行内 $...$，换行直接回车），最后一行用固定标记给出最终答案：\n"
+    "【最终答案】<最简短的最终答案，一行>"
 )
 
 
 def build_solve_messages(
     *, image_url: str, utterance: str | None = None, teacher_memory: str | None = None,
-    preset_grade_book: str | None = None,
+    preset_grade_book: str | None = None, preset_chapter: str | None = None,
 ) -> list[Any]:
-    """R1 解题轮消息：稳定 system 前缀（解题纪律）‖ 变量后缀（题图 + 年级学段约束 + 背景语境 + 记忆）。"""
+    """R1 解题轮消息：稳定 system 前缀（解题纪律）‖ 变量后缀（题图 + 年级/章学段约束 + 背景语境 + 记忆）。"""
     from langchain_core.messages import SystemMessage
 
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
-    if preset_grade_book:
+    if preset_grade_book or preset_chapter:
+        # 🔴 老师已定年级册 + 章 → 都注入学段约束，解题方法收窄到该章进度（之前漏注章）。
+        _scope = "、".join(
+            x for x in (
+                f"年级册 = 「{preset_grade_book}」" if preset_grade_book else "",
+                f"章 = 「{preset_chapter}」" if preset_chapter else "",
+            ) if x
+        )
         var_text_segs.append(
-            f"【学段约束】本题年级册 = 「{preset_grade_book}」，解法不得超出该册进度。"
+            f"【🔴 老师已确定的范围】本题{_scope}。**解题方法必须落在该章/该册进度内**，"
+            "不许用更高年级或本章之后才学的定理/方法绕过——按老师定的章的解法来解。"
         )
     if utterance:
         var_text_segs.append(f"【老师附带的背景语境（参考，不影响解题本身）】{utterance}")
@@ -336,7 +333,7 @@ def build_entry_messages(
         #   前缀）；系统前缀已用 preset 版（砍①判年级）。让模型直接采用、专注读图解题。
         var_text_segs.append(
             f"【🔴 老师已确定】本题年级册 = 「{preset_grade_book}」。gradeBook 直接填它、confidence=1.0、"
-            "gradeCandidates/chapterCandidates 留空，**不要再自行判定年级册**；把全部注意力放在看清图中阴影/条件、严谨解题上。"
+            "gradeCandidates/chapterCandidates 留空，**不要再自行判定年级册**；专注严谨读图解题。"
         )
     if utterance:
         # 🔴 R2b·U8：哨兵模式输出 = JSON + 三哨兵框（不是「只一个 JSON」），措辞按模式区分，
@@ -376,9 +373,9 @@ def _build_struct_label_prefix(*, sentinel: bool = False, preset: bool = False) 
             "+ **解题已由解题专家完成**（下方人类消息附**权威解答**）。你**绝不重新解题、绝不改动答案与解题路径**，"
             "gradeBook 直接照老师给的填、confidence=1.0、gradeCandidates/chapterCandidates 留空（章 chapter 可如实填）。"
             "只做两件事：\n"
-            "② **忠实把已给的权威解答整理成富文本三段**（题面/答案/解析）——只做排版结构化与誊清，"
-            "**数学结论/最终答案/解题路径一字不改，不补漏、不润色、不重新推导**；analysis 就是把已给解法理顺成"
-            "给学生看的干净链路；solvedAnswer 直接填已给的最终答案。\n"
+            "② **忠实产出富文本三段**——🔴 **stem(题面) = 照图中原题逐字誊抄**（条件/数字/单位/选项一字不改，"
+            "不补不删不改写，只做 $LaTeX$/换行排版）；**answer/analysis = 据已给权威解答整理**（数学结论/最终答案/"
+            "解题路径一字不改，不补漏不润色不重新推导，analysis 理顺成给学生看的干净链路）；solvedAnswer 填已给最终答案。\n"
             "③ **据已解出的答案做 10 维 DNA 打标**（母题是所有变式的基准，务必稳准）。"
         )
         grade_block = ""
@@ -388,9 +385,9 @@ def _build_struct_label_prefix(*, sentinel: bool = False, preset: bool = False) 
             "你是浙教版初中数学**题库打标师**。🔴 本题**解题已由解题专家完成**（下方人类消息附**权威解答**）——"
             "你**绝不重新解题、绝不改动答案与解题路径**。按顺序做三件事并一次输出：\n"
             "① **判年级册 + 章 + 置信度**（判定母题属于哪个教材册、哪一章，给整体置信 0~1，拿不准给候选）；\n"
-            "② **忠实把已给的权威解答整理成富文本三段**（题面/答案/解析）——只做排版结构化与誊清，"
-            "**数学结论/最终答案/解题路径一字不改，不补漏、不润色、不重新推导**；analysis 就是把已给解法理顺成"
-            "给学生看的干净链路；solvedAnswer 直接填已给的最终答案。\n"
+            "② **忠实产出富文本三段**——🔴 **stem(题面) = 照图中原题逐字誊抄**（条件/数字/单位/选项一字不改，"
+            "不补不删不改写，只做 $LaTeX$/换行排版）；**answer/analysis = 据已给权威解答整理**（数学结论/最终答案/"
+            "解题路径一字不改，不补漏不润色不重新推导，analysis 理顺成给学生看的干净链路）；solvedAnswer 填已给最终答案。\n"
             "③ **据已解出的答案做 10 维 DNA 打标**（母题是所有变式的基准，务必稳准）。"
         )
         grade_block = (
@@ -445,28 +442,40 @@ def _struct_prefix(preset: bool = False) -> str:
 def build_struct_messages(
     *, image_url: str, solved_solution: str, solved_answer: str,
     utterance: str | None = None, teacher_memory: str | None = None,
-    preset_grade_book: str | None = None,
+    preset_grade_book: str | None = None, preset_chapter: str | None = None,
 ) -> list[Any]:
-    """R2 结构化打标消息：稳定 system 前缀 ‖ 变量后缀（题图 + 🔴R1 权威解答 + 年级 + 背景 + 记忆）。
+    """R2 结构化打标消息：稳定 system 前缀 ‖ 变量后缀（题图 + 🔴R1 权威解答 + 年级/章 + 背景 + 记忆）。
 
     solved_solution = R1 解题正文（已去【最终答案】标记）；solved_answer = R1 抠出的最终答案。
-    二者作「权威解答」注入人类消息，R2 据此忠实整理 + 打标，绝不重解。
+    🔴 题面(stem) 忠实誊抄**图中原题**（不是从解答倒推）；答案/解析据 R1 权威解答整理。
     """
     from langchain_core.messages import SystemMessage
 
     _preset = bool(preset_grade_book)
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
-    # 🔴 R1 权威解答（核心注入）：放最前，明确「照此整理打标，不重解、不改答案」。
+    # 🔴 忠于原文头条铁律（用户反馈「忠于原文没做到·原文没配对」）：题面来源 = 图中原题，不是解答倒推。
+    var_text_segs.append(
+        "【🔴 忠于原文·头条铁律】richText.stem（题面）= **照这张图里的原题逐字誊抄**（条件/数字/单位/"
+        "选项 ABCD 一字不改、不补不删不改写、不替换成解答里的说法），只做 $LaTeX$/换行排版结构化；"
+        "richText.answer 与 richText.analysis 才据下方 R1 权威解答整理。**题面忠实图、答案解析忠实解答，两者别串。**"
+    )
+    # 🔴 R1 权威解答（核心注入）：明确「答案/解析照此整理，不重解、不改答案」。
     _ans_line = f"最终答案 = {solved_answer}\n\n" if solved_answer else ""
     var_text_segs.append(
-        "【🔴 本题解题已由解题专家完成·以下为权威解答（照此忠实整理富文本 + 打标，**绝不重新解题、"
+        "【🔴 本题解题已由解题专家完成·以下为权威解答（answer/analysis 照此忠实整理，**绝不重新解题、"
         f"绝不改动答案与解题路径**；solvedAnswer 直接填下方最终答案）】\n{_ans_line}解题过程：\n{solved_solution}"
     )
-    if _preset:
+    if _preset or preset_chapter:
+        _scope = "、".join(
+            x for x in (
+                f"年级册 = 「{preset_grade_book}」" if preset_grade_book else "",
+                f"章 = 「{preset_chapter}」" if preset_chapter else "",
+            ) if x
+        )
         var_text_segs.append(
-            f"【🔴 老师已确定】本题年级册 = 「{preset_grade_book}」。gradeBook 直接填它、confidence=1.0、"
-            "gradeCandidates/chapterCandidates 留空，不要再自行判定年级册。"
+            f"【🔴 老师已确定的范围】本题{_scope}。gradeBook 直接填年级册名、confidence=1.0、"
+            "gradeCandidates/chapterCandidates 留空，不要再自行判定年级册；打标考点落在该章范围内。"
         )
     if utterance:
         from core import settings as _settings
@@ -789,13 +798,17 @@ def decide_confirm(entry: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def read_preset(config: RunnableConfig | None) -> dict[str, str] | None:
     """从 config.configurable 取老师预设范围。返回
-       {grade_book:str, chapter_id:str}（任一可为空串，但至少一个非空才返回 dict）；都没传 → None。"""
+       {grade_book:str, chapter_id:str, chapter_name:str}（grade_book/chapter_id 至少一个非空才返回）；
+       都没传 → None。
+    🔴 chapter_name（老师在选择器亲选的章人话名，如「第5章 一元一次方程」）→ 注入 R1/R2 prompt 学段约束：
+       之前只注年级册、漏了章，模型解题/打标缺章语境（用户反馈「定下的章节没注入」）。"""
     conf = ((config or {}).get("configurable") or {}) if config else {}
     grade_book = str(conf.get("preset_grade_book") or "").strip()
     chapter_id = str(conf.get("preset_chapter_id") or "").strip()
+    chapter_name = str(conf.get("preset_chapter_name") or "").strip()
     if not grade_book and not chapter_id:
         return None
-    return {"grade_book": grade_book, "chapter_id": chapter_id}
+    return {"grade_book": grade_book, "chapter_id": chapter_id, "chapter_name": chapter_name}
 
 
 def _match_kp_in_pool(name: str, leaf_pool: list[tuple[str, str]]) -> str | None:
@@ -866,6 +879,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     img_for_llm = await _to_b64_data_url(url)
     _preset_for_prompt = read_preset(config)
     _preset_grade = (_preset_for_prompt or {}).get("grade_book")
+    _preset_chapter = (_preset_for_prompt or {}).get("chapter_name")  # 🔴 老师定的章人话名，注入 R1/R2
     opus_model = V.settings.variant_model("mother_solve_label")  # fail-fast 已锁 opus
 
     # =========================================================================
@@ -875,7 +889,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     V._emit_stage("classify", "锚定考点", "running", "① 解题中（一步步算，求稳准）…")
     solve_messages = build_solve_messages(
         image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
-        preset_grade_book=_preset_grade,
+        preset_grade_book=_preset_grade, preset_chapter=_preset_chapter,
     )
     solved_text = ""
     solve_exc: Exception | None = None
@@ -918,7 +932,8 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     V._emit_stage("classify", "锚定考点", "running", "② 富文本整理 + 打标分类…")
     struct_messages = build_struct_messages(
         image_url=img_for_llm, solved_solution=solved_solution, solved_answer=solved_answer,
-        utterance=user_text or None, teacher_memory=teacher_memory, preset_grade_book=_preset_grade,
+        utterance=user_text or None, teacher_memory=teacher_memory,
+        preset_grade_book=_preset_grade, preset_chapter=_preset_chapter,
     )
     entry: Any = None
     opus_exc: Exception | None = None

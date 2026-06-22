@@ -235,11 +235,11 @@ class TestReadPreset:
 
     def test_grade_only(self):
         p = read_preset({"configurable": {"preset_grade_book": "八年级下册"}})
-        assert p == {"grade_book": "八年级下册", "chapter_id": ""}
+        assert p == {"grade_book": "八年级下册", "chapter_id": "", "chapter_name": ""}
 
     def test_chapter_only(self):
         p = read_preset({"configurable": {"preset_chapter_id": "3082002"}})
-        assert p == {"grade_book": "", "chapter_id": "3082002"}
+        assert p == {"grade_book": "", "chapter_id": "3082002", "chapter_name": ""}
 
     def test_both(self):
         p = read_preset({"configurable": {
