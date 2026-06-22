@@ -415,7 +415,7 @@ def _build_struct_label_prefix(*, sentinel: bool = False, preset: bool = False) 
 
 ================ 富文本红线（题面/答案/解析） ================
 🔴 数学式用行内 $...$；换行用真实换行（直接回车，不要写字面 \\n）；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数配对完整（下游有机器闸逐项检）。
-🔴 **analysis/解析 = 把已给权威解答誊成给学生看的干净最终解法**：数学式优先 $LaTeX$、推导紧凑；**忠实已给解法，只写正确的最终推导链，禁止改答案/改路径，禁止写试错/回头/反复估算等草稿过程**。
+🔴 analysis 只写干净的最终推导链，禁止写试错/回头/反复估算等草稿过程。
 🔴 has_figure：题面真含图形/图表/几何图填 true；只是拍照的纯文本题填 false。
 {{rich_output_block}}"""
     block = (_RICH_BLOCK_SENTINEL if sentinel else _RICH_BLOCK_JSON).replace(
@@ -455,16 +455,11 @@ def build_struct_messages(
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
     # 🔴 忠于原文头条铁律（用户反馈「忠于原文没做到·原文没配对」）：题面来源 = 图中原题，不是解答倒推。
-    var_text_segs.append(
-        "【🔴 忠于原文·头条铁律】richText.stem（题面）= **照这张图里的原题逐字誊抄**（条件/数字/单位/"
-        "选项 ABCD 一字不改、不补不删不改写、不替换成解答里的说法），只做 $LaTeX$/换行排版结构化；"
-        "richText.answer 与 richText.analysis 才据下方 R1 权威解答整理。**题面忠实图、答案解析忠实解答，两者别串。**"
-    )
-    # 🔴 R1 权威解答（核心注入）：明确「答案/解析照此整理，不重解、不改答案」。
+    # 🔴 R1 权威解答（核心注入）：stem 照图誊抄 / answer·analysis 照此解答整理（忠于原文规则在 system 已给，此处只提一句不重复）。
     _ans_line = f"最终答案 = {solved_answer}\n\n" if solved_answer else ""
     var_text_segs.append(
-        "【🔴 本题解题已由解题专家完成·以下为权威解答（answer/analysis 照此忠实整理，**绝不重新解题、"
-        f"绝不改动答案与解题路径**；solvedAnswer 直接填下方最终答案）】\n{_ans_line}解题过程：\n{solved_solution}"
+        "【🔴 权威解答（题面照图誊抄；answer/analysis 照此整理，绝不重解、绝不改答案）】"
+        f"\n{_ans_line}解题过程：\n{solved_solution}"
     )
     if _preset or preset_chapter:
         _scope = "、".join(
