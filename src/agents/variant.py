@@ -244,6 +244,10 @@ def _auto_verify_on(config: RunnableConfig | None = None) -> bool:
 _ITEMS_PRESERVE_ALWAYS: tuple[str, ...] = (
     "_persist_id",      # 在库雪花 id（防重落库 / 覆盖入库键）——重组漏带会致重复落行
     "persisted",        # 已入库标记
+    "_draft_id",        # 🔴 PRD-A-022 批1：assemble 自动落的草稿行雪花 id（status=0，未发布）——
+    #                     跨轮重组（排序/编辑非替换路径）漏带会致 assemble 重复落草稿；与 _persist_id
+    #                     同口径走 PRESERVE_ALWAYS 续上。重生（换题）路径显式 strip（不 carry 旧草稿 id），
+    #                     由 assemble 对新题重落新草稿，与本续上正交（new 已带=不覆盖，new 缺才回填）。
     "_content_dirty",   # 已入库题内容已改待覆盖
     "question_id",      # FE 进 A-015 编辑器用
     "manual_edited",    # 老师手改印记（重生前二次确认 + 闸B 不回炉）
@@ -3069,6 +3073,9 @@ def _mother_facts(state: VariantState) -> dict:
         "subject_id": subject_l1,  # 科目锚 level1（学段学科册）
         "dim1_kp_id": anchored.get("code"),  # 主 kp 叶子 code（DNA 锚到的真知识点）
         "mother_question_id": mdna.get("mother_question_id"),
+        # 🔴 PRD-A-022 批1：母题草稿是否已发布（autodraft 落母题草稿后此为 False；publish promote 后置 True）。
+        #   persist_items publish 据此决定「promote 母题草稿」还是「跳过」（已发布幂等不重 promote）。
+        "mother_published": bool(mdna.get("mother_published")),
         # 🔴 PRD-C-015 批4·缺口10：母题脏（守恒维改）→ persist_items 据此 update 已入库 role=mother 行。
         "mother_dirty": bool(mdna.get("dirty")),
         # 🔴 图母题不在库 → 入库时先把母题(原题)也落库挂血缘，下面这几项给 build_mother_bo 用
@@ -5594,6 +5601,28 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     state = {**state, "items": items}  # 覆盖后的 difficulty + 排序后的序随 state 流给快照/入库
     facts = _mother_facts(state)
 
+    # 🔴 PRD-A-022 批1·自动落草稿：题组定稿即逐题落「草稿」(status=0)，让「换一批/全部入库」走
+    #   草稿生命周期（入库=promote 0→1 不重落；换一批=discard 0→2 软删）。
+    #   - 幂等：item 已有 _draft_id 或 persisted → 跳过；母题 mother_question_id 已有 → 跳过。
+    #   - 🔴 best-effort 铁律：落草稿**失败绝不阻塞题组展示** —— try/except 全包，失败只 emit warn
+    #     stage + log，items/artifact 照常返回（题组必须照常显示）。回写 _draft_id 经 merge_items
+    #     reducer（_ITEMS_PRESERVE_ALWAYS 已含 _draft_id）跨轮安全续上。
+    #   🔴 仅在有登录老师 token 时落草稿（草稿须归属老师；无 token 的 regression/直连脚本不落草稿，
+    #     入库时走「兜底 create status=1 直接发布」，行为对齐旧链路、且测试零网络）。
+    mother_qid_update: dict[str, Any] | None = None
+    token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
+    if token:
+        try:
+            drafted_items, new_mother_qid, _ok = await _autodraft_items(items, facts, token)
+            items = drafted_items
+            if new_mother_qid is not None and not (state.get("mother_dna") or {}).get("mother_question_id"):
+                mother_qid_update = dict(state.get("mother_dna") or {}, mother_question_id=new_mother_qid)
+                state = {**state, "mother_dna": mother_qid_update}
+            state = {**state, "items": items}  # 回写带 _draft_id 的 items → 快照/返回都带草稿态
+        except Exception as e:  # noqa: BLE001 — 落草稿失败绝不阻塞题组展示（best-effort 铁律）
+            _emit_stage("persist", "存草稿", "warn", "草稿暂存失败，不影响出题")
+            _facts_log.warning(f"assemble autodraft failed (best-effort, group still shown): {e}")
+
     # 配方外显：有 knobs → "按你的要求: ..."；无 → 旧默认文案（行为不变）
     desc = knobs_desc(state.get("knobs"))
     recipe_s = f"按你的要求：{desc}" if desc else "配方：默认 3 = 2 普通 + 1 难"
@@ -5616,7 +5645,11 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     # artifact 快照帧（PRD-C-011）：每轮题组变化都过 assemble → FE 题卡每轮拿最新快照
     _emit_artifact(state)
     # 🔴 回写 items：P8 难度总评覆盖的 difficulty + P9 排序后的序必须落进 graph state，入库/快照才跟随
-    return {"items": items, "llm_call_budget": budget, "messages": [AIMessage(content=head)]}
+    #   ＋ PRD-A-022：回写 _draft_id（在 items 里）+ 母题草稿 id（mother_dna，仅本轮新落母题草稿时）。
+    ret: VariantState = {"items": items, "llm_call_budget": budget, "messages": [AIMessage(content=head)]}
+    if mother_qid_update is not None:
+        ret["mother_dna"] = mother_qid_update
+    return ret
 
 
 # ===========================================================================
@@ -6034,6 +6067,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                 if op.get("note"):
                     notes[t] = str(op.get("note"))
 
+    drafts_to_discard: list[Any] = []  # 🔴 PRD-A-022：被替换掉的旧草稿 id（未发布）→ 末尾软删
     for t in targets:
         old = items[t]
         # 🔴 F5：本题额外要求 = per-target note + pending 级 extra_constraints/comp（任一为空跳过）。
@@ -6081,14 +6115,19 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
             # 4a：重出稿自带的验算载荷随新题走（REGEN_PROMPT 契约产出）
             if isinstance(regen.get("verify_payload"), dict):
                 new_item["verify_payload"] = regen["verify_payload"]
-            # 配方印记 + 入库簿记跟题走（PRD-A-018 M1②：比照 exec_solution_only:5763 /
-            #   regen_dirty_items:6871，carry _seq/persisted/_persist_id；不 carry → 重出后该题
-            #   persisted/_persist_id 丢失 → 再入库走 create 重复落行）。
+            # 配方印记 + 入库簿记跟题走（PRD-A-018 M1②：carry _seq/persisted/_persist_id；不 carry
+            #   → 重出后该题 persisted/_persist_id 丢失 → 再入库走 create 重复落行）。
+            # 🔴 PRD-A-022：**绝不 carry _draft_id**（不在白名单）——旧草稿被这道新题替换，新题
+            #   无 _draft_id，由 assemble 重落新草稿；旧草稿（未发布）下面收集去 discard 软删。
             for k in ("_seq", "persisted", "_persist_id", "level"):  # R4·F17: 去死键 from_recipe/expected_difficulty
                 if old.get(k) is not None:
                     new_item[k] = old[k]
             # 已入库题被改造重出 → 内容已变 → 标「内容已编辑待覆盖」，入库走 _persist_id 覆盖原行。
             mark_content_dirty_if_persisted(new_item)
+            # 🔴 PRD-A-022：旧草稿（有 _draft_id 且未发布）被替换 → 收集软删（已发布题不 discard）。
+            _did = _draft_id_to_discard(old)
+            if _did is not None:
+                drafts_to_discard.append(_did)
             # 🔴 RC2（PRD-C-013）：编辑轮产物打 from_edit 印记 → 重入 gene_gate 时只判不回炉
             # （老师已点名改造，基因闸判不过只标 warn，不重出覆盖老师意志）；老师 note 存 edit_note，
             # 任何下游 REGEN（闸B 验算回炉）都注回，不被失败原因冲掉。
@@ -6096,6 +6135,9 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
             if t in notes:
                 new_item["edit_note"] = notes[t]
             items[t] = new_item
+    # 🔴 PRD-A-022·best-effort 软删被替换掉的旧草稿（绝不阻塞，token 缺/失败仅 log）。
+    token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
+    await _discard_drafts_best_effort(drafts_to_discard, token)
     # 🔴 编辑轮清陈旧缺陷外显（同 exec_remove 注释）
     return {
         "items": items,
@@ -6396,6 +6438,9 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
             new_it["from_edit"] = True  # 闸B 见 from_edit：FAIL 不回炉换题、保留打 ⚠ 交人审
             new_it["edit_note"] = f"解题方法约束：{method_constraint}"
             new_it.pop("check", None)
+            # 🔴 PRD-A-022：解析已变 → 旧草稿内容失效，strip _draft_id（dict(it) 复制带过来的）→
+            #   assemble 重落新草稿（带新解析）；旧草稿（未发布）由末尾 discard 软删。已发布题不动 _draft_id 本就无。
+            new_it.pop("_draft_id", None)
             # 🔴 PRD-A-018 F16：已入库题重写解析后内容已变 → 标「内容已编辑待覆盖」，
             #   否则 persist_to_bank「已入库就跳过」→ 新解析永不落库（F16 根）。
             mark_content_dirty_if_persisted(new_it)
@@ -6444,6 +6489,16 @@ async def exec_solution_only(state: VariantState, config: RunnableConfig) -> Var
     new_items = await asyncio.gather(*[_guarded(i, it) for i, it in enumerate(items)])
     for it in new_items:
         _format_item_stem(it)
+    # 🔴 PRD-A-022·best-effort 软删被替换掉的旧草稿：某题旧有未发布 _draft_id 但新题已无 _draft_id
+    #   （= 解析重写/单题重出，草稿内容失效）→ 软删旧草稿。warn 兜底分支保留原题原 _draft_id →
+    #   新题仍带 _draft_id → 不入收集，不误删。assemble 会对无 _draft_id 的新题重落新草稿。
+    drafts_to_discard = [
+        _draft_id_to_discard(old)
+        for old, new in zip(items, new_items)
+        if _draft_id_to_discard(old) is not None and not new.get("_draft_id")
+    ]
+    token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
+    await _discard_drafts_best_effort(drafts_to_discard, token)
     _emit_stage("solution", "按新方法重写解析", "done", f"{len(new_items)} 道")
     # 🔴 解法修正改了题集内容（解析/个别题面）→ 清陈旧缺陷外显，回 assemble 收口快照
     update["items"] = list(new_items)
@@ -6485,8 +6540,10 @@ async def editor_entry(state: VariantState, config: RunnableConfig) -> VariantSt
             # 手动重生待重生集合（None/空=全 dirty 集合；显式 indexes=force 整题重出，helper 内判）。
             # helper 内部已跑闸B + 清 dirty + 清 check（_check_one_item）。
             idxs = op.get("indexes")
+            # 🔴 PRD-A-022：透传 token → regen_dirty_items 软删被替换掉的旧草稿（best-effort）。
+            _regen_token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
             update, _result, error = await regen_dirty_items(
-                state, idxs if isinstance(idxs, list) and idxs else None,
+                state, idxs if isinstance(idxs, list) and idxs else None, token=_regen_token,
             )
         elif kind == "edit-item":
             # 单题手动编辑（零 LLM）：edit_item_state 已把 check 置 manual 中性（待 reverify）。
@@ -6663,6 +6720,74 @@ async def ask_clarify(state: VariantState, config: RunnableConfig) -> VariantSta
     return {"messages": [AIMessage(content=body)], "pending": None}
 
 
+# --- 换一批/重生·软删旧草稿（PRD-A-022 批1）：被替换掉的旧草稿(status=0) → discard 0→2 -----
+def _draft_id_to_discard(old_item: dict[str, Any]) -> Any:
+    """🔴 重生/换题时取「应软删的旧草稿 id」：仅当 old 是**未发布草稿**（有 _draft_id 且 not persisted）。
+
+    已发布题（persisted=True，走 _persist_id 覆盖原行语义）绝不 discard——返回 None。
+    纯函数（可单测）：返回 old._draft_id 或 None。
+    """
+    if old_item.get("persisted"):
+        return None
+    return old_item.get("_draft_id") or None
+
+
+async def _discard_drafts_best_effort(ids: list[Any], token: str | None) -> None:
+    """🔴 best-effort 软删旧草稿（换一批/重生）：调 discard_drafts（owner+仅草稿双约束，传整组旧 id 安全）。
+
+    绝不抛、绝不阻塞重生主链——失败只 log。token 缺 / ids 空 → no-op。
+    BE discard 只改 status='0' 行，已发布(1)行天然不受影响（即便误传也无副作用）。
+    """
+    clean = [i for i in (ids or []) if i not in (None, "")]
+    if not clean:
+        return
+    try:
+        client = RuoyiClient(token=token)
+        try:
+            await client.discard_drafts(clean)
+        finally:
+            await client.aclose()
+    except Exception as e:  # noqa: BLE001 — 软删失败绝不卡重生（旧草稿留存无害，从此无 item 指向它）
+        _facts_log.warning(f"discard_drafts best-effort failed (regen continues): {e}")
+
+
+# --- 自动落草稿（PRD-A-022 批1）：assemble 收尾即把题组逐题落「草稿」(status=0) ----------
+async def _autodraft_items(
+    items: list[dict[str, Any]], facts: dict[str, Any], token: str | None
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
+    """🔴 PRD-A-022 批1·assemble 自动落草稿：对**还没草稿/没发布**的题逐题 create（status=0=草稿）。
+
+    幂等：item 已有 _draft_id 或 persisted=True → 跳过（不重复建）；母题 mother_question_id 已有 → 跳过。
+    回写：variant 回执 id → item._draft_id；mother 回执 id → mother_question_id（母题落的也是草稿）。
+
+    🔴 best-effort：复用 persist_items（逐题 POST create，默认 status=0），但**绝不抛**——本函数
+       内部已 try 兜底由调用方再 try（双层防御），返回 (回写后 items, mother_question_id 或 None, 是否真落过)。
+       token 缺/落库失败 → items 原样返回、ok=False，调用方据此 emit warn（题组照常展示）。
+
+    返回 (new_items, new_mother_qid, ok)：
+      - new_items：回写了 _draft_id 的新 list（已跳过的题不变）。
+      - new_mother_qid：母题草稿 id（本次新落才有；母题已在库/未落 → None）。
+      - ok：是否成功走完（True=调过 persist_items 且无整体异常；False=未落/异常，但 items 仍可用）。
+    """
+    # 幂等过滤：只对「无草稿 且 未发布」的题落草稿。
+    pending_idx = [
+        i for i, it in enumerate(items)
+        if not (it.get("_draft_id") or it.get("persisted"))
+    ]
+    if not pending_idx:
+        return items, None, True  # 全有草稿/已发布 → 无需重落（幂等空操作，视为成功）
+    pending_items = [items[i] for i in pending_idx]
+    receipts = await persist_items(pending_items, facts, token=token)
+    var_receipts = [r for r in receipts if r.get("role") != "mother"]
+    mother = next((r for r in receipts if r.get("role") == "mother"), None)
+    new_items = [dict(it) for it in items]
+    for j, r in zip(pending_idx, var_receipts):
+        if r.get("ok") and r.get("id") is not None:
+            new_items[j]["_draft_id"] = r.get("id")  # 草稿行雪花 id（status=0），入库时 promote 用
+    new_mother_qid = mother.get("id") if (mother and mother.get("ok") and mother.get("id") is not None) else None
+    return new_items, new_mother_qid, True
+
+
 # --- 确认入库（设计 §7）：变式+解析经 RuoYi 写老师个人题库，只写不判 -----------
 async def persist_to_bank(state: VariantState, config: RunnableConfig) -> VariantState:
     """④ 入库：老师"这组可以了" → 逐题 POST /teacher/question/create（teacher token 定 owner）。
@@ -6709,7 +6834,9 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     token = (config.get("configurable") or {}).get("ruoyi_token") if config else None
     _emit_stage("persist", "入库", "running", f"{len(pending_items)} 道")
     try:
-        receipts = await persist_items(pending_items, facts, token=token)
+        # 🔴 PRD-A-022：publish=True → 草稿 promote 0→1（不重 create）；已发布编辑过 → update 覆盖；
+        #   无草稿无发布 id 兜底 → create status='1' 直接发布。
+        receipts = await persist_items(pending_items, facts, token=token, publish=True)
     except Exception as e:  # noqa: BLE001 — 登录/网络整体失败 → 友好兜底，不崩
         _emit_stage("persist", "入库", "warn", "连不上题库服务")
         return {
@@ -6735,11 +6862,14 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     for j, r in zip(pending_idx, var_receipts):
         if r.get("ok"):
             new_items[j]["persisted"] = True
-            # 🔴 M1①（PRD-A-018 簇1）：回写 _persist_id（对齐 persist_one_to_bank:6033-6035）。
-            #   不回写 → 重生/编辑后再入库时 item 无 _persist_id → persist_items 走 create 而非
-            #   update → 整组重复落行（M1 根）。create 回执无 id 时保留旧 _persist_id（覆盖入库已有）。
+            # 🔴 M1①（PRD-A-018 簇1）：回写 _persist_id（对齐 persist_one_to_bank）。promote 回执
+            #   id = 草稿行 id（原行就地改 status，id 不变）→ _persist_id 即原 _draft_id。
+            #   不回写 → 重生/编辑后再入库时 item 无 _persist_id → 整组重复落行（M1 根）。
             if r.get("id") is not None:
                 new_items[j]["_persist_id"] = r.get("id")
+            # 🔴 PRD-A-022：草稿已发布 → 清 _draft_id（从此走「已发布」语义：编辑走 _persist_id 覆盖，
+            #   不再被 autodraft/换一批 当草稿处理）。
+            new_items[j].pop("_draft_id", None)
             # 落库即清「内容已编辑待覆盖」标记（已覆盖入库，本轮内容已同步到库行）。
             new_items[j].pop("_content_dirty", None)
         else:
@@ -6747,23 +6877,29 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
     update: VariantState = {"items": new_items}
     if mother and mother.get("ok") and mother.get("id") is not None:
         # persist_items 的 mother_question_id 回填发生在局部 facts 副本上 → 这里落回 state，
-        # 重试/后续入库走「母题已在库」分支，不再重复建母题
-        update["mother_dna"] = dict(state.get("mother_dna") or {}, mother_question_id=mother.get("id"))
+        # 重试/后续入库走「母题已在库」分支，不再重复建母题。
+        # 🔴 PRD-A-022：母题本次已发布（create status=1 / promote）→ 标 mother_published=True，
+        #   后续 publish 不再重 promote（幂等）。
+        update["mother_dna"] = dict(
+            state.get("mother_dna") or {},
+            mother_question_id=mother.get("id"),
+            mother_published=True,
+        )
 
     # artifact 更新快照（PRD-C-011）：按回写后的 items 组帧（_artifact_payload 读 item.persisted）
     _emit_artifact({**state, "items": new_items})
 
     lines = [f"## 入库完成 · 变式 {len(pending_items)} 道，成功 {len(ok)} 道"]
     if n_skipped:
-        lines.append(f"（另有 {n_skipped} 道此前已收录，本次跳过、未重复入库。）")
-    # 母题(原题)入库回执：图母题不在库 → 先落原题挂血缘
+        lines.append(f"（另有 {n_skipped} 道此前已发布，本次跳过、未重复入库。）")
+    # 母题(原题)发布回执：图母题草稿一并发布 → 挂血缘
     if mother and mother.get("ok"):
-        lines.append(f"📌 原题(母题)已一并入库，ID：{mother.get('id')}，变式都挂在它名下（血缘可追）。")
+        lines.append(f"📌 原题(母题)已一并发布到题库，ID：{mother.get('id')}，变式都挂在它名下（血缘可追）。")
     elif mother and not mother.get("ok"):
-        lines.append(f"⚠ 原题入库失败（变式仍已落，血缘暂缺）：{mother.get('error')}")
+        lines.append(f"⚠ 原题发布失败（变式仍已落，血缘暂缺）：{mother.get('error')}")
     if ok:
         ids = [str(r.get("id")) for r in ok if r.get("id") is not None]
-        lines.append("已落入你的个人题库（来源标记「举一反三」）。" + (f"变式 ID：{', '.join(ids)}" if ids else ""))
+        lines.append("已发布到你的个人题库（来源标记「举一反三」）。" + (f"变式 ID：{', '.join(ids)}" if ids else ""))
     if fail:
         lines.append(f"\n⚠ {len(fail)} 道变式入库失败：")
         for i, r in enumerate(fail, 1):
@@ -6817,7 +6953,8 @@ async def persist_one_to_bank(
         )
 
     facts = _mother_facts(state)
-    receipts = await persist_items([target], facts, token=token)
+    # 🔴 PRD-A-022：单题「收录」= publish（草稿 promote 0→1 / 已发布编辑 update / 兜底 create status=1）。
+    receipts = await persist_items([target], facts, token=token, publish=True)
     mother = next((r for r in receipts if r.get("role") == "mother"), None)
     var = next((r for r in receipts if r.get("role") != "mother"), None) or {"ok": False, "error": "无入库回执"}
 
@@ -6826,13 +6963,17 @@ async def persist_one_to_bank(
         new_items = [dict(it) for it in items]
         new_items[index - 1]["persisted"] = True
         if var.get("id") is not None:
-            new_items[index - 1]["_persist_id"] = var.get("id")  # 防重回查用（内部键，不入库）
+            new_items[index - 1]["_persist_id"] = var.get("id")  # 防重回查用（promote 回执 id=原草稿 id）
+        # 🔴 PRD-A-022：草稿已发布 → 清 _draft_id（从此走「已发布」语义）。
+        new_items[index - 1].pop("_draft_id", None)
         # 落库即清「内容已编辑待覆盖」标记（M1③：覆盖入库后库行已与本地内容一致）。
         new_items[index - 1].pop("_content_dirty", None)
         update["items"] = new_items
         if mother and mother.get("ok") and mother.get("id") is not None:
             update["mother_dna"] = dict(
-                state.get("mother_dna") or {}, mother_question_id=mother.get("id")
+                state.get("mother_dna") or {},
+                mother_question_id=mother.get("id"),
+                mother_published=True,
             )
 
     result = {"ok": bool(var.get("ok")), "id": var.get("id"), "role": "variant"}
@@ -7460,7 +7601,9 @@ async def revise_item(
         draft["from_edit"] = True  # 闸B 见 from_edit：FAIL 不回炉换题、保留打 ⚠ 交人审
         if it.get("edit_note"):
             draft["edit_note"] = it["edit_note"]
-        # 配方印记跟题走（重出仍占原计划槽位）
+        # 配方印记跟题走（重出仍占原计划槽位）。🔴 PRD-A-022：**不 carry _draft_id**——旧草稿被
+        #   这道新题替换，draft 无 _draft_id（assemble 重落新草稿）；旧草稿（未发布）下面 discard 软删。
+        _old_draft_id = _draft_id_to_discard(it)  # whole 重出前取旧草稿 id（已发布题=None 不删）
         for k in ("_seq", "persisted", "_persist_id"):  # R4·F17: 去死键 from_recipe/expected_difficulty
             if it.get(k) is not None:
                 draft[k] = it[k]
@@ -7487,6 +7630,9 @@ async def revise_item(
         # 🔴 PRD-A-018 M1③：已入库题 whole 重做后内容已变 → 标待覆盖（入库走 _persist_id 覆盖原行）。
         mark_content_dirty_if_persisted(final)
         new_items[index - 1] = final
+        # 🔴 PRD-A-022·best-effort 软删被替换掉的旧草稿（token 从 config 取，缺/失败仅 log，绝不阻塞）。
+        token = ((config or {}).get("configurable") or {}).get("ruoyi_token") if config else None
+        await _discard_drafts_best_effort([_old_draft_id], token)
         return {"items": new_items}, {"ok": True}, None
 
     # --- skeleton/scene：纯文本维改写（diff 锁 target，不动其余维·G12） ---
@@ -7639,7 +7785,7 @@ def _merge_preserve_manual(
 
 
 async def regen_dirty_items(
-    state: VariantState, indexes: list[int] | None = None
+    state: VariantState, indexes: list[int] | None = None, token: str | None = None
 ) -> tuple[VariantState, dict[str, Any], str | None]:
     """🔴 手动「重生」入口（D-merge6/8 + 缺口12）：对待重生集合（dna_dirty 题）一次性重出。
 
@@ -7674,9 +7820,11 @@ async def regen_dirty_items(
     new_items = [dict(it) for it in items]
     regenerated: list[int] = []
     failed: list[dict[str, Any]] = []
+    drafts_to_discard: list[Any] = []  # 🔴 PRD-A-022：被替换掉的旧草稿 id（未发布）→ 末尾软删
 
     for n in targets:
         old = new_items[n - 1]
+        old_draft_to_discard = _draft_id_to_discard(old)  # 重生前取旧草稿 id（已发布=None）
         snapshot = snapshot_item(old)
         dirty_dims = list(old.get("dirty_dims") or [])
         mother_dims = list(old.get("mother_dirty_dims") or [])
@@ -7696,7 +7844,9 @@ async def regen_dirty_items(
                     failed.append({"index": n, "error": "重出失败（模型未返回有效题目），已保留原题"})
                     continue
                 draft["from_edit"] = True
-                # 配方印记 + 入库簿记跟题走（重出仍占原槽位；_persist_id 留着 → 入库走覆盖）
+                # 配方印记 + 入库簿记跟题走（重出仍占原槽位；_persist_id 留着 → 入库走覆盖）。
+                # 🔴 PRD-A-022：**不 carry _draft_id**——draft 无 _draft_id（assemble 重落新草稿）；
+                #   旧草稿（未发布）成功后 discard 软删。
                 for k in ("_seq", "persisted", "_persist_id", "level"):  # R4·F17: 去死键 from_recipe/expected_difficulty
                     if old.get(k) is not None:
                         draft[k] = old[k]
@@ -7713,6 +7863,9 @@ async def regen_dirty_items(
                     final["solution"] = new_solution
                 final["from_edit"] = True
                 final.pop("check", None)
+                # 🔴 PRD-A-022：解析重写 → 旧草稿内容失效，strip _draft_id（dict(old) 带过来的）→
+                #   assemble 重落新草稿（带新解析）；旧草稿（未发布）成功后 discard 软删。
+                final.pop("_draft_id", None)
                 rechecked, _dropped = await _check_one_item(final, facts, n - 1, len(new_items))
                 final = rechecked if rechecked is not None else final
                 _format_item_stem(final)
@@ -7729,6 +7882,12 @@ async def regen_dirty_items(
         mark_content_dirty_if_persisted(final)
         new_items[n - 1] = final
         regenerated.append(n)
+        # 🔴 PRD-A-022：本题重生成功 → 旧草稿（未发布）被新内容替换 → 收集软删。
+        if old_draft_to_discard is not None:
+            drafts_to_discard.append(old_draft_to_discard)
+
+    # 🔴 PRD-A-022·best-effort 软删被替换掉的旧草稿（token 来自调用方；缺/失败仅 log，绝不阻塞重生）。
+    await _discard_drafts_best_effort(drafts_to_discard, token)
 
     update: VariantState = {"items": new_items}
     # 🔴 D-merge8·母题脏：全待重生集合都重生完（无指定 indexes 或 indexes 已覆盖所有 dirty）→ 清母题脏。

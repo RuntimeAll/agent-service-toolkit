@@ -33,7 +33,7 @@ _STATE = {
 def _patch_persist(monkeypatch, *, variant_id=999, mother=None, fail=False):
     calls = {"n": 0, "items": []}
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         calls["n"] += 1
         calls["items"].extend(items)
         receipts = []

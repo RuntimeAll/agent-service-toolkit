@@ -405,7 +405,7 @@ def test_solve_explain_emits_warn_when_item_goes_back_to_furnace(monkeypatch):
 def test_persist_emits_running_then_done_with_counts(monkeypatch):
     calls = _record_stages(monkeypatch)
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         return [
             {"role": "mother", "ok": True, "id": 100},
             {"ok": True, "id": 101},
@@ -431,7 +431,7 @@ def test_persist_emits_running_then_done_with_counts(monkeypatch):
 def test_persist_emits_warn_when_bank_unreachable(monkeypatch):
     calls = _record_stages(monkeypatch)
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         raise RuntimeError("connect refused")
 
     monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
@@ -647,7 +647,7 @@ def test_artifact_nulls_and_defaults_when_fields_missing(monkeypatch):
 def test_persist_emits_artifact_with_per_item_persisted_flags(monkeypatch):
     captured = _capture_frames(monkeypatch)
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         return [
             {"role": "mother", "ok": True, "id": 100},
             {"ok": True, "id": 101},
@@ -668,7 +668,7 @@ def test_persist_emits_artifact_with_per_item_persisted_flags(monkeypatch):
 def test_persist_unreachable_path_emits_no_artifact(monkeypatch):
     captured = _capture_frames(monkeypatch)
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         raise RuntimeError("connect refused")
 
     monkeypatch.setattr(variant_mod, "persist_items", fake_persist)
@@ -718,7 +718,7 @@ def test_assemble_survives_raising_writer(monkeypatch):
 def test_persist_writes_back_persisted_and_mother_id_to_state(monkeypatch):
     _capture_frames(monkeypatch)
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         return [
             {"role": "mother", "ok": True, "id": 100},
             {"ok": True, "id": 101},
@@ -740,7 +740,7 @@ def test_persist_skips_already_persisted_items(monkeypatch):
     captured = _capture_frames(monkeypatch)
     seen: list[list] = []
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         seen.append(list(items))
         return [{"ok": True, "id": 200}]
 
@@ -769,7 +769,7 @@ def test_persist_all_already_persisted_is_noop(monkeypatch):
     captured = _capture_frames(monkeypatch)
     called = []
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         called.append(items)
         return []
 

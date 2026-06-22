@@ -661,7 +661,7 @@ def test_persist_to_bank_skip_persisted_only_if_not_dirty(monkeypatch):
     # persisted 且 not dirty → 跳过；persisted 但 dirty 已被防脏闸拦在前（不会到防重逻辑）。
     captured = {}
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         captured["count"] = len(items)
         return [{"role": "variant", "ok": True, "id": 999} for _ in items]
 

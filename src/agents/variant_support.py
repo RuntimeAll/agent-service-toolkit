@@ -236,6 +236,56 @@ class RuoyiClient:
             raise RuoyiError(f"{path} 非 code==1: code={data.get('code')} msg={msg}")
         return data.get("response")
 
+    async def teacher_put(
+        self, path: str, body: dict | None = None, _retry: bool = True
+    ) -> Any:
+        """调 /teacher/** PUT 接口（同 teacher_post 双头鉴权 + envelope 解包，仅 verb 不同）。
+
+        🔴 PRD-A-022 批1：promote 端点是 PUT。照 teacher_post 同款 401 重登逻辑（透传 token
+           失效不重登，让老师重登）。body 可空（promote 走路径参数，body 留 {}）。
+        """
+        await self._ensure_token()
+        resp = await self._client.put(path, json=body or {}, headers=self._headers())
+        if resp.status_code == 401 and _retry:
+            if self._forwarded:
+                raise RuoyiError(f"{path} 401：登录老师 token 失效，请在平台重新登录后再试")
+            self._token = None
+            await self.login()
+            return await self.teacher_put(path, body, _retry=False)
+        try:
+            data = resp.json()
+        except Exception:
+            raise RuoyiError(f"{path} 响应非 JSON: status={resp.status_code} body={resp.text[:200]}")
+        if data.get("code") != 1:
+            msg = data.get("message") or data.get("msg")
+            raise RuoyiError(f"{path} 非 code==1: code={data.get('code')} msg={msg}")
+        return data.get("response")
+
+    async def promote_question(self, qid: Any) -> Any:
+        """🔴 PRD-A-022 批1·草稿→发布：PUT /teacher/question/promote/{qid}（双头鉴权）。
+
+        把本人草稿题（biz_question.status='0'）提升为已发布（'1'）。BE 端点返 R<Void>
+        （envelope 拆后 response=None），成功即可（不返新 id，发布是原行就地改 status，id 不变）。
+        OWNER 校验在 BE（非本人题拒）；已 '1' 幂等放行；软删 '2'/不存在 → 异常（envelope 非 code:1）。
+        """
+        return await self.teacher_put(f"/teacher/question/promote/{qid}")
+
+    async def discard_drafts(self, ids: list) -> int:
+        """🔴 PRD-A-022 批1·换一批软删旧草稿：POST /teacher/question/discard-drafts，body={"ids":[...]}。
+
+        BE 一条 UPDATE 把本人草稿题（status='0'）软删为 '2'（owner + 仅草稿双约束，绝不碰
+        他人题、绝不碰已发布 '1'）。返回受影响行数（实际软删的草稿数）。
+        🔴 ids 空 → 不调端点、直接返回 0（省一次请求，与 BE「ids 空返 0」同语义）。
+        """
+        clean_ids = [i for i in (ids or []) if i not in (None, "")]
+        if not clean_ids:
+            return 0
+        resp = await self.teacher_post("/teacher/question/discard-drafts", {"ids": clean_ids})
+        try:
+            return int(resp)
+        except (TypeError, ValueError):
+            return 0
+
     async def lazy_tree(self, body: dict | None = None) -> Any:
         return await self.teacher_post("/teacher/question/lazyTree", body or {})
 
@@ -975,7 +1025,8 @@ async def _flush_item_figure_base64_to_oss(
 
 
 async def persist_items(
-    items: list[dict[str, Any]], facts: dict[str, Any], token: str | None = None
+    items: list[dict[str, Any]], facts: dict[str, Any], token: str | None = None,
+    publish: bool = False,
 ) -> list[dict[str, Any]]:
     """落库（设计 §7：只写不判，质量门已在 solve_explain 闭合）。
 
@@ -983,21 +1034,47 @@ async def persist_items(
        雪花 id 回填 facts.mother_question_id，变式再挂血缘指向它。组键 = 母题 id。
     🔴 身份：token 非空 = book-ui 透传的登录老师 access_token → owner=该老师；为空则退回 .env
        服务账号（regression/直连脚本用）。
-    逐题 POST /teacher/question/create。返回回执 [{ok, id?, error?, role}...]（role=mother/variant）。
+
+    🔴 PRD-A-022 批1·草稿生命周期（publish 区分两态）：
+       - publish=False（assemble 自动落草稿）：逐题 POST create（BE 默认 status='0'=草稿）。母题也落草稿。
+       - publish=True（「全部入库/收录」= 草稿→发布）：
+           · item 有 _draft_id 且 not persisted（草稿未发布）→ PUT promote/{_draft_id}（status 0→1，
+             原行就地改、id 不变；回执 id = _draft_id）。
+           · item 已 persisted 且 _persist_id（已发布题被编辑）→ update 覆盖原行（缺口10，不变）。
+           · item 既无 _draft_id 又无 _persist_id（兜底：autodraft 失败过）→ create 显式传 status='1'
+             直接发布（BE create honor body status）。
+       母题同理：mother_question_id 存在且本次是 publish + 母题草稿未发布 → promote 母题草稿。
+    逐题回执 [{ok, id?, error?, role, promoted?/updated?}...]（role=mother/variant）。
     """
     facts = dict(facts)
     client = RuoyiClient(token=token)
     receipts: list[dict[str, Any]] = []
     try:
-        # 0) 母题(原题)入库 → 回填 mother_question_id（仅图母题不在库且有题干时）
+        # 0) 母题(原题)落库 → 回填 mother_question_id（仅图母题不在库且有题干时）
         if not facts.get("mother_question_id") and (facts.get("stem") or "").strip():
             try:
-                mid = _extract_new_id(await client.create_question(build_mother_bo(facts)))
+                mbo = build_mother_bo(facts)
+                if publish:
+                    mbo["status"] = "1"  # publish 兜底（母题草稿没落过）→ 直接发布
+                mid = _extract_new_id(await client.create_question(mbo))
                 if mid is not None:
                     facts["mother_question_id"] = mid
                 receipts.append({"ok": True, "id": mid, "role": "mother"})
             except Exception as e:  # noqa: BLE001 — 母题入库失败：变式仍照常落（血缘缺而已）
                 receipts.append({"ok": False, "error": f"母题入库失败：{e}", "role": "mother"})
+        # 🔴 PRD-A-022：publish 时母题已是草稿（autodraft 落的，未发布）→ promote 母题草稿 0→1。
+        #   mother_published 标在 mother_dna（facts.mother_published 透传）：未 True = 草稿待发布。
+        elif (
+            publish
+            and facts.get("mother_question_id")
+            and not facts.get("mother_published")
+            and (facts.get("stem") or "").strip()
+        ):
+            try:
+                await client.promote_question(facts["mother_question_id"])
+                receipts.append({"ok": True, "id": facts["mother_question_id"], "role": "mother", "promoted": True})
+            except Exception as e:  # noqa: BLE001 — 母题 promote 失败：变式仍照常落
+                receipts.append({"ok": False, "error": f"母题发布失败：{e}", "role": "mother"})
         # 🔴 PRD-C-015 批4·缺口10·母题已入库 + 母题 DNA 改了（mother_dirty）→ update role=mother 行
         #   同步守恒维（变式血缘基准一致）。仅当母题已有 id（在库）且本次标了脏才同步。
         elif facts.get("mother_question_id") and facts.get("mother_dirty") and (facts.get("stem") or "").strip():
@@ -1010,18 +1087,31 @@ async def persist_items(
             except Exception as e:  # noqa: BLE001 — 母题同步失败：变式仍照常落
                 receipts.append({"ok": False, "error": f"母题同步失败：{e}", "role": "mother"})
 
-        # 1) 逐题入库变式（此时 facts.mother_question_id 已回填）。
-        #    🔴 缺口10·覆盖原行：item 带 _persist_id（已入库、重生后再入库）→ update by id；否则 create。
+        # 1) 逐题落变式（此时 facts.mother_question_id 已回填）。
+        #    🔴 PRD-A-022：publish 区分草稿/发布三态（promote / update / create-publish）；
+        #       非 publish（autodraft）一律 create 草稿（status=0）。
         for item in items:
             persist_id = item.get("_persist_id")
+            draft_id = item.get("_draft_id")
+            already_published = bool(item.get("persisted"))
             # 🔴 R2b·U1：入库前把生成态 figure_base64 兜底转 OSS url（FE 未转过时）→ 不丢图。
             await _flush_item_figure_base64_to_oss(item, client)
             try:
-                if persist_id:
+                if publish and draft_id and not already_published:
+                    # 草稿 → 发布：promote 原行 status 0→1（id 不变，回执 id = draft_id）。
+                    await client.promote_question(draft_id)
+                    receipts.append({"ok": True, "id": draft_id, "role": "variant", "promoted": True})
+                elif persist_id:
+                    # 已发布题被编辑（_content_dirty）→ update 覆盖原行（缺口10，不变）。
                     new_id = _extract_new_id(await client.update_question(build_update_bo(item, facts, persist_id)))
                     receipts.append({"ok": True, "id": new_id or persist_id, "role": "variant", "updated": True})
                 else:
-                    new_id = _extract_new_id(await client.create_question(build_create_bo(item, facts)))
+                    # create：publish 兜底（无草稿无发布 id）→ 显式 status='1' 直接发布；
+                    #   autodraft（publish=False）→ 不传 status → BE 默认 '0' 草稿。
+                    bo = build_create_bo(item, facts)
+                    if publish:
+                        bo["status"] = "1"
+                    new_id = _extract_new_id(await client.create_question(bo))
                     receipts.append({"ok": True, "id": new_id, "role": "variant"})
             except Exception as e:  # noqa: BLE001 — 单题失败如实记，不拖垮整组
                 receipts.append({"ok": False, "error": str(e), "role": "variant"})

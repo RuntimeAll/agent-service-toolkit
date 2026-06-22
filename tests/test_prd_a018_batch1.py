@@ -37,7 +37,7 @@ def _patch_persist(monkeypatch):
     """记录每次 persist_items 收到哪些 item（含是否带 _persist_id → 走 update 而非 create）。"""
     calls = {"create": [], "update": []}
 
-    async def fake_persist(items, facts, token=None):
+    async def fake_persist(items, facts, token=None, publish=False):
         receipts = []
         for it in items:
             pid = it.get("_persist_id")

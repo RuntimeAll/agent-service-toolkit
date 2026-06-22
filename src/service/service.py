@@ -1144,10 +1144,15 @@ async def variant_revise(input: VariantReviseInput) -> dict[str, Any]:
 #    撤销重生零 LLM（回快照）。题组是会话态、重生不落库 → 无需 ruoyi_token。
 # ---------------------------------------------------------------------------
 class VariantRegenInput(BaseModel):
-    """手动「重生」请求：indexes=可选 1-based 题号子集（None/空=全待重生集合）。"""
+    """手动「重生」请求：indexes=可选 1-based 题号子集（None/空=全待重生集合）。
+
+    🔴 PRD-A-022 批1：ruoyi_token 可选——FE 透传登录老师 token → regen_dirty_items 软删被替换掉
+       的旧草稿（best-effort，缺则不软删，旧草稿留存无害）。
+    """
 
     thread_id: str
     indexes: list[int] | None = None
+    ruoyi_token: str | None = None
 
 
 class VariantUndoRegenInput(BaseModel):
@@ -1175,7 +1180,9 @@ async def variant_regen(input: VariantRegenInput) -> dict[str, Any]:
         async with lock:
             snapshot = await agent.aget_state(config=cfg)
             values: dict[str, Any] = snapshot.values or {}
-            update, result, error = await regen_dirty_items(values, input.indexes)
+            update, result, error = await regen_dirty_items(
+                values, input.indexes, token=input.ruoyi_token
+            )
             if error:
                 raise HTTPException(status_code=400, detail=error)
             if update:
