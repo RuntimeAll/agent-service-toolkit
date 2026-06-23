@@ -634,6 +634,28 @@ def _to_int_or_none(v: Any) -> int | None:
         return None
 
 
+def _effective_main_kp(facts: dict[str, Any]) -> str | None:
+    """🔴 PRD-A-023 B11·守恒主考点（裸变式根治）：主 kp 叶子 code 的两层取源。
+
+    ① facts.dim1_kp_id = analysis.kp.anchored.code —— 仅母题确认面定死那轮写满；add/regenerate
+       等增量轮次 analysis 常无 anchored（见 mother_opus_entry 未定死中间态），此源为空。
+    ② 兜底 = facts.dna.main_kp.id = **组级守恒主考点**（dna_extract 池内校验过的真叶子 code，
+       母题与全组变式共享、随 mother_dna.dna 跨轮稳定保活，不随分轮 autodraft 丢失）。
+
+    两源都空（DNA 也没锚到任何主考点）才返回 None（真未分类，落「未分类」可后补打标）。
+    取到的 code 去空白；纯函数，可单测。
+    """
+    dim1 = facts.get("dim1_kp_id")
+    if dim1 and str(dim1).strip():
+        return str(dim1).strip()
+    dna = facts.get("dna") or {}
+    mk = dna.get("main_kp") or {}
+    mk_id = mk.get("id") if isinstance(mk, dict) else None
+    if mk_id and str(mk_id).strip():
+        return str(mk_id).strip()
+    return None
+
+
 def _apply_labels(
     bo: dict[str, Any], facts: dict[str, Any], item: dict[str, Any] | None, role: str
 ) -> None:
@@ -652,8 +674,15 @@ def _apply_labels(
     """
     dna = facts.get("dna") or {}
 
-    # 主 kp 叶子 code（DNA 锚到的真知识点，知识点必绑）
-    dim1 = facts.get("dim1_kp_id")
+    # 主 kp 叶子 code（DNA 锚到的真知识点，知识点必绑）。
+    # 🔴 PRD-A-023 B11 守恒维兜底（裸变式根治）：dim1_kp_id 走两层源——
+    #   ① facts.dim1_kp_id = analysis.kp.anchored.code（确认面定死时才有；add/regenerate 等
+    #      中间态轮次 analysis 可能无 anchored → 此源为空）；
+    #   ② 兜底 = facts.dna.main_kp.id = **组级守恒主考点**（dna_extract 池内校验过的叶子 code，
+    #      母题与全组变式共享、跨轮稳定不丢，见 _kp_whitelist）。
+    #   只要 DNA 锚到了主考点，每道变式就一律绑它（与母题同 kp），绝不再落「无考点」裸变式
+    #   （knowledge_id NULL → 「我的题库」按章节筛不到）。两源皆空才真未分类。
+    dim1 = _effective_main_kp(facts)
     if dim1:
         bo["dim1KpId"] = str(dim1)
     bo["dim2Qtype"] = bo.get("questionType")
@@ -704,12 +733,13 @@ def _apply_labels(
         bo["hardPoints"] = hard  # BE 重算个数 → hard_point_count（不信 LLM 自报）
 
     # 锚定审计（→ ai 表 anchor_id / need_anchor_review / reasoning）
-    if facts.get("dim1_kp_id"):
-        bo["anchorId"] = str(facts["dim1_kp_id"])
-    # 锚定存疑：DNA flags 含主 kp 越界 / 解析失败 → 需人审
+    # 🔴 PRD-A-023 B11：anchorId 同走守恒兜底（与 dim1KpId 同源），守恒主考点在则记锚。
+    if dim1:
+        bo["anchorId"] = str(dim1)
+    # 锚定存疑：主 kp 两源皆空 / DNA flags 含主 kp 越界 / 解析失败 → 需人审
     flags = dna.get("flags") or []
     bo["needAnchorReview"] = bool(
-        not facts.get("dim1_kp_id")
+        not dim1
         or dna_extract_oob_flags & set(flags)
     )
     if dna.get("reasoning"):

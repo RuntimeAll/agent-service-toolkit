@@ -99,6 +99,7 @@ def render(
     point_size: float | None = None,
     relabel: dict | None = None,
     angle_labels: dict | None = None,
+    auto_labels: bool = True,
 ) -> dict[str, Any]:
     """一轮直出渲染。返回归一 dict：
        {ok, png_path?, n_cmd, n_fail, commands:[{cmd,ok,err}], vals, warnings, view_final, error?}。
@@ -110,6 +111,8 @@ def render(
     🔴 angle_labels（{角对象名:"显示文字"}，如 {"a2":"30°"}）：默认不传——Angle() 对象由引擎按角平分线
        自动出实测度数（不手放 Text 角度数字，治「角度数字坐标手放必偏」）。仅示意图（画的角≠题面标的
        度数 / 标 α 等符号）时对该角显式覆盖。同顶点多角弧引擎自动按角大小递增半径错开（不传任何字段即生效）。
+    🔴 auto_labels（默认 True）：点标签自动外移避免压线。**数轴确定性模板传 False**——数轴点的字母由
+       独立 Text(...) 放在轴上方（确定性位置），不要引擎再在点旁印一遍内部点名（否则字母双标，见 B9）。
     """
     _ensure_env()
     commands = _sanitize_commands(list(commands or []))  # 🔴 渲染前纠正无效命令别名（Arrow→Vector 等）
@@ -124,7 +127,7 @@ def render(
             list(commands or []), dashed=dashed, hide=hide, vals=vals, styles=styles,
             axes=axes, grid=grid, mono=True, stem=stem, timeout=RENDER_TIMEOUT_S,
             fig_scale=fig_scale, point_size=point_size, relabel=relabel,
-            angle_labels=angle_labels,
+            angle_labels=angle_labels, auto_labels=auto_labels,
         )
         # render_geogebra 失败（n_fail>0 / 无 png）→ ok 已为 False；原样透传 + 兜 png 存在性
         png = r.get("png_path")

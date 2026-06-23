@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.figure import chapter_figure, geogebra_samples, mathfig_render
+from agents.figure import chapter_figure, geogebra_samples, mathfig_render, numline
 
 # 🔴 单元2 标定（2026-06-18 实测）：配图默认 fig_scale=0.7（缩画布让标签相对放大；无头渲染下
 #   fontSize 参数无效，figScale 是唯一杠杆——见本地引擎 geogebra/render.js:81-92 注释）。
@@ -268,6 +268,37 @@ async def compose_variant_figure(
     # round4 半结构化：拆出 layout 描述 + angle_label 结构化提示。
     spec_layout, spec_angle_hints = _fmt_figure_spec(figure_spec)
     used_spec = bool(spec_layout or spec_angle_hints)  # 命中观测：本次用了 spec 还是退回 stem 现推
+
+    # 🔴 PRD-A-023 B9·数轴专用确定性模板（治「变式数轴图 LLM 自由手搓质量差到离谱」）：
+    #   检测到数轴题（题干/spec.layout 含「数轴」）→ 走确定性模板（opus 只抽点值、不画图）→ 渲染 → PIL 裁留白
+    #   → 直接返回与 LLM 路径同格式的成功 result，FE 透明（/variant/compose-figure 不变）。
+    #   🔴 检测不到数轴 / 抽点失败 / 渲染失败 → 返回 None → **落回下方现有 LLM 造图路径**（绝不卡死，降级不崩）。
+    #   图片重生（correction_prompt 在）时仍走 LLM 增量改图路径（保留老师修正语义），不走确定性模板。
+    if not correction_prompt and numline.is_number_line(stem, figure_spec):
+        try:
+            nl = await numline.compose_number_line_figure(
+                stem=stem, invoke=invoke, parse_json=parse_json,
+                item_id=item_id, model=model,
+            )
+        except Exception as e:  # noqa: BLE001 — 数轴分支任何异常一律回退 LLM（绝不卡死配图）
+            import logging as _lg
+            _lg.getLogger(__name__).info("numline 分支异常 %s → 回退 LLM 造图", str(e)[:120])
+            nl = None
+        if nl and nl.get("ok") and nl.get("png_path"):
+            b64 = _png_to_b64(nl["png_path"])
+            if b64:  # 裁后图读盘成功 → 直接返回（与 LLM 成功路径同格式）
+                return {
+                    "item_id": item_id, "ok": True, "needs_figure": False, "png_base64": b64,
+                    "commands": nl.get("commands"), "dashed": [],
+                    "vals": nl.get("vals", {}), "warnings": nl.get("warnings", []),
+                    "figure_spec_used": used_spec,
+                    "figure_type_constrained": False, "allowed_figure_types": [],
+                    "numline_deterministic": True,            # 命中观测：走了数轴确定性模板
+                    "numline_points": nl.get("numline_points"),
+                    "numline_range": nl.get("numline_range"),
+                }
+            # 裁后 PNG 读盘失败 → 不在此降级，落回下方 LLM 路径兜底。
+        # nl 为 None（检测不到点/渲染失败）→ 自然落回下方 LLM 造图路径（绝不卡死）。
 
     # 🔴 PRD-A-021 R3b·章节×图型定型闸：据母题章节名 + 考点名取「允许图型集」（包含匹配+并集，
     #   进程内缓存）。允许集非空 → 拼定型约束段（spec 路径 + fallback 路径都拼）；空 = 逃生（不约束）。

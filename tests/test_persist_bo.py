@@ -62,3 +62,56 @@ def test_mother_bo_subject_id_falls_back_to_unclassified_when_none():
 def test_mother_bo_keeps_real_subject_id():
     bo = build_mother_bo({"qtype": "选择", "stem": "x", "subject_id": "3071"})
     assert bo["subjectId"] == "3071"
+
+
+# ── PRD-A-023 B11 守恒维兜底回归（裸变式根治）：dim1_kp_id(analysis.anchored.code) 空但
+#    DNA 锚到组级守恒主考点(dna.main_kp.id) → 每道变式一律绑守恒 kp，绝不落「无考点」裸变式。
+#    根因：add/regenerate 等增量轮次 analysis 无 anchored → facts.dim1_kp_id 为空，而
+#    母题/同组其余变式走确认面定死轮 anchored 齐 → 同批部分裸、部分正常（DB 实测 16:13 批）。
+
+
+def _facts_dna(main_kp_id, *, dim1=None, secondary=None):
+    dna = {"main_kp": ({"id": main_kp_id, "name": "守恒考点"} if main_kp_id else None),
+           "secondary_kps": secondary or [], "tags": ["t"], "flags": []}
+    return {"subject_id": "3071", "dim1_kp_id": dim1, "dna": dna,
+            "mother_question_id": 123456789, "kp_confidence": 0.9}
+
+
+def test_variant_dim1_falls_back_to_conserved_main_kp_when_anchored_missing():
+    # dim1_kp_id 空 + dna.main_kp 有 → dim1KpId 兜底取守恒主考点（不再裸变式）
+    bo = build_create_bo(_variant(2), _facts_dna("3071005"))
+    assert bo["dim1KpId"] == "3071005"
+    assert bo["anchorId"] == "3071005"
+    assert bo["needAnchorReview"] is False  # 守恒主考点在 → 不转人审
+
+
+def test_variant_primary_anchored_wins_over_conserved():
+    # dim1_kp_id（确认面定死）非空 → 优先用它，不被守恒兜底覆盖
+    bo = build_create_bo(_variant(2), _facts_dna("3071005", dim1="3071999"))
+    assert bo["dim1KpId"] == "3071999"
+
+
+def test_variant_secondary_kps_bind_when_conserved_main_present():
+    # 守恒主考点在 → main_kp_unclassified=False → 副考点照落（不被守恒一致性闸抑制）
+    bo = build_create_bo(_variant(2), _facts_dna("3071005", secondary=[{"id": "3071006"}]))
+    assert bo.get("secondaryKpIds") == [3071006]
+
+
+def test_variant_truly_unclassified_when_both_sources_empty():
+    # 两源皆空（anchored 缺 + dna.main_kp 缺）→ 真未分类：无 dim1KpId、转人审、副考点抑制
+    bo = build_create_bo(_variant(2), _facts_dna(None, secondary=[{"id": "3071006"}]))
+    assert "dim1KpId" not in bo
+    assert bo["needAnchorReview"] is True
+    assert "secondaryKpIds" not in bo
+
+
+def test_variant_inherits_mother_lineage():
+    bo = build_create_bo(_variant(2), _facts_dna("3071005"))
+    assert bo["motherQuestionId"] == 123456789
+
+
+def test_mother_bo_dim1_falls_back_to_conserved_main_kp():
+    facts = {"qtype": "选择", "stem": "x", "dim1_kp_id": None,
+             "dna": {"main_kp": {"id": "3071005", "name": "守恒考点"}, "flags": []}}
+    bo = build_mother_bo(facts)
+    assert bo["dim1KpId"] == "3071005"

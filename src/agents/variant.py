@@ -817,6 +817,12 @@ _TRACE_MARKERS: list[tuple[str, str]] = [
     #   须排在 analyze/generate 泛 marker 前，独立标 label（G1：该轮无 analyze 行；G6：opus 调用点可查）。
     ("按顺序做三件事", "mother_entry"),
     ("先真正把题解出来", "mother_solve"),
+    # 🔴 R6 母题三步编排（富文本化∥解题→打标）+ B9 数轴抽取——prompt 头重写后旧 marker 全失配 →
+    #   label 落 unknown（2026-06-23 排查）。下面 4 个对齐 R6/B9 新 prompt 首句，须在泛 marker 前。
+    ("题面誊抄员", "richtext"),       # R6 富文本化(sui-xiang·异步)
+    ("数学解题专家", "mother_solve"),  # R6 母题解题(aigeek)
+    ("题库打标师", "mother_label"),    # R6 母题打标/深度解析(sui-xiang)
+    ("数学题信息抽取器", "numline"),   # B9 数轴点抽取(图配)
     # 🔴 PRD-C-100 B3：变式造图 opus 翻 GeoGebra 命令（G6：造图翻命令调用不漏计，含计费）。
     ("数学配图助手", "figure_geogebra"),
     ("看这张题目图", "analyze"),
