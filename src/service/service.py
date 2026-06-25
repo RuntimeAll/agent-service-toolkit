@@ -1026,6 +1026,53 @@ async def recognize_endpoint(input: RecognizeInput) -> dict[str, Any]:
         var_child_runnable_config.reset(ctok)
 
 
+class SplitInput(BaseModel):
+    """PRD-A-002 路B · 批量拆题请求（无状态）。
+
+    markdown（快档文字层）或 image_base64/image_url（慢档页图，单张或数组）至少给一个；
+    answer_mode = from_source 原卷自带 / ai_solve AI解题 / stem_only 只录题。
+    """
+
+    markdown: str | None = None
+    image_base64: Any = None
+    image_url: Any = None
+    answer_mode: str = "from_source"
+    grade_hint: str | None = None
+    min_chars: int = 12
+
+
+@router.post("/split")
+async def split_endpoint(input: SplitInput) -> dict[str, Any]:
+    """PRD-A-002 路B · 批量拆题（同步返回，非 SSE，无状态）。
+
+    抽取产物（文字层 markdown / 栅格化页图 base64）→ opus 切题+答案配对+选项归位+题型判别+完整度过滤。
+    落库不在此（book-server 异步 job → /teacher/ingest/**）。永不 500（异常收口 ok=False）。
+    """
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.split_doc import split_doc
+    from agents.variant import _ainvoke_text
+
+    cfg: dict[str, Any] = {"configurable": {"thread_id": "split"}}
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        return await split_doc(
+            markdown=input.markdown,
+            image_base64=input.image_base64,
+            image_url=input.image_url,
+            answer_mode=input.answer_mode,
+            grade_hint=input.grade_hint,
+            min_chars=input.min_chars,
+            invoke=_ainvoke_text,
+        )
+    except Exception as e:  # noqa: BLE001 — split_doc 本应自兜，纯保险（不 500）
+        logger.error(f"split_endpoint error: {e}")
+        return {"ok": False, "questions": [], "dropped": [], "count": 0,
+                "error": f"拆题异常: {str(e)[:120]}"}
+    finally:
+        var_child_runnable_config.reset(ctok)
+
+
 class VariantSetFigureUrlInput(BaseModel):
     """PRD-C-100 BC2 + PRD-A-021 R2b·U1：变式配图回写请求（零 LLM）。index=1-based。
 
