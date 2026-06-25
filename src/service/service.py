@@ -980,6 +980,52 @@ async def variant_verify_one(input: VariantVerifyOneInput) -> dict[str, Any]:
         var_child_runnable_config.reset(ctok)
 
 
+class RecognizeInput(BaseModel):
+    """PRD-A-002 路A · 框选识别请求（无状态）。
+
+    image_url（https / data uri）或 image_base64（裸 b64）至少给一个；solve=是否同时解题+打标；
+    grade_hint 可选学段（约束解法不超纲）。service 层 bearer 已鉴权（router dependency）。
+    """
+
+    image_url: str | None = None
+    image_base64: str | None = None
+    solve: bool = False
+    grade_hint: str | None = None
+
+
+@router.post("/recognize")
+async def recognize_endpoint(input: RecognizeInput) -> dict[str, Any]:
+    """PRD-A-002 路A · 框选识别（同步返回，非 SSE，无状态）。
+
+    opus 多模态读框区题图 → 去手写富文本题(+可选解题/10维DNA/sympy验算)。落库不在此（走
+    book-server /teacher/ingest/**）。永不 500（异常收口为 ok=False + error）。
+    """
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.recognize import recognize
+    from agents.variant import _ainvoke_text
+
+    cfg: dict[str, Any] = {"configurable": {"thread_id": "recognize"}}
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        return await recognize(
+            image_url=input.image_url,
+            image_base64=input.image_base64,
+            solve=input.solve,
+            grade_hint=input.grade_hint,
+            invoke=_ainvoke_text,
+        )
+    except Exception as e:  # noqa: BLE001 — recognize 本应自兜，这里纯保险（不 500）
+        logger.error(f"recognize_endpoint error: {e}")
+        return {
+            "ok": False, "has_figure": False, "stem": "", "qtype": "解答", "options": [],
+            "answer": "", "analysis": "", "solved_answer": "", "dna": None, "verify": None,
+            "richtext_issues": [], "error": f"识别异常: {str(e)[:120]}",
+        }
+    finally:
+        var_child_runnable_config.reset(ctok)
+
+
 class VariantSetFigureUrlInput(BaseModel):
     """PRD-C-100 BC2 + PRD-A-021 R2b·U1：变式配图回写请求（零 LLM）。index=1-based。
 
