@@ -1073,6 +1073,123 @@ async def split_endpoint(input: SplitInput) -> dict[str, Any]:
         var_child_runnable_config.reset(ctok)
 
 
+# ===================== PRD-A-002 B2 · 分层流水线新端点（单题粒度）=====================
+
+class OcrInput(BaseModel):
+    """B2 · 整页 → 富文本（TextIn 外部 OCR）。file_base64 = pdf/图片字节 base64。"""
+
+    file_base64: str | None = None
+
+
+@router.post("/ocr")
+async def ocr_endpoint(input: OcrInput) -> dict[str, Any]:
+    """B2 · 整页文件（pdf/图片）→ Markdown 富文本（TextIn）。永不 500（异常收口 ok=False）。"""
+    from agents.textin_ocr import page_to_markdown
+
+    try:
+        return await page_to_markdown(file_base64=input.file_base64)
+    except Exception as e:  # noqa: BLE001 — TextIn 失败收口为 ok=False，上层降级 opus 读图
+        logger.error(f"ocr_endpoint error: {e}")
+        return {"ok": False, "markdown": "", "pages": None, "error": f"OCR 异常: {str(e)[:160]}"}
+
+
+class SolveInput(BaseModel):
+    """B2 · 单题解题（+ 自动打标 + sympy 验算）。worker 拆完后逐题并发调。"""
+
+    stem: str
+    options: list[str] | None = None
+    qtype: str | None = None
+    grade_hint: str | None = None
+
+
+@router.post("/solve")
+async def solve_endpoint(input: SolveInput) -> dict[str, Any]:
+    """B2 · 单题解题 + 打标 + 验算（单题粒度，永不整卷大 JSON）。永不 500。"""
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.solve import solve_one
+    from agents.variant import _ainvoke_text
+
+    cfg: dict[str, Any] = {"configurable": {"thread_id": "solve"}}
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        return await solve_one(
+            stem=input.stem, options=input.options, qtype=input.qtype,
+            grade_hint=input.grade_hint, invoke=_ainvoke_text,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"solve_endpoint error: {e}")
+        return {"ok": False, "answer": "", "analysis": "", "solved_answer": "",
+                "dna": None, "verify": None, "richtext_issues": [], "error": f"解题异常: {str(e)[:120]}"}
+    finally:
+        var_child_runnable_config.reset(ctok)
+
+
+class LabelInput(BaseModel):
+    """B2 · 单题打标（有原卷答案/解析的题，不重解只产 DNA）。"""
+
+    stem: str
+    options: list[str] | None = None
+    qtype: str | None = None
+    answer: str | None = None
+    analysis: str | None = None
+
+
+@router.post("/label")
+async def label_endpoint(input: LabelInput) -> dict[str, Any]:
+    """B2 · 单题打标（10 维 DNA，单题粒度）。永不 500。"""
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.label import label_one
+    from agents.variant import _ainvoke_text
+
+    cfg: dict[str, Any] = {"configurable": {"thread_id": "label"}}
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        return await label_one(
+            stem=input.stem, options=input.options, qtype=input.qtype,
+            answer=input.answer, analysis=input.analysis, invoke=_ainvoke_text,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"label_endpoint error: {e}")
+        return {"ok": False, "dna": None, "error": f"打标异常: {str(e)[:120]}"}
+    finally:
+        var_child_runnable_config.reset(ctok)
+
+
+class GradeInput(BaseModel):
+    """B4 · 批改（裁剪题区图 → 先解题 → 判学生作答对错）。注入知识点/章节助判。"""
+
+    image_url: str | None = None
+    image_base64: str | None = None
+    knowledge: str | None = None
+    chapter: str | None = None
+
+
+@router.post("/grade")
+async def grade_endpoint(input: GradeInput) -> dict[str, Any]:
+    """B4 · 批改单道题区图（多异常态：无笔迹→blank/无答案自解/存疑→uncertain）。永不 500。"""
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agents.grade import grade_one
+    from agents.variant import _ainvoke_text
+
+    cfg: dict[str, Any] = {"configurable": {"thread_id": "grade"}}
+    ctok = var_child_runnable_config.set(cfg)  # type: ignore[arg-type]
+    try:
+        return await grade_one(
+            image_url=input.image_url, image_base64=input.image_base64,
+            knowledge=input.knowledge, chapter=input.chapter, invoke=_ainvoke_text,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"grade_endpoint error: {e}")
+        return {"ok": False, "stem": "", "qtype": "解答", "standard_answer": "",
+                "standard_analysis": "", "student_answer": "", "has_handwriting": False,
+                "verdict": "uncertain", "feedback": "", "verify": None, "error": f"批改异常: {str(e)[:120]}"}
+    finally:
+        var_child_runnable_config.reset(ctok)
+
+
 class VariantSetFigureUrlInput(BaseModel):
     """PRD-C-100 BC2 + PRD-A-021 R2b·U1：变式配图回写请求（零 LLM）。index=1-based。
 

@@ -246,6 +246,14 @@ class Settings(BaseSettings):
     # 用于算 conv_trace.cost_yuan（实际消费）。留空 → cost 记 NULL（不瞎猜价）。
     RELAY_PRICES: str | None = None
 
+    # === PRD-A-002 B2：路B 整页 → 富文本 外部 OCR（TextIn）===
+    # 🔴 维护者拍板：路B 批量拆题的「整页抽取」改走 TextIn（放宽 PRD-C-101 R3「零外部 OCR」，
+    #   仅限路B 整页；路A 框选单题仍 opus 多模态）。凭据落 .env（gitignore），缺省留空 → 退回
+    #   opus 多模态读图兜底（不崩，仅省不到 TextIn 的版式还原）。
+    TEXTIN_APP_ID: str | None = None
+    TEXTIN_SECRET_CODE: SecretStr | None = None
+    TEXTIN_ENDPOINT: str = "https://api.textin.com/ai/service/v1/pdf_to_markdown"
+
     # Azure OpenAI Settings
     AZURE_OPENAI_API_KEY: SecretStr | None = None
     AZURE_OPENAI_ENDPOINT: str | None = None
