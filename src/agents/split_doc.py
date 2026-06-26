@@ -19,6 +19,8 @@ r"""PRD-A-002 路B · 批量拆题「/split」无状态核心（**只拆题干 +
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -28,7 +30,10 @@ from agents.recognize import parse_json_lax
 
 SPLIT_TIMEOUT_S = 240.0
 SPLIT_TEMPERATURE = 0.1
-SPLIT_MAX_TOKENS = 16000         # 只拆题干（无逐题DNA），同样头寸可容纳更多题，安全
+# 🔴 整卷（一份完整试卷 ~25 题，含解答题多小问长 stem）只拆题干仍可达 ~2~3 万 token。
+#   16000 实测整卷 2025杭州二模仍截断（unbalanced JSON braces）→ 提到 32000；
+#   并配 _salvage_questions 截断兜底（超 32000 也只丢最后一题，不整单失败）。
+SPLIT_MAX_TOKENS = 32000
 
 # 兼容旧入参：ai_solve 不再在 split 里解题（下沉单题），按 stem_only 处理。
 ANSWER_MODES = ("from_source", "stem_only", "ai_solve")
@@ -61,6 +66,63 @@ def build_split_prompt(*, answer_mode: str) -> str:
   ],
   "dropped": ["残缺题原因"]
 }}"""
+
+
+def _salvage_questions(raw_text: str) -> dict[str, Any] | None:
+    """截断兜底：JSON 整体解析失败时，从 "questions":[ ... 里**逐个抠出完整题对象**，
+    容忍被截断的最后一题（丢弃它而非整单失败）。对齐 B2 修复方向#3。
+
+    返回 {"questions":[...], "dropped":[...]} 或 None（连一个完整题都抠不出）。
+    """
+    s = raw_text or ""
+    s = re.sub(r"^```(?:json)?\s*", "", s.strip())
+    m = re.search(r'"questions"\s*:\s*\[', s)
+    if not m:
+        return None
+    i = m.end()  # 指向数组内第一个字符
+    questions: list[dict[str, Any]] = []
+    n = len(s)
+    while i < n:
+        # 跳到下一个 '{'（题对象开头）
+        while i < n and s[i] not in "{]":
+            i += 1
+        if i >= n or s[i] == "]":
+            break
+        # 栈匹配抠出一个完整 {...}
+        depth = 0
+        in_str = False
+        esc = False
+        start = i
+        end = -1
+        while i < n:
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    i += 1
+                    break
+            i += 1
+        if end < 0:
+            break  # 最后一题被截断，丢弃
+        try:
+            questions.append(json.loads(s[start : end + 1]))
+        except Exception:  # noqa: BLE001
+            break
+    if not questions:
+        return None
+    return {"questions": questions, "dropped": ["输出过长被截断，已保留前 %d 道完整题" % len(questions)]}
 
 
 def _normalize_question(raw: dict[str, Any]) -> dict[str, Any]:
@@ -127,8 +189,11 @@ async def split_doc(
     try:
         data = parse_json_lax(raw)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "questions": [], "dropped": [], "count": 0,
-                "error": f"拆题输出解析失败: {str(e)[:100]}"}
+        # 🔴 截断兜底：整体 JSON 解析失败（多为输出超 max_tokens 截断）→ 抠出已完整的题，不整单失败
+        data = _salvage_questions(raw)
+        if not data:
+            return {"ok": False, "questions": [], "dropped": [], "count": 0,
+                    "error": f"拆题输出解析失败: {str(e)[:100]}"}
 
     questions = []
     for q in (data.get("questions") or []):
