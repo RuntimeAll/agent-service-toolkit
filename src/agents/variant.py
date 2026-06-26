@@ -2468,10 +2468,12 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         )
     except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底，绝不空维/卡死）
         analysis.setdefault("_model_anchor_error", str(e))
-        m_res = {"models": [dict(model_anchor.M00)], "model_overflow": [], "model_warn": True,
-                 "model_flag": "lookup_unavailable"}
+        m_res = {"models": [dict(model_anchor.M00)], "temp_models": [], "model_overflow": [],
+                 "model_warn": True, "model_flag": "lookup_unavailable"}
     dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
     dna["model_overflow"] = m_res.get("model_overflow") or []
+    # 🔴 WS2·AC5：临时模型随 DNA 透传（供 WS2 落链/转正脚本消费；参与判档已在 models 内体现）。
+    dna["temp_models"] = m_res.get("temp_models") or []
     if m_res.get("model_warn"):
         dna["model_warn"] = True
     mother_dna["dna"] = dna
@@ -2631,10 +2633,11 @@ async def _reanchor_reuse_first_solve(
         )
     except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底）
         analysis.setdefault("_model_anchor_error", str(e))
-        m_res = {"models": [dict(model_anchor.M00)], "model_overflow": [], "model_warn": True,
-                 "model_flag": "lookup_unavailable"}
+        m_res = {"models": [dict(model_anchor.M00)], "temp_models": [], "model_overflow": [],
+                 "model_warn": True, "model_flag": "lookup_unavailable"}
     dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
     dna["model_overflow"] = m_res.get("model_overflow") or []
+    dna["temp_models"] = m_res.get("temp_models") or []  # WS2·AC5 临时模型透传
     if m_res.get("model_warn"):
         dna["model_warn"] = True
     mother_dna["dna"] = dna

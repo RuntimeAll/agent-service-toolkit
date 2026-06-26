@@ -175,13 +175,22 @@ def lookup_candidates(
 
 
 # 确认 prompt（H2 定档 gpt-5.4-mini + 「先解题再选」风格：先想这题怎么解，再从候选里挑命中的）。
+# 🔴 PRD-C-103 WS2·AC5（2026-06-26）：临时模型不跳过。候选里没有但确有【可跨题复用的解题套路】→
+#   不再只丢个名字（旧 overflow 落 JSONL 后被丢，难度跑不出来），而是产「临时模型」对象（带 LLM 提的
+#   临时 tier/freq），让它**参与 grade_observed 判档**。临时 tier 是待审草案，最终 authority = 人维护的
+#   表（不违「难度不靠 LLM 自评」铁律：表才是 pass/fail 权威，临时 tier 只是没入库时的占位估计）。
 CONFIRM_PROMPT = """你是初中数学解题模型确认器。下面给你一道题和一份**候选解题模型**清单。
 
-任务（先解题再选，禁造词）：
+任务（先解题再选）：
 1. 先在心里把这道题解一遍，想清楚「这道题真正用到了哪些解题套路/模型」。
-2. 再从【候选模型】里**只挑你第 1 步真正用到的**（最多 {max_n} 个）。
-3. 🔴 只能从候选 id 里选，**严禁**编造候选外的 id/名称；这道题用不到候选里任何一个就返回空数组。
-4. 基础题/无组合技巧的概念直用题：返回空数组即可（系统会兜底为「概念直用」）。
+2. 再从【候选模型】里**挑你第 1 步真正用到的**（最多 {max_n} 个），填进 hits（只填候选 id）。
+3. 🔴 若这题真正用到了一个【候选里没有、但可跨题复用的解题套路】（不是基础运算技巧），
+   不要硬塞进候选，也不要丢弃——把它作为**临时模型**填进 newModels（给 name + 触发特征 + 招式结论
+   + 你判的难度阶 tier(基础/高阶) + 稀有度 freq(通法/一次性)）。临时模型最多 1 个，只在真有可复用
+   套路时给；普通题不要给。
+4. 🔴 基础运算技巧 ≠ 解题模型，**别塞 newModels**：提取公因数/凑整/分配律/通分/约分/去括号/移项/
+   合并同类项/直接代入——这些是基本运算，不是模型。靠这些就能做的题：hits 和 newModels 都留空。
+5. 概念直用/送分题：hits 和 newModels 都留空数组（系统兜底为「概念直用」）。
 
 【题目】
 {stem}
@@ -193,7 +202,9 @@ CONFIRM_PROMPT = """你是初中数学解题模型确认器。下面给你一道
 {candidates}
 
 只输出 JSON（不要解释、不要 markdown 围栏）：
-{{"models": ["命中的候选id", ...]}}
+{{"hits": ["命中的候选id", ...],
+  "newModels": [{{"name": "套路名", "triggerFeature": "触发特征", "action": "招式结论",
+                  "tier": "基础或高阶", "freq": "通法或一次性"}}]}}
 """
 
 
@@ -206,18 +217,16 @@ def _candidates_text(candidates: list[dict[str, Any]]) -> str:
     return "\n".join(lines) or "（候选为空）"
 
 
-def _parse_models_json(text: str | None) -> list[str] | None:
-    """解析 LLM 返回的 {"models":[id...]}；非 JSON/无 models 键 → None（上层兜底 M00）。"""
+def _loads_obj(text: str | None) -> dict | None:
+    """剥 markdown 围栏 + JSON 容错 → dict（非 dict/失败 → None）。"""
     if not text:
         return None
     s = text.strip()
-    # 剥 markdown 围栏
     s = re.sub(r"^```(?:json)?\s*", "", s)
     s = re.sub(r"\s*```$", "", s).strip()
     try:
         obj = json.loads(s)
     except Exception:
-        # 容错：从文本里捞第一个 {...}
         m = re.search(r"\{.*\}", s, re.DOTALL)
         if not m:
             return None
@@ -225,14 +234,51 @@ def _parse_models_json(text: str | None) -> list[str] | None:
             obj = json.loads(m.group(0))
         except Exception:
             return None
-    if not isinstance(obj, dict):
+    return obj if isinstance(obj, dict) else None
+
+
+def _parse_confirm_json(text: str | None) -> tuple[list[str], list[dict[str, Any]]] | None:
+    """解析确认 LLM 返回 → (hits[id...], newModels[临时模型对象...])；失败 → None（上层兜 M00）。
+
+    🔴 WS2·AC5：兼容旧 schema {"models":[id...]}（无 newModels），新 schema {"hits":[...],"newModels":[...]}。
+    newModels 每项归一为 {name, triggerFeature, action, tier_text(基础/高阶), freq_text(通法/一次性)}。
+    """
+    obj = _loads_obj(text)
+    if obj is None:
         return None
-    raw = obj.get("models")
-    if raw is None:
-        return None
-    if not isinstance(raw, list):
-        return None
-    return [str(x).strip() for x in raw if str(x).strip()]
+    # hits：新 schema "hits" 优先，回退旧 schema "models"
+    raw_hits = obj.get("hits")
+    if raw_hits is None:
+        raw_hits = obj.get("models")
+    if raw_hits is None or not isinstance(raw_hits, list):
+        # 没有 hits 键也没有 models 键 → 视为解析失败（上层兜 M00）
+        if obj.get("newModels") is None:
+            return None
+        raw_hits = []
+    hits = [str(x).strip() for x in raw_hits if str(x).strip()]
+    # newModels：临时模型
+    new_models: list[dict[str, Any]] = []
+    for nm in (obj.get("newModels") or []):
+        if not isinstance(nm, dict):
+            continue
+        name = str(nm.get("name") or "").strip()
+        if not name:
+            continue
+        tier = str(nm.get("tier") or "").strip()
+        freq = str(nm.get("freq") or nm.get("freqHint") or "").strip()
+        new_models.append({
+            "name": name,
+            "triggerFeature": str(nm.get("triggerFeature") or "").strip(),
+            "action": str(nm.get("action") or "").strip(),
+            "tier_text": tier if tier in ("基础", "高阶") else "基础",
+            "freq_text": freq if freq in ("通法", "一次性") else "一次性",
+        })
+    return hits, new_models
+
+
+# 临时模型 tier/freq 文本 → 整数（与 core.difficulty 同口径，避免循环 import 故本地常量）。
+_TIER_TEXT2INT = {"基础": 1, "高阶": 2}
+_FREQ_TEXT2INT = {"一次性": 1, "通法": 2}
 
 
 async def confirm_models(
@@ -242,20 +288,23 @@ async def confirm_models(
     *,
     invoke: Any,
     model: str | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """池内确认（LLM 在候选子集里选 ≤3）。返回 (confirmed, overflow)。
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """池内确认 + 临时模型识别。返回 (confirmed, temp_models, overflow)。
 
-    confirmed = [{id,name,(tier_int),(freq_int),(model_kind)}]（id ∈ candidates；去重；截 ≤MODELS_MAX）。
-    tier_int/freq_int = biz_solution_model 控制面板表真值（WS1，可空）。
-    overflow  = [str]（LLM 给出的**池外**名/id，禁造词处置：不入正式维，落待命名池+⚠）。
-    候选空 → 不调 LLM，直接 ([], [])（上层兜 M00）。
-    LLM 失败/解析失败 → ([], [])（上层兜 M00，不卡死）。
+    confirmed   = [{id,name,(tier_int),(freq_int),(model_kind)}]（id ∈ candidates；去重；截 ≤MODELS_MAX）。
+                  tier_int/freq_int = biz_solution_model 控制面板表真值（WS1，可空）。
+    temp_models = [{id:None, name, model_kind:'derived', isNew:True, tier_int(LLM提·临时草案),
+                  freq_int, tier_text, freq_text, triggerFeature, action}]（WS2·AC5：候选外但确有可
+                  复用套路 → 临时模型，**参与 grade_observed 判档不跳过**；≤1 个）。
+    overflow    = [str]（解析不出对象、只剩裸名的池外提议；仅 ⚠/待命名池留痕，不参与判档）。
+    候选空 → 不调 LLM，直接 ([], [], [])（上层兜 M00）。
+    LLM 失败/解析失败 → ([], [], [])（上层兜 M00，不卡死）。
     """
     from langchain_core.messages import HumanMessage  # 局部 import 避循环依赖
 
     candidates = candidates or []
     if not candidates:
-        return [], []
+        return [], [], []
     by_id = {str(c.get("id")): c for c in candidates}
     by_name = {str(c.get("name")): c for c in candidates}
     prompt = CONFIRM_PROMPT.format(
@@ -267,14 +316,15 @@ async def confirm_models(
     try:
         text = await invoke([HumanMessage(content=prompt)], model=model)
     except Exception:
-        return [], []
-    picked = _parse_models_json(text)
-    if picked is None:
-        return [], []
-    confirmed: list[dict[str, str]] = []
+        return [], [], []
+    parsed = _parse_confirm_json(text)
+    if parsed is None:
+        return [], [], []
+    hits, new_models = parsed
+    confirmed: list[dict[str, Any]] = []
     overflow: list[str] = []
     seen: set[str] = set()
-    for p in picked:
+    for p in hits:
         c = by_id.get(p) or by_name.get(p)
         if c is not None:
             cid = str(c.get("id"))
@@ -291,10 +341,43 @@ async def confirm_models(
                     m_out["model_kind"] = c.get("model_kind")
                 confirmed.append(m_out)
         else:
-            # 池外名/id：禁造词 → 不入正式维，原文留 overflow（待命名池 + ⚠）
+            # 池外裸 id/名（LLM 把不在候选里的 id 塞进 hits）→ overflow 留痕（不参与判档）
             if p not in overflow:
                 overflow.append(p)
-    return confirmed[:MODELS_MAX], overflow
+    # 🔴 WS2·AC5：临时模型（候选外可复用套路）→ 带 LLM 临时 tier/freq 参与判档，不跳过。
+    temp_models: list[dict[str, Any]] = []
+    cand_names = set(by_name.keys())
+    for nm in new_models:
+        nm_name = nm["name"]
+        # 防重：LLM 把候选里已有的模型又当新模型提 → 归并到 confirmed（用候选表真值），不重复造临时
+        if nm_name in cand_names:
+            c = by_name[nm_name]
+            cid = str(c.get("id"))
+            if cid not in seen:
+                seen.add(cid)
+                m_out = {"id": cid, "name": nm_name}
+                if c.get("tier_int") is not None:
+                    m_out["tier_int"] = c.get("tier_int")
+                if c.get("freq_int") is not None:
+                    m_out["freq_int"] = c.get("freq_int")
+                if c.get("model_kind"):
+                    m_out["model_kind"] = c.get("model_kind")
+                confirmed.append(m_out)
+            continue
+        temp_models.append({
+            "id": None,
+            "name": nm_name,
+            "model_kind": "derived",
+            "isNew": True,
+            "tier_int": _TIER_TEXT2INT.get(nm["tier_text"], 1),
+            "freq_int": _FREQ_TEXT2INT.get(nm["freq_text"], 1),
+            "tier_text": nm["tier_text"],
+            "freq_text": nm["freq_text"],
+            "triggerFeature": nm["triggerFeature"],
+            "action": nm["action"],
+        })
+    # 临时模型最多 1 个（prompt 已约束；防 LLM 多吐）
+    return confirmed[:MODELS_MAX], temp_models[:1], overflow
 
 
 async def anchor_models(
@@ -306,14 +389,19 @@ async def anchor_models(
     model: str | None = None,
     record_overflow: Any = None,
 ) -> dict[str, Any]:
-    """W1' 模型锚定主入口（§3.2 处置穷举）。返回 {models, model_overflow, model_warn, model_flag}。
+    """W1' 模型锚定主入口（§3.2 处置穷举 + WS2·AC5 临时模型不跳过）。
 
-      models         : [{id,name}]，1~3 项，**非空**（无命中保底 M00）。
-      model_overflow : [str]，LLM 给出的池外名（仅 ⚠/待命名池用，不入正式维，可空）。
-      model_warn     : bool，是否卡面 ⚠（池外命中 / 反查库故障降级）。
-      model_flag     : str|None，处置标记（"m00_fallback"/"overflow"/"lookup_unavailable"/None）。
+    返回 {models, temp_models, model_overflow, model_warn, model_flag}。
+      models         : [{id,name,(tier_int),(freq_int),(isNew)}]，1~N 项，**非空**（无命中保底 M00）。
+                       🔴 WS2·AC5：含临时模型（isNew=True、id=None、带 LLM 临时 tier_int/freq_int），
+                       直接进 models 喂 grade_observed → 临时模型**参与判档不跳过**。
+      temp_models    : [{name,model_kind:'derived',isNew,tier_int,freq_int,...}]，本题待转正临时模型
+                       （供 WS2 落库转正脚本消费；≤1 个，可空）。
+      model_overflow : [str]，解析不出对象的裸池外名（仅 ⚠/待命名池用，不参与判档，可空）。
+      model_warn     : bool，是否卡面 ⚠（有临时模型 / 裸池外名 / 反查库故障降级）。
+      model_flag     : str|None（"m00_fallback"/"overflow"/"temp_model"/"lookup_unavailable"/None）。
 
-    record_overflow(name, mother_models)：把池外名落待命名池的回调（None=不落，仅返回 overflow）。
+    record_overflow(name, mother_models)：把裸池外名落待命名池的回调（None=不落，仅返回 overflow）。
     """
     leaf_codes = _leaf_codes(dna)
 
@@ -323,16 +411,17 @@ async def anchor_models(
     except Exception:
         return {
             "models": [dict(M00)],
+            "temp_models": [],
             "model_overflow": [],
             "model_warn": True,
             "model_flag": "lookup_unavailable",
         }
 
-    confirmed, overflow = await confirm_models(
+    confirmed, temp_models, overflow = await confirm_models(
         stem, answer, candidates, invoke=invoke, model=model
     )
 
-    # 池外名落待命名池（含题目指针由上层带；这里只回调名 + 母题 models 锚）。
+    # 裸池外名落待命名池（含题目指针由上层带；这里只回调名 + 母题 models 锚）。
     if overflow and record_overflow is not None:
         mother_models = [c["id"] for c in confirmed] or [M00_ID]
         for name in overflow:
@@ -341,20 +430,35 @@ async def anchor_models(
             except Exception:
                 pass  # 待命名池落盘失败不拖垮主流程（G4：写失败由上层降级，不静默成成功）
 
-    if not confirmed:
-        # 候选空 / 全不确认 → M00 兜底（模型维非空拍板）。有池外名 → 一并 ⚠。
+    # 🔴 WS2·AC5：临时模型并入 models（参与 grade_observed 判档），并随 temp_models 返回供转正。
+    models_out: list[dict[str, Any]] = list(confirmed)
+    for tm in temp_models:
+        models_out.append({
+            "id": None,
+            "name": tm.get("name"),
+            "model_kind": "derived",
+            "isNew": True,
+            "tier_int": tm.get("tier_int"),
+            "freq_int": tm.get("freq_int"),
+        })
+
+    if not models_out:
+        # 候选空 / 全不确认 且无临时模型 → M00 兜底。有裸池外名 → 一并 ⚠。
         return {
             "models": [dict(M00)],
+            "temp_models": [],
             "model_overflow": overflow,
             "model_warn": bool(overflow),
             "model_flag": "overflow" if overflow else "m00_fallback",
         }
 
+    flag = "temp_model" if temp_models else ("overflow" if overflow else None)
     return {
-        "models": confirmed,
+        "models": models_out,
+        "temp_models": temp_models,
         "model_overflow": overflow,
-        "model_warn": bool(overflow),
-        "model_flag": "overflow" if overflow else None,
+        "model_warn": bool(overflow or temp_models),
+        "model_flag": flag,
     }
 
 
