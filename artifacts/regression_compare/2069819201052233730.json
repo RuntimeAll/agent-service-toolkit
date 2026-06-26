@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819201052233730",
+  "source": "ai_lesson_prep:biz_question:2069819201052233730",
+  "mother_meta": {
+    "qtype": "填空",
+    "grade": "七年级上册",
+    "main_kp": "利用法则比较大小",
+    "kp_id": "100001004002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "fail_after_regen",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "利用法则比较大小",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "相反数"
+      ]
+    },
+    "stem_hash": [
+      "621441747c2e5b224ea3a3d0c228ddafc1bb013fd624d60c16359993116cbb18",
+      "f168c442e2392102e796861abc0231177299b160f9cfb3d3a5b95379f3cadc7b",
+      "ac5f441c12eabd832d752fdf7708945615384af27891dbdd6c0bc84a57b6fed3"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 62.4
+}

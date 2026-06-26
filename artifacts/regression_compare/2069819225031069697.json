@@ -1,0 +1,94 @@
+{
+  "mother_id": "2069819225031069697",
+  "source": "ai_lesson_prep:biz_question:2069819225031069697",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "有理数的加法法则",
+    "kp_id": "100002001001001"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "有理数的加法法则",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "数轴",
+        "有理数的加法运算律"
+      ]
+    },
+    "stem_hash": [
+      "c722da7b440ff917bc36b371363eb7f36451c4625f0e454772024597abac9145",
+      "445b20aa9a957eb4763f0373fff5fc604fbf7de027e90bc03487bdff872e34e3",
+      "8f9d020e59574cae498763386e034e945eee43c8b9d42622436d3549017685ba"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 117.7
+}

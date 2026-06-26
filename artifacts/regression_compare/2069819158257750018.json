@@ -1,0 +1,91 @@
+{
+  "mother_id": "2069819158257750018",
+  "source": "ai_lesson_prep:biz_question:2069819158257750018",
+  "mother_meta": {
+    "qtype": "选择",
+    "grade": "七年级上册",
+    "main_kp": "自然数的应用",
+    "kp_id": "100001001001001"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "自然数的应用",
+      "grade": "七年级上册",
+      "injected_kps": []
+    },
+    "stem_hash": [
+      "c15b7d69296df95a3b113be069c1403a91250ad010092534b12b1dbf9ffd873a",
+      "456b83577e68327f9ed0ec2b9d827ce9de325797b1bdbee846afb0b1e02a5805",
+      "1553084ec91c2f0215716bc728cd6439a4f747651439aaa665cdadd7e614717b"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 1,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 55.2
+}

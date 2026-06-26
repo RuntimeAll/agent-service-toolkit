@@ -1,0 +1,95 @@
+{
+  "mother_id": "2069819563083583490",
+  "source": "ai_lesson_prep:biz_question:2069819563083583490",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "尺规作一条线段等于已知线段",
+    "kp_id": "100006003002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "warn",
+        "flags": [
+          "surface"
+        ]
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "warn"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "数字与母题完全相同（表皮没换）"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "尺规作一条线段等于已知线段",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "线段的和差"
+      ]
+    },
+    "stem_hash": [
+      "a7872e779f3df97a21f910ca2cd726d30e91f0c0522317cae5c5903bcf2917f5",
+      "0909d07976ac043082c46fb472b2ea913087feffa33628c6cbac9933612f5176",
+      "b89fdf020e4d00cde20315c7b8869d86b725a098d8a2cb088345e8ac02df1222"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 125.8
+}

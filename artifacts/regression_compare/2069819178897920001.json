@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819178897920001",
+  "source": "ai_lesson_prep:biz_question:2069819178897920001",
+  "mother_meta": {
+    "qtype": "选择",
+    "grade": "七年级上册",
+    "main_kp": "有理数与数轴上点的关系",
+    "kp_id": "100001002002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "有理数与数轴上点的关系",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "简单一元一次不等式"
+      ]
+    },
+    "stem_hash": [
+      "b8e9b3f50820e27a7c3561f7f3d08dd0175a6610d6ad5d939754e59847328675",
+      "b382f6952095193a67477b75649fd9f4ea9c3e1807a22f7554b77e482bb1d117",
+      "b424a39feeb0fe12a53d34061de84a9f99fae800469e365b7fca9e58309bef27"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 28.6
+}

@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819220148899841",
+  "source": "ai_lesson_prep:biz_question:2069819220148899841",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "全章综合训练",
+    "kp_id": "100001005"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "全章综合训练",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "有理数的加减混合运算"
+      ]
+    },
+    "stem_hash": [
+      "9cab2fbfc11c5986159e4e28efd282243e0c6540c4c2581dd1b59034cc95c410",
+      "73d80a19cc352f96f2061333f529924ed1c376164496598255a54d17e8e20155",
+      "5dea9bafe2cc18b0890927f46cbc6cbb78d1f97f2291e3b7b99a1c603f378e9f"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 65.5
+}

@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819420108148737",
+  "source": "ai_lesson_prep:biz_question:2069819420108148737",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "合并同类项",
+    "kp_id": "100004004002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "fail_after_regen",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "合并同类项",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "非负数的性质"
+      ]
+    },
+    "stem_hash": [
+      "048acaa8a514d37178120eb1c0a5b5180879b0909c4e352ecbb3158b06368581",
+      "07fbd0549198b7ad7f143070e792b3e5c9e27522b3fe46223cfbb0a8f283ab7a",
+      "665ac1f12d11e7b501816ec8fe06e94db62417f59e2a2d0b634f791c8f473a25"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 110.0
+}
