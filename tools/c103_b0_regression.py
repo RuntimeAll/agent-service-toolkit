@@ -271,9 +271,17 @@ def _compare_to_baseline(results: list[dict], out_dir: Path) -> int:
                           f"本次={cc.get('main_kp')}/{cc.get('grade')}")
 
         # ② 闸分布：无新 fail 类
+        #   🔴 PRD-C-103 批4 root-cause 修正：gateB 的 fail_after_regen / unverified 是**降级·标⚠放行**
+        #     verdict（变式**保留**交人审，不剔除、不阻塞——整改4·2026-06-12 + WS4 去 sympy 硬门后更是常态），
+        #     **非真 fail**。LLM 生成 stem run-to-run 非确定（温度0.5/中转无 seed）→ 某次随机变式答案恰被
+        #     sympy 判 fail_after_regen 是采样噪声不是回归（实测同母题再跑 3 个 fail→1 个 fail，非确定）。
+        #     真回归信号 = 变式被**剔除**（variant_count 缩水，下方④已查）或防撞 defect（③已查），不是
+        #     「verify 文本从 sympy_pass 漂成 fail_after_regen」。故白名单这两个放行态，只红真·硬 fail。
+        SOFT_VERIFY = {"fail_after_regen", "unverified", "pending"}  # 放行态（变式保留交人审），非真 fail
         for gk, key in (("gateA", "gate"), ("gateB", "verify")):
             bd, nd = _gate_dist(bfa.get(gk), key), _gate_dist(cfa.get(gk), key)
-            new_fail = {k for k in nd if "fail" in k.lower() and k not in bd}
+            new_fail = {k for k in nd
+                        if "fail" in k.lower() and k not in bd and k not in SOFT_VERIFY}
             if new_fail:
                 issues.append(f"{gk} 涌现新 fail 类={new_fail}（基线={bd} 本次={nd}）")
 
