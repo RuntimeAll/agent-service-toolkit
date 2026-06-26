@@ -26,7 +26,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from agents import dna_extract
-from agents.recognize import parse_json_lax
+from agents.recognize import _loads_lax, parse_json_lax
 
 SPLIT_TIMEOUT_S = 240.0
 SPLIT_TEMPERATURE = 0.1
@@ -117,9 +117,9 @@ def _salvage_questions(raw_text: str) -> dict[str, Any] | None:
         if end < 0:
             break  # 最后一题被截断，丢弃
         try:
-            questions.append(json.loads(s[start : end + 1]))
+            questions.append(_loads_lax(s[start : end + 1]))  # 修 LaTeX 非法转义
         except Exception:  # noqa: BLE001
-            break
+            continue  # 单题坏（非截断）→ 跳过它，继续抠后面的完整题
     if not questions:
         return None
     return {"questions": questions, "dropped": ["输出过长被截断，已保留前 %d 道完整题" % len(questions)]}

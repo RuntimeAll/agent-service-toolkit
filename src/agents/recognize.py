@@ -108,14 +108,33 @@ def build_recognize_prompt(*, solve: bool, grade_hint: str | None = None) -> str
 # ---------------------------------------------------------------------------
 # JSON 兜底解析（剥 markdown fence + 抓首个完整 {...}）
 # ---------------------------------------------------------------------------
+def _repair_invalid_escapes(s: str) -> str:
+    r"""修非法 JSON 转义：JSON 字符串里只允许 \" \\ \/ \b \f \n \r \t \uXXXX。
+
+    🔴 LLM 输出数学题常带 LaTeX（$a \parallel b$、\angle、\frac、\triangle…），其中 \p \a \f...
+    多数不是合法 JSON 转义 → json.loads 直接报 "Invalid \escape" / "Expecting ',' delimiter"
+    （实测整卷拆题踩）。把**非法的单反斜杠** \X 翻倍成 \\X（X 不是合法转义引导符时），
+    使 LaTeX 命令在 JSON 里成为字面反斜杠，解析通过、内容不丢。合法转义（\n \" \\ \uXXXX）不动。
+    """
+    return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", s)
+
+
+def _loads_lax(s: str) -> Any:
+    """json.loads 容错版：先原样，失败再修非法转义重试。"""
+    try:
+        return json.loads(s)
+    except Exception:
+        return json.loads(_repair_invalid_escapes(s))
+
+
 def parse_json_lax(text: str) -> dict[str, Any]:
-    """从 LLM 文本里抠出 JSON 对象（容错 fence / 前后噪音）。失败抛 ValueError。"""
+    """从 LLM 文本里抠出 JSON 对象（容错 fence / 前后噪音 / LaTeX 非法转义）。失败抛 ValueError。"""
     s = (text or "").strip()
     # 去 ```json ... ``` fence
     s = re.sub(r"^```(?:json)?\s*", "", s)
     s = re.sub(r"\s*```$", "", s).strip()
     try:
-        return json.loads(s)
+        return _loads_lax(s)
     except Exception:
         pass
     # 抓第一个 { 到与之配对的 }（栈匹配，跳过字符串内花括号）
@@ -142,7 +161,7 @@ def parse_json_lax(text: str) -> dict[str, Any]:
         elif c == "}":
             depth -= 1
             if depth == 0:
-                return json.loads(s[start : i + 1])
+                return _loads_lax(s[start : i + 1])
     raise ValueError("unbalanced JSON braces")
 
 
