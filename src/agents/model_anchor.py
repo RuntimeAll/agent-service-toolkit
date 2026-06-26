@@ -138,7 +138,8 @@ def lookup_candidates(
         for leaf in leaf_codes:
             cur.execute(
                 """
-                SELECT DISTINCT m.id, m.name, m.trigger_feature, m.action_conclusion, m.sort
+                SELECT DISTINCT m.id, m.name, m.trigger_feature, m.action_conclusion,
+                       m.sort, m.model_kind, m.difficulty_tier, m.freq_band
                 FROM biz_solution_model m
                 JOIN biz_solution_model_kp k ON k.model_id = m.id
                 WHERE k.bind_type IN ('primary','native')
@@ -151,12 +152,18 @@ def lookup_candidates(
             for r in cur.fetchall():
                 mid = str(r.get("id") or "").strip()
                 if mid and mid not in rows_by_id:
+                    # 🔴 PRD-C-103 WS1：带上控制面板列 difficulty_tier/freq_band（V911 已 apply、已填）。
+                    #   这是「改表→反控变式难度」的电线根 —— 旧 SQL 漏选这两列，导致锚定模型不带难度信号、
+                    #   grade_observed 永远退回基础阶/低频，改表完全不生效（C-103 ① 核实的真因）。
                     rows_by_id[mid] = {
                         "id": mid,
                         "name": str(r.get("name") or "").strip(),
                         "trigger_feature": str(r.get("trigger_feature") or "").strip(),
                         "action_conclusion": str(r.get("action_conclusion") or "").strip(),
                         "sort": r.get("sort"),
+                        "model_kind": str(r.get("model_kind") or "").strip() or None,
+                        "tier_int": r.get("difficulty_tier"),   # 1基础/2高阶（表真值，可空）
+                        "freq_int": r.get("freq_band"),         # 1低频/2高频（表真值，可空）
                     }
         out = sorted(
             rows_by_id.values(),
@@ -235,10 +242,11 @@ async def confirm_models(
     *,
     invoke: Any,
     model: str | None = None,
-) -> tuple[list[dict[str, str]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """池内确认（LLM 在候选子集里选 ≤3）。返回 (confirmed, overflow)。
 
-    confirmed = [{id,name}]（id ∈ candidates；去重；截 ≤MODELS_MAX）。
+    confirmed = [{id,name,(tier_int),(freq_int),(model_kind)}]（id ∈ candidates；去重；截 ≤MODELS_MAX）。
+    tier_int/freq_int = biz_solution_model 控制面板表真值（WS1，可空）。
     overflow  = [str]（LLM 给出的**池外**名/id，禁造词处置：不入正式维，落待命名池+⚠）。
     候选空 → 不调 LLM，直接 ([], [])（上层兜 M00）。
     LLM 失败/解析失败 → ([], [])（上层兜 M00，不卡死）。
@@ -272,7 +280,16 @@ async def confirm_models(
             cid = str(c.get("id"))
             if cid not in seen:
                 seen.add(cid)
-                confirmed.append({"id": cid, "name": str(c.get("name") or "")})
+                # 🔴 PRD-C-103 WS1：把表真值 tier_int/freq_int 随确认模型透传（控制面板电线）。
+                #   grade_observed 优先吃整数 tier_int/freq_int；缺则回退文本 tier/freqHint 兼容旧路。
+                m_out: dict[str, Any] = {"id": cid, "name": str(c.get("name") or "")}
+                if c.get("tier_int") is not None:
+                    m_out["tier_int"] = c.get("tier_int")
+                if c.get("freq_int") is not None:
+                    m_out["freq_int"] = c.get("freq_int")
+                if c.get("model_kind"):
+                    m_out["model_kind"] = c.get("model_kind")
+                confirmed.append(m_out)
         else:
             # 池外名/id：禁造词 → 不入正式维，原文留 overflow（待命名池 + ⚠）
             if p not in overflow:

@@ -1,0 +1,547 @@
+{
+  "summary": {
+    "model": "claude-opus-4-8",
+    "relay": "sui-xiang",
+    "questions": 4,
+    "llm_calls": 4,
+    "wall_s": 15.3,
+    "tokens": {
+      "prompt": 25690,
+      "completion": 7598,
+      "total": 33288
+    },
+    "cost_estimate": {
+      "usd_list": 0.089152,
+      "usd_kiro_x0.28": 0.024963,
+      "cny_kiro": 0.17973
+    },
+    "proposed_new_models": []
+  },
+  "results": [
+    {
+      "qid": 2069819518682681346,
+      "ok": true,
+      "duration_s": 13.1,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "分母小数1",
+              "current": "0.1",
+              "constraint": "0.1~0.5范围的一位小数"
+            },
+            {
+              "slot": "分母小数2",
+              "current": "0.2",
+              "constraint": "0.1~0.5范围的一位小数"
+            },
+            {
+              "slot": "分子系数组",
+              "current": "1+x, 0.4x-0.5",
+              "constraint": "小数系数的一次式"
+            },
+            {
+              "slot": "右侧常数",
+              "current": "1/2",
+              "constraint": "简单分数或小数"
+            }
+          ],
+          "modelingFrame": "含小数分母的一元一次分式方程，需先化小数分母为整数再去分母",
+          "conditions": [
+            "方程含小数分母",
+            "分子是一次式",
+            "右侧是常数"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "将分母化为整数（同乘10的幂）",
+            "去分母（方程两边同乘各分母最小公倍数）",
+            "去括号",
+            "【移项并合并同类项】",
+            "系数化为1",
+            "得解x=-3/2"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "小数分母方程",
+            "去分母",
+            "一元一次方程",
+            "化小数为整数"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1688
+    },
+    {
+      "qid": 2069819519202775042,
+      "ok": true,
+      "duration_s": 15.3,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "小数系数组1",
+              "current": "0.3, 0.8, 0.5",
+              "constraint": "一位小数,化简后分母为个位数"
+            },
+            {
+              "slot": "小数系数组2",
+              "current": "0.02, 0.3, 0.3",
+              "constraint": "一到两位小数,化简后分母为个位数"
+            },
+            {
+              "slot": "小数系数组3",
+              "current": "0.8, 0.4, 3",
+              "constraint": "一位小数或整数,分母为个位数"
+            },
+            {
+              "slot": "常数项",
+              "current": "1",
+              "constraint": "整数"
+            }
+          ],
+          "modelingFrame": "含小数系数的多项分式方程:小数化分数→通分去分母→去括号移项合并→系数化1",
+          "conditions": [
+            "方程含三个分式项和一个整数项",
+            "系数为小数需化为分数",
+            "去分母后可化为一元一次方程"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "小数化分数:0.3→3/10,0.8→8/10=4/5,0.5→1/2;0.02→2/100=1/50,0.3→3/10;0.8→8/10=4/5,0.4→4/10=2/5,得(3x+8)/5-(2x+30)/30-1=(8x-4)/30",
+            "【通分找最小公分母30,去分母:两边同乘30得6(3x+8)-(2x+30)-30=8x-4】",
+            "去括号整理:18x+48-2x-30-30=8x-4,合并同类项得8x=8,系数化1得x=1"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "小数系数方程",
+            "去分母",
+            "分式方程化简",
+            "一元一次方程"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1859
+    },
+    {
+      "qid": 2069819519689314306,
+      "ok": true,
+      "duration_s": 11.9,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "最外层系数",
+              "current": "3/2",
+              "constraint": "非零有理数"
+            },
+            {
+              "slot": "第二层系数",
+              "current": "2/3",
+              "constraint": "非零有理数"
+            },
+            {
+              "slot": "最内层分母",
+              "current": "4",
+              "constraint": "正整数"
+            },
+            {
+              "slot": "最内层常数",
+              "current": "-1",
+              "constraint": "有理数"
+            },
+            {
+              "slot": "第二层常数",
+              "current": "-2",
+              "constraint": "有理数"
+            },
+            {
+              "slot": "右侧常数",
+              "current": "2",
+              "constraint": "有理数"
+            }
+          ],
+          "modelingFrame": "多层嵌套括号的一元一次方程",
+          "conditions": [
+            "含三层嵌套中括号和小括号",
+            "系数为分数",
+            "未知数项在括号内部"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "去括号（由外向内逐层展开）",
+            "【移项、合并同类项得到 ax=b 标准形】",
+            "系数化为1求解"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "多层括号",
+            "去括号",
+            "分数系数",
+            "一元一次方程"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1776
+    },
+    {
+      "qid": 2069819520121327618,
+      "ok": true,
+      "duration_s": 14.9,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 5,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "最外层系数",
+              "current": "1/2",
+              "constraint": "正分数或小数"
+            },
+            {
+              "slot": "第二层系数",
+              "current": "1/3",
+              "constraint": "正分数或小数"
+            },
+            {
+              "slot": "第三层系数",
+              "current": "1/4",
+              "constraint": "正分数或小数"
+            },
+            {
+              "slot": "最内层系数",
+              "current": "1/5",
+              "constraint": "正分数或小数"
+            },
+            {
+              "slot": "嵌套层数",
+              "current": "4",
+              "constraint": "3-5层"
+            },
+            {
+              "slot": "各层常数项",
+              "current": "-1, -6, 4, 1",
+              "constraint": "小整数"
+            }
+          ],
+          "modelingFrame": "多层嵌套分式方程，通过逐层去分母、移项合并同类项，从外向内依次化简求解",
+          "conditions": [
+            "最外层：分数系数·{中括号式}=常数",
+            "逐层包含：分数系数·{更内层式}-常数",
+            "最内层：分数系数·x-常数"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "方程两边同时乘最外层分母消去最外层分数",
+            "移项、合并同类项化简",
+            "方程两边同时乘第二层分母消去第二层分数",
+            "【移项、合并同类项得到第三层系数为0的情况，直接得到最内层式子等于0】",
+            "消去最内层系数解得x"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "多层嵌套",
+            "去分母",
+            "逐层化简",
+            "一元一次方程"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 5,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1915
+    }
+  ]
+}

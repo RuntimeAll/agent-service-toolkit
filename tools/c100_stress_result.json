@@ -1,0 +1,136 @@
+{
+  "agg": {
+    "rounds": 10,
+    "完成率": "10/10",
+    "总LLM调用": 78,
+    "relay分布": {
+      "sui-xiang": 77,
+      "aigeek": 1
+    },
+    "failover次数(挂起切aigeek)": 1,
+    "error行": 0,
+    "近120s准挂起调用数": 1,
+    "生成链延迟s": [
+      149,
+      155,
+      63,
+      44,
+      90,
+      49,
+      70,
+      247,
+      85,
+      62
+    ],
+    "母题延迟s": [
+      102,
+      29,
+      33,
+      24,
+      21,
+      18,
+      19,
+      22,
+      34,
+      25
+    ],
+    "调用延迟ms_中位/p90/max": [
+      12672,
+      50484,
+      130875
+    ]
+  },
+  "rounds": [
+    {
+      "i": 0,
+      "ok": true,
+      "mother_dur": 102,
+      "gen_dur": 149,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 1,
+      "ok": true,
+      "mother_dur": 29,
+      "gen_dur": 155,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 2,
+      "ok": true,
+      "mother_dur": 33,
+      "gen_dur": 63,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 3,
+      "ok": true,
+      "mother_dur": 24,
+      "gen_dur": 44,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 4,
+      "ok": true,
+      "mother_dur": 21,
+      "gen_dur": 90,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 5,
+      "ok": true,
+      "mother_dur": 18,
+      "gen_dur": 49,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 6,
+      "ok": true,
+      "mother_dur": 19,
+      "gen_dur": 70,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 7,
+      "ok": true,
+      "mother_dur": 22,
+      "gen_dur": 247,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 8,
+      "ok": true,
+      "mother_dur": 34,
+      "gen_dur": 85,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    },
+    {
+      "i": 9,
+      "ok": true,
+      "mother_dur": 25,
+      "gen_dur": 62,
+      "items": 2,
+      "m_err": null,
+      "g_err": null
+    }
+  ],
+  "dur_s": 1342
+}

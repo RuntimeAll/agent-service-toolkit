@@ -1,0 +1,246 @@
+{
+  "summary": {
+    "model": "claude-opus-4-8",
+    "relay": "sui-xiang",
+    "questions": 2,
+    "llm_calls": 2,
+    "wall_s": 18.7,
+    "tokens": {
+      "prompt": 10813,
+      "completion": 3349,
+      "total": 14162
+    },
+    "cost_estimate": {
+      "usd_list": 0.038581,
+      "usd_kiro_x0.28": 0.010803,
+      "cny_kiro": 0.07778
+    },
+    "proposed_new_models": []
+  },
+  "results": [
+    {
+      "qid": 2069819501599281153,
+      "ok": true,
+      "duration_s": 18.1,
+      "has_images": true,
+      "image_b64_ok": 4,
+      "image_notes": [
+        "ok 1420B",
+        "ok 2091B",
+        "ok 1942B",
+        "ok 1635B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 1,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": true,
+            "risk": "低"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "{'slot': '目标和', 'currentValue': '63', 'constraint': '正整数，需使至少一种位置关系有整数解'}",
+            "{'slot': '日历结构', 'currentValue': '标准7列周历', 'constraint': '竖向间距7，横向间距1'}",
+            "{'slot': '位置关系', 'currentValue': '竖向/斜向/L型四种', 'constraint': '可改变三数相对位置'}"
+          ],
+          "modelingFrame": "日历数字位置关系→线性方程建模→整数解判定",
+          "conditions": [
+            "标准月历结构（每行7个数字）",
+            "圈出三个数a,b,c使和为63",
+            "四种候选位置关系：竖向连续(+7,+14)、斜向(+8,+16)、斜L型(+8,+14)、L型(+8,+7)"
+          ]
+        },
+        "questionType": "选择",
+        "dna": {
+          "solutionSkeleton": [
+            "设第一个数为x，根据位置关系用x表示另外两数",
+            "列出和的方程：3x+(位置增量和)=63",
+            "【解方程判断x是否为整数：x=(63-位置增量和)/3，检验分数性】",
+            "逐项验证ABCD四个选项，找出x为非整数的选项"
+          ],
+          "hardPoints": [
+            "需将图形位置关系准确转化为数量关系（竖向+7、斜向+8等）",
+            "识别C选项中x=41/3为分数解，不在日历范围内"
+          ],
+          "breakthroughPoints": [
+            "建立位置增量与方程系数的对应关系",
+            "判断解的整数性而非直接求解后验证日期合理性"
+          ],
+          "hardPointCount": 2,
+          "assessmentType": "应用建模",
+          "scenario": "2025年6月月历三数求和",
+          "tags": [
+            "日历应用",
+            "位置关系建模",
+            "一元一次方程",
+            "整数解判定"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 1,
+          "G": 1,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1830
+    },
+    {
+      "qid": 2069819459874344961,
+      "ok": true,
+      "duration_s": 12.5,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 2,
+          "D": 0,
+          "T": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": false,
+            "risk": "高-本题考查方程定义的概念辨析，改变数值会失去考点"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低-可改为判断哪些是方程、方程个数等"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高-纯概念辨析题无情境"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低-可增加选项数量或混入其他概念"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低-可改为选出是方程的选项"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "中-可推广到其他代数概念的定义辨析"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高-概念辨析题无法升维"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高-单一概念判定无需分类"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "高-概念题无变量"
+          }
+        },
+        "material": {
+          "parametricSlots": [],
+          "modelingFrame": "给出四个代数式（含等式和非等式），要求识别哪个不符合方程定义",
+          "conditions": [
+            "方程必须含有等号",
+            "方程必须含有未知数",
+            "选项C为非等式表达式"
+          ]
+        },
+        "questionType": "选择",
+        "dna": {
+          "solutionSkeleton": [
+            "逐项检查是否同时满足含等号和含未知数两个条件",
+            "识别C选项缺少等号，不符合方程定义"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "概念辨析",
+          "scenario": "纯代数",
+          "tags": [
+            "方程定义",
+            "概念辨析",
+            "等式识别"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 2,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1135
+    }
+  ]
+}

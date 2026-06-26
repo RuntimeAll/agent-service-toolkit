@@ -1,0 +1,54 @@
+[start] ALG=https://question-1256278081.cos.ap-shanghai.myqcloud.com/202 start_id=1443
+  round0: FAIL 母题300s 生成0s items=0 g_err=母题未达review
+  round1: OK 母题70s 生成98s items=2 g_err=None
+  round2: OK 母题26s 生成93s items=2 g_err=None
+  round3: OK 母题45s 生成155s items=2 g_err=None
+  round4: FAIL 母题45s 生成0s items=0 g_err=母题未达review
+  round5: OK 母题57s 生成79s items=2 g_err=None
+  round6: OK 母题41s 生成129s items=2 g_err=None
+  round7: OK 母题53s 生成85s items=2 g_err=None
+  round8: OK 母题65s 生成239s items=2 g_err=None
+  round9: OK 母题110s 生成90s items=2 g_err=None
+
+===== 压测稳定频率分布 =====
+{
+  "rounds": 10,
+  "完成率": "8/10",
+  "总LLM调用": 63,
+  "relay分布": {
+    "sui-xiang": 63
+  },
+  "failover次数(挂起切aigeek)": 0,
+  "error行": 0,
+  "近120s准挂起调用数": 0,
+  "生成链延迟s": [
+    0,
+    98,
+    93,
+    155,
+    0,
+    79,
+    129,
+    85,
+    239,
+    90
+  ],
+  "母题延迟s": [
+    300,
+    70,
+    26,
+    45,
+    45,
+    57,
+    41,
+    53,
+    65,
+    110
+  ],
+  "调用延迟ms_中位/p90/max": [
+    20046,
+    67625,
+    113734
+  ]
+}
+[结果落 D:\workplace\book-ai\codeplace-C\_learn-langgraph\agent-service-toolkit\tools\c100_stress_result.json] 总耗时 1780s

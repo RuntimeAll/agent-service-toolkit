@@ -1,0 +1,95 @@
+{
+  "mother_id": "2069819189333348354",
+  "source": "ai_lesson_prep:biz_question:2069819189333348354",
+  "mother_meta": {
+    "qtype": "填空",
+    "grade": "七年级上册",
+    "main_kp": "绝对值的性质",
+    "kp_id": "100001003002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "warn",
+        "flags": [
+          "surface"
+        ]
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "绝对值的性质",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "不等式的基本性质"
+      ]
+    },
+    "stem_hash": [
+      "1264656fdb2d04c7229480f43cb8dc4b7367e8e09889b9ef61b44c9939b5c1dd",
+      "16515e4b7df2386658af7a6633f02441499c752ca726bf4b35ef297b9cfe7949",
+      "37f062e43e66422c022b9f80d29ed37282f3a91a536e7ac106f0e4cad81ac178"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 1,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 1,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 2,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 93.1
+}

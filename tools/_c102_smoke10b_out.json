@@ -1,0 +1,1548 @@
+{
+  "summary": {
+    "model": "claude-opus-4-8",
+    "relay": "sui-xiang",
+    "questions": 10,
+    "llm_calls": 10,
+    "wall_s": 38.8,
+    "tokens": {
+      "prompt": 36715,
+      "completion": 16649,
+      "total": 53364
+    },
+    "cost_estimate": {
+      "usd_list": 0.167944,
+      "usd_kiro_x0.28": 0.047024,
+      "cny_kiro": 0.338575
+    },
+    "proposed_new_models": [
+      {
+        "qid": 2069819163341246466,
+        "name": "埃及分数拆分试凑",
+        "triggerFeature": "给定分数需拆成两个分子为1的分数之和",
+        "action": "通过试凑找到两个分母使其倒数和等于目标分数"
+      },
+      {
+        "qid": 2069819195960348673,
+        "name": "非负数之和为零各项为零",
+        "triggerFeature": "多个绝对值或平方和等于零",
+        "action": "利用非负数和为零则各非负数均为零,列方程组求解"
+      },
+      {
+        "qid": 2069819196870512641,
+        "name": "数轴上绝对值和最值模型",
+        "triggerFeature": "求多个|x-a_i|之和的最小值",
+        "action": "偶数个取中间两点间任意值，奇数个取中位数点"
+      }
+    ]
+  },
+  "results": [
+    {
+      "qid": 2069819304466993154,
+      "ok": true,
+      "duration_s": 14.3,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "公因数",
+              "current": "7⅓, -5⅗",
+              "constraint": "带分数或小数"
+            },
+            {
+              "slot": "加项系数",
+              "current": "-5, -7, -12 和 -2, 7, -4",
+              "constraint": "整数且和为有理数"
+            },
+            {
+              "slot": "题数",
+              "current": "2",
+              "constraint": "1~3"
+            }
+          ],
+          "modelingFrame": "多项乘积式,各项含公因数,提取公因数后括号内先算加减",
+          "conditions": [
+            "各乘项含相同因数",
+            "因数为带分数或小数",
+            "提取后括号内为整数加减"
+          ]
+        },
+        "questionType": "计算题",
+        "dna": {
+          "solutionSkeleton": [
+            "观察各项找公因数",
+            "【提取公因数,将原式改写为 公因数×(系数和) 形式】",
+            "先算括号内加减",
+            "再算乘法得结果"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "有理数乘法",
+            "分配律逆用",
+            "提取公因数",
+            "运算律"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1548
+    },
+    {
+      "qid": 2069819163341246466,
+      "ok": true,
+      "duration_s": 17.8,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "",
+            "name": "埃及分数拆分试凑",
+            "isNew": true,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "给定分数需拆成两个分子为1的分数之和",
+            "action": "通过试凑找到两个分母使其倒数和等于目标分数"
+          }
+        ],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "分子",
+              "current": "9和13",
+              "constraint": "正整数，小于分母"
+            },
+            {
+              "slot": "分母",
+              "current": "20和x",
+              "constraint": "正整数，大于分子"
+            },
+            {
+              "slot": "拆分的埃及分数分母",
+              "current": "4,5和6,7或4,9",
+              "constraint": "正整数，需使两埃及分数和等于目标"
+            }
+          ],
+          "modelingFrame": "将分数a/b拆成1/m + 1/n的形式，需满足a/b = 1/m + 1/n",
+          "conditions": [
+            "目标分数是真分数",
+            "拆分结果的两个分数分子都是1",
+            "两个埃及分数的和等于目标分数"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "理解埃及分数定义：分子为1的分数",
+            "【第(1)问试凑：找两个分母使1/m + 1/n = 9/20，通分验证1/4 + 1/5 = (5+4)/20 = 9/20】",
+            "【第(2)问逆向试凑：找两组分母使1/m + 1/n = 13/某数，如1/6 + 1/7 = 13/42、1/4 + 1/9 = 13/36】"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "阅读理解迁移",
+          "scenario": "古埃及分数运算背景",
+          "tags": [
+            "埃及分数",
+            "分数拆分",
+            "试凑法",
+            "新定义题"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "levelDictLabel": "基础",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1884
+    },
+    {
+      "qid": 2069819185768189954,
+      "ok": true,
+      "duration_s": 14.8,
+      "has_images": true,
+      "image_b64_ok": 1,
+      "image_notes": [
+        "ok 5551B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 1,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "点A坐标",
+              "current": "-3",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "点B坐标",
+              "current": "-1.5",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "点C坐标",
+              "current": "0",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "点D坐标",
+              "current": "4",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "新原点位置",
+              "current": "点B",
+              "constraint": "A、B、C、D中任一点"
+            },
+            {
+              "slot": "点的数量",
+              "current": "4",
+              "constraint": "3~6个点"
+            }
+          ],
+          "modelingFrame": "给定若干点在数轴上的初始坐标，改变原点位置后求各点新坐标",
+          "conditions": [
+            "初始数轴上各点坐标已知",
+            "原点改变到某已知点",
+            "点的实际位置不变",
+            "需计算新坐标系下各点坐标"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "在数轴上按给定坐标描出A、B、C、D四个点",
+            "确认新原点位置：原点取在点B处，则B表示0",
+            "【计算其他点相对新原点的位移：BC间距离1.5，C在B右侧，故C表示1.5；CD间距离4，故BD间距离5.5，D在B右侧，故D表示5.5；AB间距离1.5，A在B左侧，故A表示-1.5】"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "数轴上原点变换",
+          "tags": [
+            "数轴",
+            "坐标变换",
+            "原点平移",
+            "相对位置",
+            "有理数"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 3,
+          "D": 1,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L2(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1930
+    },
+    {
+      "qid": 2069819195960348673,
+      "ok": true,
+      "duration_s": 16.9,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY07",
+            "name": "转化化归",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          },
+          {
+            "id": "",
+            "name": "非负数之和为零各项为零",
+            "isNew": true,
+            "tier": "基础",
+            "freqHint": "通法",
+            "triggerFeature": "多个绝对值或平方和等于零",
+            "action": "利用非负数和为零则各非负数均为零,列方程组求解"
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "非负数性质",
+            "等式变形"
+          ],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "x的定位值",
+              "current": "2",
+              "constraint": "有理数"
+            },
+            {
+              "slot": "y的第一定位值",
+              "current": "1",
+              "constraint": "有理数"
+            },
+            {
+              "slot": "y的第二定位值",
+              "current": "4",
+              "constraint": "有理数且大于第一定位值"
+            },
+            {
+              "slot": "等式右侧",
+              "current": "y-1",
+              "constraint": "与某个绝对值内部表达式一致"
+            }
+          ],
+          "modelingFrame": "已知|x-a|+|y-b|+|y-c|=y-b(其中b<c),求x+y",
+          "conditions": [
+            "等式左侧含三个绝对值",
+            "等式右侧与其中一个绝对值内部表达式相同",
+            "通过非负数性质化归为两个绝对值和为零"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "观察等式右侧y-1,推出y-1≥0",
+            "化简|y-1|=y-1,代入原式得|x-2|+|y-4|=0",
+            "【利用非负数和为零性质,得|x-2|=0且|y-4|=0】",
+            "解得x=2,y=4,计算x+y=6"
+          ],
+          "hardPoints": [
+            "识别等式右侧y-1对应左侧某绝对值内部,推出y-1≥0从而化简该绝对值"
+          ],
+          "breakthroughPoints": [
+            "发现等式右侧y-1就是|y-1|的内部表达式,据此判断其非负性并化简"
+          ],
+          "hardPointCount": 1,
+          "assessmentType": "性质判定",
+          "scenario": "纯代数",
+          "tags": [
+            "绝对值方程",
+            "非负数性质",
+            "等式变形",
+            "代数求值"
+          ]
+        },
+        "difficulty": {
+          "level": 3,
+          "levelName": "中档",
+          "levelDictLabel": "较难",
+          "modelHits": [
+            {
+              "modelId": "TY07",
+              "name": "转化化归",
+              "tier": 2,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L3(a)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY07",
+            "name": "转化化归",
+            "tier": "高阶",
+            "freqHint": "通法"
+          }
+        ]
+      },
+      "raw_len": 2190
+    },
+    {
+      "qid": 2069819171373338626,
+      "ok": true,
+      "duration_s": 17.0,
+      "has_images": true,
+      "image_b64_ok": 1,
+      "image_notes": [
+        "ok 6503B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 4,
+          "D": 1,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "方格规模",
+              "current": "5×5",
+              "constraint": "n×n方格(n≥3)"
+            },
+            {
+              "slot": "起点位置",
+              "current": "A点",
+              "constraint": "网格上任意点"
+            },
+            {
+              "slot": "目标点数量",
+              "current": "4个(A,B,C,D)",
+              "constraint": "2~6个点"
+            },
+            {
+              "slot": "移动步骤数",
+              "current": "4步",
+              "constraint": "2~8步"
+            },
+            {
+              "slot": "行走路径",
+              "current": "A→B→C→D",
+              "constraint": "任意点序列"
+            }
+          ],
+          "modelingFrame": "方格网格坐标表示法：用有序数对(水平位移,竖直位移)表示路径，正负号表示方向，读图或按步骤累加确定终点位置，路程为各位移绝对值之和",
+          "conditions": [
+            "5×5方格网格",
+            "向上向右为正，向下向左为负",
+            "有序数对第一数表示水平方向，第二数表示竖直方向",
+            "已知A→B(+1,+4)的对应关系",
+            "已知点A,B,C,D在网格上的位置"
+          ]
+        },
+        "questionType": "计算题",
+        "dna": {
+          "solutionSkeleton": [
+            "根据规定向右为正、向上为正，读图得A点到C点水平右移3格、竖直上移4格，记为A→C(+3,+4)",
+            "读图得B点到D点水平右移3格、竖直下移2格，记为B→D(+3,-2)",
+            "从A点依次按(+2,+2),(+2,-1),(-2,+3),(-1,-2)平移，累加得终点P位置并在图中标出",
+            "计算路径A→B→C→D各段路程：|1|+|4|=5，|2|=2，|1|+|2|=3，路程总和=5+2+3=10"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "阅读理解迁移",
+          "scenario": "甲虫在方格网格上按规定符号表示移动路径",
+          "tags": [
+            "有序数对",
+            "方向性移动",
+            "正负数应用",
+            "网格路径",
+            "路程计算"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 4,
+          "D": 1,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": [],
+        "questionTypeLLM": "解答题",
+        "questionTypeConflict": true
+      },
+      "raw_len": 2017
+    },
+    {
+      "qid": 2069819218978689025,
+      "ok": false,
+      "duration_s": 11.1,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": false,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 0,
+          "R": 0,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {},
+        "material": {
+          "parametricSlots": [],
+          "modelingFrame": "",
+          "conditions": []
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": null,
+          "scenario": "",
+          "tags": []
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 0,
+          "R": 0,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L2(degrade-observed)",
+          "warn": true,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）",
+            "⚠ labeler 未给可用 K/R 因子，兜底 L2"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1717
+    },
+    {
+      "qid": 2069819196870512641,
+      "ok": true,
+      "duration_s": 23.5,
+      "has_images": true,
+      "image_b64_ok": 1,
+      "image_notes": [
+        "ok 2411B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY02",
+            "name": "数形结合",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          },
+          {
+            "id": "",
+            "name": "数轴上绝对值和最值模型",
+            "isNew": true,
+            "tier": "基础",
+            "freqHint": "通法",
+            "triggerFeature": "求多个|x-a_i|之和的最小值",
+            "action": "偶数个取中间两点间任意值，奇数个取中位数点"
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "数轴几何意义转化",
+            "中位数定位法"
+          ],
+          "K": 1,
+          "R": 12,
+          "D": 2,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "边界点a",
+              "current": "-2",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "边界点b",
+              "current": "3",
+              "constraint": "任意有理数且b>a"
+            },
+            {
+              "slot": "定值和",
+              "current": "5",
+              "constraint": "正数，可等于|b-a|"
+            },
+            {
+              "slot": "绝对值个数",
+              "current": "2个/4个/3个/617个",
+              "constraint": "正整数"
+            },
+            {
+              "slot": "绝对值内边界点",
+              "current": "-3,4/-7,-4,2,5/-6,-3,2/1~617",
+              "constraint": "有理数序列"
+            }
+          ],
+          "modelingFrame": "利用数轴上绝对值的几何意义（距离），将|x-a_1|+|x-a_2|+...+|x-a_n|转化为x到各点距离之和，根据奇偶性确定最值位置",
+          "conditions": [
+            "多个绝对值代数式之和",
+            "绝对值可改写为|x-a_i|形式",
+            "求满足定值的整数解或求最小值",
+            "偶数个时最小值在中间两点间取得",
+            "奇数个时最小值在中位数点取得"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "（1）将|x+2|改写为|x-(-2)|，识别为x到-2和3的距离之和",
+            "因-2到3距离为5，距离和为5等于端点距离，故x在[-2,3]之间",
+            "列出该区间的所有整数解",
+            "（2）①识别|x+3|+|x-4|为x到-3和4距离之和",
+            "【偶数个绝对值：当x在两端点之间时距离和最小，等于两端点距离7，范围-3≤x≤4】",
+            "②同理将4个绝对值对应点-7,-4,2,5排序，取中间两点-4和2之间任意x使和最小",
+            "计算最小值=(-4)-(-7)+(2-(-4))+(5-2)=18",
+            "（3）①识别3个绝对值对应点-6,-3,2",
+            "【奇数个绝对值：取中位数点x=-3使和最小】",
+            "计算最小值=|-3+6|+0+|-3-2|=8",
+            "②617个绝对值对应点1到617，中位数为第309个数",
+            "故x=309时取最小值"
+          ],
+          "hardPoints": [
+            "理解绝对值几何意义与数轴距离的对应关系",
+            "区分偶数个与奇数个绝对值和最值的取法规律"
+          ],
+          "breakthroughPoints": [
+            "将|x+a|改写为|x-(-a)|建立距离解释",
+            "偶数个取中间区间、奇数个取中位数的规律"
+          ],
+          "hardPointCount": 2,
+          "assessmentType": "探究归纳",
+          "scenario": "数轴上点的距离关系",
+          "tags": [
+            "绝对值几何意义",
+            "数轴距离",
+            "最值问题",
+            "中位数",
+            "递进探究"
+          ]
+        },
+        "difficulty": {
+          "level": 3,
+          "levelName": "中档",
+          "levelDictLabel": "较难",
+          "modelHits": [
+            {
+              "modelId": "TY02",
+              "name": "数形结合",
+              "tier": 2,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 1,
+          "R": 12,
+          "D": 2,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L3(a)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY02",
+            "name": "数形结合",
+            "tier": "高阶",
+            "freqHint": "通法"
+          }
+        ],
+        "questionTypeLLM": "解答题",
+        "questionTypeConflict": true
+      },
+      "raw_len": 2782
+    },
+    {
+      "qid": 2069819237773365249,
+      "ok": true,
+      "duration_s": 17.2,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY08",
+            "name": "新定义阅读迁移",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "新定义阅读迁移"
+          ],
+          "K": 1,
+          "R": 5,
+          "D": 1,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "运算规则",
+              "current": "同号得正异号得负且绝对值相加,零运算得绝对值",
+              "constraint": "可改为其他双目运算规则(如同号相减/异号相加等)"
+            },
+            {
+              "slot": "第1问具体算例数",
+              "current": "6",
+              "constraint": "4~8个算例"
+            },
+            {
+              "slot": "第2问嵌套层数",
+              "current": "2层",
+              "constraint": "2~3层嵌套"
+            },
+            {
+              "slot": "第3问验证对象",
+              "current": "加法结合律",
+              "constraint": "可换为交换律/分配律/其他运算律"
+            },
+            {
+              "slot": "数值范围",
+              "current": "整数 [-15,+15]",
+              "constraint": "可扩展到分数或更大整数"
+            }
+          ],
+          "modelingFrame": "新定义运算探究模式：(1)给出算例→归纳规则；(2)按规则计算嵌套式；(3)验证运算律成立性",
+          "conditions": [
+            "给出6组新运算☆的示例结果",
+            "要求归纳运算法则(填空)",
+            "计算含嵌套的新运算式",
+            "验证新运算是否满足加法结合律"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "观察6组算例的符号与数值规律",
+            "【归纳运算法则：同号得正、异号得负、绝对值相加；零运算得绝对值】",
+            "从内向外按规则计算 0☆(-12)=12, (+11)☆(+12)=23",
+            "分别计算左结合与右结合形式，发现 -23≠23",
+            "判定不满足加法结合律"
+          ],
+          "hardPoints": [
+            "从看似无章的算例中抽象出统一运算法则"
+          ],
+          "breakthroughPoints": [
+            "分同号/异号/含零三种情况分别观察，找到符号规律与数值规律的共性"
+          ],
+          "hardPointCount": 1,
+          "assessmentType": "阅读理解迁移",
+          "scenario": "新定义运算规则探究",
+          "tags": [
+            "新定义运算",
+            "归纳推理",
+            "运算律验证",
+            "有理数运算"
+          ]
+        },
+        "difficulty": {
+          "level": 3,
+          "levelName": "中档",
+          "levelDictLabel": "较难",
+          "modelHits": [
+            {
+              "modelId": "TY08",
+              "name": "新定义阅读迁移",
+              "tier": 2,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 1,
+          "R": 5,
+          "D": 1,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L3(a)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY08",
+            "name": "新定义阅读迁移",
+            "tier": "高阶",
+            "freqHint": "通法"
+          }
+        ]
+      },
+      "raw_len": 2188
+    },
+    {
+      "qid": 2069819342685491202,
+      "ok": true,
+      "duration_s": 18.2,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY04",
+            "name": "归纳找规律",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          },
+          {
+            "id": "TY06",
+            "name": "裂项相消",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          },
+          {
+            "id": "TY08",
+            "name": "新定义阅读迁移",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "归纳找规律",
+            "裂项相消",
+            "取整函数运算"
+          ],
+          "K": 2,
+          "R": 5,
+          "D": 2,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "高"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "第一问序号",
+              "current": "4",
+              "constraint": "正整数n≥2"
+            },
+            {
+              "slot": "第二问终点序号",
+              "current": "50",
+              "constraint": "正整数m≥3"
+            },
+            {
+              "slot": "规律公式形式",
+              "current": "√(1+1/n²+1/(n+1)²)=1+1/n-1/(n+1)",
+              "constraint": "保持结构"
+            }
+          ],
+          "modelingFrame": "给定数列前几项呈现的规律,要求:(1)归纳出通项公式并计算特定项;(2)利用裂项相消求和并结合取整函数计算最终结果",
+          "conditions": [
+            "给出三个等式展示规律",
+            "定义取整函数[a]为不超过a的最大整数",
+            "要求计算49项和的取整值"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "观察①②③三式,发现规律:√(1+1/n²+1/(n+1)²)=1+1/n-1/(n+1)",
+            "【(1)套用规律:√(1+1/4²+1/5²)=1+1/4-1/5=1+5/20-4/20=1又1/20】",
+            "【(2)代入规律化简49项:原式=[1又1/2+1又1/6+1又1/12+⋯+1又1/(49×50)]】",
+            "【裂项相消:每项1+1/n-1/(n+1)拆开,中间项1/2-1/3+1/3-1/4+⋯+1/49-1/50相消,得49+1-1/50=49又49/50】",
+            "取整:[49又49/50]=49"
+          ],
+          "hardPoints": [
+            "从三个特例归纳出通项公式√(1+1/n²+1/(n+1)²)=1+1/n-1/(n+1)",
+            "识别1/n-1/(n+1)形式可裂项相消",
+            "理解取整函数[a]的定义并正确计算49又49/50的取整值"
+          ],
+          "breakthroughPoints": [
+            "对比三个等式的下标变化规律(n,n+1)找到通项",
+            "将带分数形式改写为1+分数,使49个1单独处理",
+            "利用裂项使中间分数项首尾相消仅留1-1/50"
+          ],
+          "hardPointCount": 3,
+          "assessmentType": "探究归纳",
+          "scenario": "纯代数",
+          "tags": [
+            "算术平方根",
+            "归纳规律",
+            "裂项相消",
+            "取整函数",
+            "数列求和"
+          ]
+        },
+        "difficulty": {
+          "level": 4,
+          "levelName": "压轴",
+          "levelDictLabel": "压轴",
+          "modelHits": [
+            {
+              "modelId": "TY04",
+              "name": "归纳找规律",
+              "tier": 2,
+              "freqBand": 2
+            },
+            {
+              "modelId": "TY06",
+              "name": "裂项相消",
+              "tier": 2,
+              "freqBand": 2
+            },
+            {
+              "modelId": "TY08",
+              "name": "新定义阅读迁移",
+              "tier": 2,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 2,
+          "R": 5,
+          "D": 2,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L4(b)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY04",
+            "name": "归纳找规律",
+            "tier": "高阶",
+            "freqHint": "通法"
+          },
+          {
+            "id": "TY06",
+            "name": "裂项相消",
+            "tier": "高阶",
+            "freqHint": "通法"
+          },
+          {
+            "id": "TY08",
+            "name": "新定义阅读迁移",
+            "tier": "高阶",
+            "freqHint": "通法"
+          }
+        ]
+      },
+      "raw_len": 2576
+    },
+    {
+      "qid": 2069819628711858178,
+      "ok": true,
+      "duration_s": 20.9,
+      "has_images": true,
+      "image_b64_ok": 2,
+      "image_notes": [
+        "ok 1156B",
+        "ok 2231B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY01",
+            "name": "分类讨论",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          },
+          {
+            "id": "TY10",
+            "name": "方程建模",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "分类讨论",
+            "方程建模"
+          ],
+          "K": 2,
+          "R": 8,
+          "D": 2,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "初始时刻",
+              "current": "10:45",
+              "constraint": "任意整点或整点加分钟数"
+            },
+            {
+              "slot": "目标钟面角",
+              "current": "90°",
+              "constraint": "0°~180°内任意角度"
+            },
+            {
+              "slot": "时间段范围",
+              "current": "13:20~14:00",
+              "constraint": "任意时间段"
+            },
+            {
+              "slot": "角平分情形数",
+              "current": "3种",
+              "constraint": "2~4种"
+            },
+            {
+              "slot": "参考点位置",
+              "current": "刻度3(90°)",
+              "constraint": "刻度1~12任意位置"
+            }
+          ],
+          "modelingFrame": "给定时针分针转速与初始位置，设经过x分钟后钟面角满足某条件，建立关于x的方程求解",
+          "conditions": [
+            "分针转速6°/分",
+            "时针转速0.5°/分",
+            "钟面角定义为时针与分针夹角，规定在0°~180°之间",
+            "初始时刻与目标角度关系",
+            "时间段范围限制"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "第(1)问：由初始时刻10:45计算时针位置，用时针转速×分钟数求得钟面角",
+            "第(2)问：设13时x分钟时钟面角为90°，建立方程 30+0.5x±90=6x 或 30+0.5x±270=6x",
+            "【解方程得x值，减去起始时刻20分钟得经过时长，需分两种情况讨论（加90°或加270°）】",
+            "第(3)问：设14时m分，分三种情况讨论哪条射线是角平分线",
+            "情况①：OA为OB和OC夹角的平分线，列方程求m",
+            "情况②：OC为OA和OB夹角的平分线，列方程求m",
+            "情况③：OB为OA和OC夹角的平分线，列方程求m",
+            "检验每种情况的m值是否在时间段范围内，筛选有效解"
+          ],
+          "hardPoints": [
+            "第(2)问需识别两种可能的角度关系（顺时针夹角90°或逆时针夹角270°对应钟面角90°），建立两个不同方程",
+            "第(3)问需分三种情况讨论哪条射线是角平分线，每种情况建立不同的角度等量关系方程"
+          ],
+          "breakthroughPoints": [
+            "理解钟面角在0°~180°范围内的规定，当实际夹角超过180°时需用360°减去",
+            "第(2)问关键在于识别90°的钟面角可由两种位置关系产生（分针在时针前90°或后270°）",
+            "第(3)问关键在于穷举三条射线中哪条是另两条夹角的平分线，逐一建模求解"
+          ],
+          "hardPointCount": 3,
+          "assessmentType": "应用建模",
+          "scenario": "时钟钟面角计算与角平分线判定",
+          "tags": [
+            "钟面角",
+            "方程建模",
+            "分类讨论",
+            "角平分线",
+            "时间计算"
+          ]
+        },
+        "difficulty": {
+          "level": 3,
+          "levelName": "中档",
+          "levelDictLabel": "较难",
+          "modelHits": [
+            {
+              "modelId": "TY01",
+              "name": "分类讨论",
+              "tier": 2,
+              "freqBand": 2
+            },
+            {
+              "modelId": "TY10",
+              "name": "方程建模",
+              "tier": 1,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 2,
+          "R": 8,
+          "D": 2,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L3(a)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY01",
+            "name": "分类讨论",
+            "tier": "高阶",
+            "freqHint": "通法"
+          },
+          {
+            "id": "TY10",
+            "name": "方程建模",
+            "tier": "基础",
+            "freqHint": "通法"
+          }
+        ]
+      },
+      "raw_len": 2360
+    }
+  ]
+}

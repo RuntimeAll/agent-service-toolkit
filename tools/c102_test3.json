@@ -1,0 +1,348 @@
+{
+  "summary": {
+    "model": "claude-opus-4-8",
+    "relay": "sui-xiang",
+    "questions": 3,
+    "llm_calls": 3,
+    "wall_s": 22.0,
+    "tokens": {
+      "prompt": 17459,
+      "completion": 5523,
+      "total": 22982
+    },
+    "cost_estimate": {
+      "usd_list": 0.063104,
+      "usd_kiro_x0.28": 0.017669,
+      "cny_kiro": 0.127217
+    },
+    "proposed_new_models": []
+  },
+  "results": [
+    {
+      "qid": 2069819459874344961,
+      "ok": true,
+      "duration_s": 11.3,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 1,
+          "D": 0,
+          "T": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": false,
+            "risk": "高-本题考核方程定义，无数值可变"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低-可改变选项式子形式保持定义辨析"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高-方程概念题不适合情境化"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低-可增删选项或改判定要求"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低-可改为选出是方程的"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高-概念辨析题无推广空间"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高-定义辨析不适合升维"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高-本题已是判别题无需分类"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "高-无变量可定值"
+          }
+        },
+        "material": {
+          "parametricSlots": [],
+          "modelingFrame": "",
+          "conditions": [
+            "四个选项中三个是方程，一个不是方程",
+            "判断依据为方程定义：含未知数的等式"
+          ]
+        },
+        "questionType": "选择",
+        "dna": {
+          "solutionSkeleton": [
+            "【逐一检查各选项是否符合方程定义（含未知数且是等式）】"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "概念辨析",
+          "scenario": "纯代数",
+          "tags": [
+            "方程概念",
+            "定义辨析",
+            "等式判定"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 1,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1064
+    },
+    {
+      "qid": 2069819460398632962,
+      "ok": true,
+      "duration_s": 22.0,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 1,
+          "D": 0,
+          "T": 2,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": false,
+            "risk": "高-题目本质是概念辨析，改数值无意义"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低-可改式子形式（如分式/根式/多次方程）测同一概念"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高-方程概念无实际情境"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低-可增减备选式子数量或调整干扰项类型"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中-可改为给方程定义让学生构造实例，但考点偏移"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "低-可推广到二元方程/不等式概念辨析"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高-概念题无需升维"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高-本身已是逐项判断，再分类无意义"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "高-概念辨析不涉及定值问题"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "{'slot': '备选式子集', 'current': ['m=0', '2x>3', 'x²+x-2=0', 'y/x+2=0', 'x=x-1', 'xy=4'], 'range': '含等号的代数式、不等式、恒等式、分式方程、二元方程等'}",
+            "{'slot': '干扰项特征', 'current': ['不等式', '化简后不含未知数的恒等式'], 'range': '近似方程但缺失要素的式子'}"
+          ],
+          "modelingFrame": "给定若干代数式（含等式、不等式、恒等式、分式方程等），按方程定义（含等号+含未知数）逐项判断是否为方程，统计符合条件个数",
+          "conditions": [
+            "方程定义：含有未知数的等式",
+            "需排除不等式（无等号）",
+            "需排除恒等式（化简后不含未知数）",
+            "含等号且含未知数的式子均为方程（不限一元、次数、整分式）"
+          ]
+        },
+        "questionType": "选择",
+        "dna": {
+          "solutionSkeleton": [
+            "【逐项判断：①m=0 含等号含未知数→是方程；②2x>3 不等式无等号→非方程；③x²+x-2=0 含等号含未知数→是方程；④y/x+2=0 含等号含未知数→是方程；⑤x=x-1 化简为 0=-1 不含未知数→非方程；⑥xy=4 含等号含未知数→是方程；统计①③④⑥共4个】"
+          ],
+          "hardPoints": [
+            "⑤化简陷阱：x=x-1 表面含未知数但化简后为矛盾式 0=-1（不含未知数），易误判为方程",
+            "概念边界：需明确方程不限制元数（二元 xy=4 也是方程）、次数（二次方程也是方程）、整分式（分式方程也是方程）"
+          ],
+          "breakthroughPoints": [
+            "死扣方程定义两要素：含等号 + 含未知数，缺一不可",
+            "对形如 x=x+常数 的恒等式先化简再判定是否含未知数"
+          ],
+          "hardPointCount": 2,
+          "assessmentType": "概念辨析",
+          "scenario": "纯代数",
+          "tags": [
+            "方程概念",
+            "概念辨析",
+            "恒等式识别",
+            "不等式排除",
+            "逐项判断"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 1,
+          "D": 0,
+          "T": 2,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1768
+    },
+    {
+      "qid": 2069819460918726658,
+      "ok": true,
+      "duration_s": 13.9,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "无情境背景"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中，需保证选项中有解"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "升维变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "本题无分类场景"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "本题无参数"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "{'slot': '方程次数', 'current': '3次', 'range': '可变为2次、4次等'}",
+            "{'slot': '一次项系数', 'current': '2', 'range': '可改为其他整数'}",
+            "{'slot': '常数项', 'current': '-3', 'range': '可改为其他整数'}",
+            "{'slot': '选项数值', 'current': '[0, 1, -1, -2]', 'range': '可改为其他整数组合'}"
+          ],
+          "modelingFrame": "判定选项是否为方程 f(x)=c 的解",
+          "conditions": [
+            "方程为 x³+2x=-3",
+            "四个选项：A.x=0  B.x=1  C.x=-1  D.x=-2",
+            "需逐一代入验证左边是否等于右边"
+          ]
+        },
+        "questionType": "选择",
+        "dna": {
+          "solutionSkeleton": [
+            "将选项A x=0代入方程左边，得0≠-3，排除A",
+            "将选项B x=1代入方程左边，得1+2=3≠-3，排除B",
+            "【将选项C x=-1代入方程左边，得(-1)³+2(-1)=-1-2=-3=右边，确认C为解】",
+            "将选项D x=-2代入方程左边，得(-2)³+2(-2)=-8-4=-12≠-3，排除D"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "概念辨析",
+          "scenario": "纯代数",
+          "tags": [
+            "方程的解",
+            "代入验证",
+            "三次方程",
+            "选择题"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1770
+    }
+  ]
+}

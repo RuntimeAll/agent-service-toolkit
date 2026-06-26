@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819240654852097",
+  "source": "ai_lesson_prep:biz_question:2069819240654852097",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "有理数的减法法则",
+    "kp_id": "100002002001001"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "有理数的减法法则",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "数轴上两点间的距离"
+      ]
+    },
+    "stem_hash": [
+      "732067433d67721a946e5208fb41520009d61e7935144aecefc12b5cdbc93ec1",
+      "f3c590dea84d435be00619c238265bae67f3705907d3b575ebcffd31440c3cd9",
+      "e3d740aa728bfc091d60b12aa532826acb6547c48cc853fe3e0332e770fe6933"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 3,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 129.8
+}

@@ -1,0 +1,1463 @@
+{
+  "summary": {
+    "model": "claude-opus-4-8",
+    "relay": "sui-xiang",
+    "questions": 10,
+    "llm_calls": 10,
+    "wall_s": 30.0,
+    "tokens": {
+      "prompt": 35629,
+      "completion": 14704,
+      "total": 50333
+    },
+    "cost_estimate": {
+      "usd_list": 0.152809,
+      "usd_kiro_x0.28": 0.042786,
+      "cny_kiro": 0.308062
+    },
+    "proposed_new_models": []
+  },
+  "results": [
+    {
+      "qid": 2069819158257750018,
+      "ok": true,
+      "duration_s": 12.0,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 2,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "自然数值",
+              "current": "2",
+              "constraint": "0~100 常见自然数"
+            },
+            {
+              "slot": "情境背景",
+              "current": "蒲草植物高度",
+              "constraint": "生活中可测量的事物"
+            },
+            {
+              "slot": "应用类别",
+              "current": "测量",
+              "constraint": "自然数的应用场景（计数/测量/编号/排序）"
+            }
+          ],
+          "modelingFrame": "识别生活情境中自然数的应用类别",
+          "conditions": [
+            "给出含自然数的生活情境描述",
+            "提供自然数应用类别的选项"
+          ]
+        },
+        "questionType": "选择题",
+        "dna": {
+          "solutionSkeleton": [
+            "识别题干中的自然数 2 在情境中的作用为表示植物高度",
+            "判定高度属于测量应用"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "概念辨析",
+          "scenario": "古籍中植物高度描述",
+          "tags": [
+            "自然数应用",
+            "概念理解",
+            "情境识别",
+            "测量"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "levelDictLabel": "基础",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 2,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1500
+    },
+    {
+      "qid": 2069819203078082561,
+      "ok": true,
+      "duration_s": 11.9,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "物质1名称与温度",
+              "current": "水 0°C",
+              "constraint": "常见物质及其冻结/熔点/沸点温度"
+            },
+            {
+              "slot": "物质2名称与温度",
+              "current": "酒精 -117°C",
+              "constraint": "常见物质及其冻结/熔点/沸点温度"
+            },
+            {
+              "slot": "物质3名称与温度",
+              "current": "水银 -39°C",
+              "constraint": "常见物质及其冻结/熔点/沸点温度"
+            }
+          ],
+          "modelingFrame": "给出若干物质及其特征温度值(含负数),利用绝对值比较负数大小,找出最值",
+          "conditions": [
+            "标准大气压下",
+            "三种物质的冻结温度(两负一零)",
+            "求冻结温度最低者"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "对各负数求绝对值:|-117|=117,|-39|=39",
+            "比较绝对值大小:117>39",
+            "【根据负数绝对值大的反而小,得:-117<-39<0】",
+            "确定冻结温度最低为-117°C"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "标准大气压下物质冻结温度比较",
+          "tags": [
+            "负数比较大小",
+            "绝对值应用",
+            "温度情境"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1346
+    },
+    {
+      "qid": 2069819247269269506,
+      "ok": true,
+      "duration_s": 13.4,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 1,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "初始存粮量",
+              "current": "112吨",
+              "constraint": "正整数，50~200吨"
+            },
+            {
+              "slot": "天数",
+              "current": "7天",
+              "constraint": "正整数，5~10天"
+            },
+            {
+              "slot": "进出数据组",
+              "current": "[+23,-15,-19,+37,-23,-21,+15]",
+              "constraint": "7个有理数，绝对值10~50，正负混合"
+            }
+          ],
+          "modelingFrame": "初始量+正负数累加求最终量；绝对值累加求总变化量",
+          "conditions": [
+            "给定初始存粮量",
+            "给定连续若干天的进出数据表（正数=进库，负数=出库）",
+            "问(1)最终增减情况；问(2)总进出量"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "问(1)：初始量112加上所有进出数（带符号）= 112+23-15-19+37-23-21+15 = 109吨",
+            "【比较109与112，得减少3吨】",
+            "问(2)：所有进出数取绝对值后相加 = |+23|+|-15|+|-19|+|+37|+|-23|+|-21|+|+15| = 153吨"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "粮库进出库存统计",
+          "tags": [
+            "有理数加减混合运算",
+            "正负数实际意义",
+            "绝对值求总量",
+            "表格数据"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "levelDictLabel": "基础",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 3,
+          "D": 1,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": [],
+        "questionTypeLLM": "应用题",
+        "questionTypeConflict": true
+      },
+      "raw_len": 1693
+    },
+    {
+      "qid": 2069819292278345730,
+      "ok": true,
+      "duration_s": 18.8,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 5,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "第(1)题底数",
+              "current": "-6",
+              "constraint": "负整数或负分数"
+            },
+            {
+              "slot": "第(1)题指数",
+              "current": "2",
+              "constraint": "小正整数2~4"
+            },
+            {
+              "slot": "第(1)题除数分母",
+              "current": "3/2",
+              "constraint": "简单分数"
+            },
+            {
+              "slot": "第(1)题乘数",
+              "current": "2/3",
+              "constraint": "简单分数"
+            },
+            {
+              "slot": "第(1)题小数底数",
+              "current": "0.5",
+              "constraint": "0.5或0.2等简单小数"
+            },
+            {
+              "slot": "第(1)题小数指数",
+              "current": "3",
+              "constraint": "2~4"
+            },
+            {
+              "slot": "第(2)题整数因子",
+              "current": "-12",
+              "constraint": "负整数-12~-6"
+            },
+            {
+              "slot": "第(2)题分母组",
+              "current": "1/6, 1/3, 1/4",
+              "constraint": "单位分数,分母6的倍数"
+            },
+            {
+              "slot": "第(2)题末项底数",
+              "current": "-1/2",
+              "constraint": "负单位分数"
+            },
+            {
+              "slot": "第(3)题负一指数",
+              "current": "2024",
+              "constraint": "偶数大数"
+            },
+            {
+              "slot": "第(3)题外层因子",
+              "current": "1/3",
+              "constraint": "单位分数"
+            },
+            {
+              "slot": "第(3)题负底数",
+              "current": "-2",
+              "constraint": "负整数-3~-1"
+            },
+            {
+              "slot": "第(3)题负数指数",
+              "current": "3",
+              "constraint": "奇数2~5"
+            }
+          ],
+          "modelingFrame": "有理数混合运算:幂运算→乘除→加减,注意负号和括号的运算顺序",
+          "conditions": [
+            "含乘方运算(负数、小数、分数的幂)",
+            "含分数的乘除运算",
+            "含小数与分数混合",
+            "含括号的分配律应用",
+            "含负数的奇偶次幂"
+          ]
+        },
+        "questionType": "计算题",
+        "dna": {
+          "solutionSkeleton": [
+            "识别运算顺序:先乘方再乘除后加减",
+            "【计算各乘方:-6²=-36, 0.5³=0.125, (-1)^2024=-1, (-2)³=-8】",
+            "处理乘除:连续乘除从左到右,分数乘除转为乘倒数",
+            "应用分配律:(-12)×(1/6-1/3-1/4)拆为三项分别乘",
+            "合并同类项得最终结果"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "有理数混合运算",
+            "幂运算",
+            "分配律",
+            "负数运算",
+            "运算顺序"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 5,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 2728
+    },
+    {
+      "qid": 2069819340210851841,
+      "ok": true,
+      "duration_s": 9.4,
+      "has_images": true,
+      "image_b64_ok": 1,
+      "image_notes": [
+        "ok 5205B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "长方形长",
+              "current": "2",
+              "constraint": "正数"
+            },
+            {
+              "slot": "长方形宽",
+              "current": "1",
+              "constraint": "正数"
+            }
+          ],
+          "modelingFrame": "给定长方形尺寸，求拼成等面积正方形的边长",
+          "conditions": [
+            "长方形长为2宽为1",
+            "拼成正方形面积相等"
+          ]
+        },
+        "questionType": "选择题",
+        "dna": {
+          "solutionSkeleton": [
+            "计算长方形面积：2×1=2",
+            "【设正方形边长a，列方程a²=2】",
+            "解方程得a=±√2，取正值a=√2"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "长方形剪拼成正方形",
+          "tags": [
+            "算术平方根",
+            "面积不变",
+            "几何拼图",
+            "平方根非负性"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L2(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1389
+    },
+    {
+      "qid": 2069819390634774530,
+      "ok": true,
+      "duration_s": 11.7,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 4,
+          "R": 6,
+          "D": 0,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "相反数运算数值",
+              "current": "-2",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "立方根被开方数",
+              "current": "3⅜",
+              "constraint": "完全立方数的分数形式"
+            },
+            {
+              "slot": "平方根被开方数",
+              "current": "9",
+              "constraint": "完全平方数"
+            },
+            {
+              "slot": "绝对值内数值",
+              "current": "-5",
+              "constraint": "任意有理数"
+            },
+            {
+              "slot": "数的个数",
+              "current": "4",
+              "constraint": "3-6个"
+            }
+          ],
+          "modelingFrame": "化简含相反数、根式、绝对值的表达式,在数轴上标出各数,按大小关系排序",
+          "conditions": [
+            "给定4个含运算符号的数",
+            "需化简各数",
+            "需在数轴上表示",
+            "需用不等号连接"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "化简相反数: -(-2)=2",
+            "化简立方根: ³√(27/8)=3/2",
+            "化简负平方根: -√9=-3",
+            "【化简绝对值: |-5|=5】",
+            "在数轴上标出各数位置",
+            "按从大到小顺序用>连接: |-5|>-(-2)>³√(3⅜)>-√9"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "相反数",
+            "立方根",
+            "平方根",
+            "绝对值",
+            "数轴表示",
+            "大小比较"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 4,
+          "R": 6,
+          "D": 0,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 1848
+    },
+    {
+      "qid": 2069819437397069826,
+      "ok": true,
+      "duration_s": 16.4,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY04",
+            "name": "归纳找规律",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "归纳通项"
+          ],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "底数",
+              "current": "2",
+              "constraint": "正整数，2~5为宜"
+            },
+            {
+              "slot": "求第n项",
+              "current": "10",
+              "constraint": "正整数，6~12为宜"
+            },
+            {
+              "slot": "第②行变换规则",
+              "current": "+2",
+              "constraint": "加减常数，±1~±5"
+            },
+            {
+              "slot": "第③行变换规则",
+              "current": "÷2",
+              "constraint": "乘除底数幂次，如÷2、×2、÷4等"
+            },
+            {
+              "slot": "代数式结构",
+              "current": "2x-y-2z",
+              "constraint": "三行数的线性组合"
+            }
+          ],
+          "modelingFrame": "观察多行数列 → 归纳各行通项公式(含底数幂次、符号规律) → 求指定项 → 代入代数式计算",
+          "conditions": [
+            "第①行：(-1)^n · 2^n 型幂次数列，符号正负交替",
+            "第②行：第①行对应项+常数",
+            "第③行：第①行对应项除以某常数",
+            "求第10项时n=10"
+          ]
+        },
+        "questionType": "选择题",
+        "dna": {
+          "solutionSkeleton": [
+            "观察第①行数列特征：底数2、指数递增、符号交替 → 归纳通项 x=2^10",
+            "观察第②行数列特征：比第①行对应项大2 → 归纳通项 y=2^10+2",
+            "观察第③行数列特征：为第①行对应项的一半 → 归纳通项 z=2^9",
+            "【代入代数式：2x-y-2z = 2×2^10-(2^10+2)-2×2^9 = 2^11-2^10-2-2^10 = -2】"
+          ],
+          "hardPoints": [
+            "从离散数据中识别出底数幂次+符号交替的复合规律"
+          ],
+          "breakthroughPoints": [
+            "将三行数列分别与2的幂次建立对应关系"
+          ],
+          "hardPointCount": 1,
+          "assessmentType": "探究归纳",
+          "scenario": "纯代数",
+          "tags": [
+            "数列规律",
+            "幂的运算",
+            "多行数列",
+            "代数式求值"
+          ]
+        },
+        "difficulty": {
+          "level": 3,
+          "levelName": "中档",
+          "levelDictLabel": "较难",
+          "modelHits": [
+            {
+              "modelId": "TY04",
+              "name": "归纳找规律",
+              "tier": 2,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L3(a)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY04",
+            "name": "归纳找规律",
+            "tier": "高阶",
+            "freqHint": "通法"
+          }
+        ]
+      },
+      "raw_len": 2181
+    },
+    {
+      "qid": 2069819486550118402,
+      "ok": true,
+      "duration_s": 14.6,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "第(1)题左边常数项",
+              "current": "3",
+              "constraint": "整数或简单分数"
+            },
+            {
+              "slot": "第(1)题括号内x系数",
+              "current": "-2",
+              "constraint": "非零整数"
+            },
+            {
+              "slot": "第(1)题括号内常数项",
+              "current": "3",
+              "constraint": "整数"
+            },
+            {
+              "slot": "第(1)题右边常数项",
+              "current": "2",
+              "constraint": "整数"
+            },
+            {
+              "slot": "第(1)题右边括号前系数",
+              "current": "-3",
+              "constraint": "非零整数"
+            },
+            {
+              "slot": "第(1)题右边括号内x系数",
+              "current": "2",
+              "constraint": "非零整数"
+            },
+            {
+              "slot": "第(1)题右边括号内常数项",
+              "current": "-1",
+              "constraint": "整数"
+            },
+            {
+              "slot": "第(2)题最外层分数系数",
+              "current": "2/3",
+              "constraint": "简单分数"
+            },
+            {
+              "slot": "第(2)题中层分数系数",
+              "current": "3/2",
+              "constraint": "简单分数"
+            },
+            {
+              "slot": "第(2)题括号内常数项",
+              "current": "-4",
+              "constraint": "整数"
+            },
+            {
+              "slot": "第(2)题中括号后常数项",
+              "current": "-6",
+              "constraint": "整数"
+            },
+            {
+              "slot": "第(2)题右边x系数",
+              "current": "2",
+              "constraint": "非零整数"
+            },
+            {
+              "slot": "第(2)题右边常数项",
+              "current": "1",
+              "constraint": "整数"
+            }
+          ],
+          "modelingFrame": "ax+b(cx+d)=e+f(gx+h) 或 p[q(x+r)+s]=tx+u 型一元一次方程",
+          "conditions": [
+            "方程中含括号需去括号",
+            "方程两边含未知项需移项",
+            "方程含分数系数需处理",
+            "最终化为ax=b形式求解"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "去括号展开方程",
+            "移项将未知项移至一边、常数项移至另一边",
+            "合并同类项",
+            "【系数化1得解】"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "一元一次方程",
+            "去括号",
+            "移项合并",
+            "分数系数方程"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [],
+          "proxy": false,
+          "K": 1,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        },
+        "_table_hits": []
+      },
+      "raw_len": 2589
+    },
+    {
+      "qid": 2069819537192144898,
+      "ok": true,
+      "duration_s": 14.1,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY10",
+            "name": "方程建模",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "方程建模"
+          ],
+          "K": 2,
+          "R": 4,
+          "D": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": false,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "原排放总量",
+              "current": "92 mg/km",
+              "constraint": "正数，大于改进后总量"
+            },
+            {
+              "slot": "改进后排放总量",
+              "current": "40 mg/km",
+              "constraint": "正数，小于标准上限50"
+            },
+            {
+              "slot": "A类降低比例",
+              "current": "50%",
+              "constraint": "0%~100%"
+            },
+            {
+              "slot": "B类降低比例",
+              "current": "75%",
+              "constraint": "0%~100%"
+            },
+            {
+              "slot": "A类标准上限",
+              "current": "35 mg/km",
+              "constraint": "正数"
+            }
+          ],
+          "modelingFrame": "设改进后A类排放量为x，则B类为(总量-x)；由改进前后关系列方程：x/(1-A降低率) + (总量-x)/(1-B降低率) = 原总量；解方程得x值，与标准比较判断",
+          "conditions": [
+            "A类物质改进前后降低比例",
+            "B类物质改进前后降低比例",
+            "改进前A、B总排放量",
+            "改进后A、B总排放量",
+            "标准要求的A类上限"
+          ]
+        },
+        "questionType": "解答题",
+        "dna": {
+          "solutionSkeleton": [
+            "设改进后A类排放量为x mg/km，则B类为(40-x) mg/km",
+            "根据降低比例关系：改进前A类=x/(1-50%)=2x，改进前B类=(40-x)/(1-75%)=4(40-x)",
+            "【列方程：2x + 4(40-x) = 92，解得x=34】",
+            "比较：34 < 35，符合标准"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "应用建模",
+          "scenario": "汽车排放标准达标判定",
+          "tags": [
+            "一元一次方程应用",
+            "百分比降低",
+            "环保标准",
+            "方程建模",
+            "实际应用"
+          ]
+        },
+        "difficulty": {
+          "level": 2,
+          "levelName": "巩固",
+          "levelDictLabel": "中等",
+          "modelHits": [
+            {
+              "modelId": "TY10",
+              "name": "方程建模",
+              "tier": 1,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 2,
+          "R": 4,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L2(b-longchain)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY10",
+            "name": "方程建模",
+            "tier": "基础",
+            "freqHint": "通法"
+          }
+        ],
+        "questionTypeLLM": "应用题",
+        "questionTypeConflict": true
+      },
+      "raw_len": 2142
+    },
+    {
+      "qid": 2069819595195174913,
+      "ok": true,
+      "duration_s": 11.1,
+      "has_images": true,
+      "image_b64_ok": 1,
+      "image_notes": [
+        "ok 5141B"
+      ],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [
+          {
+            "id": "TY04",
+            "name": "归纳找规律",
+            "isNew": false,
+            "tier": "基础",
+            "freqHint": "一次性",
+            "triggerFeature": "",
+            "action": ""
+          }
+        ],
+        "factors": {
+          "highStrategies": [
+            "枚举计数",
+            "组合计数规律"
+          ],
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "G": 1
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "低"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中"
+          },
+          "逆向变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "推广变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高"
+          },
+          "分类讨论化": {
+            "usable": false,
+            "risk": "高"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "中"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            {
+              "slot": "射线条数",
+              "current": "3",
+              "constraint": "1~6条（再多枚举量爆炸）"
+            },
+            {
+              "slot": "角的性质",
+              "current": "锐角",
+              "constraint": "锐角/直角/钝角/平角内"
+            }
+          ],
+          "modelingFrame": "在∠AOB内部依次作n条射线，求图中满足某性质的角的个数",
+          "conditions": [
+            "∠AOB是锐角",
+            "依次作射线OC、OD、OE",
+            "所有新生成的角都是锐角"
+          ]
+        },
+        "questionType": "填空题",
+        "dna": {
+          "solutionSkeleton": [
+            "【枚举所有以O为顶点、由射线两两组成的角】",
+            "按起始边分类：以OA为起始边的角4个，以OC为起始边的角3个，以OD为起始边的角2个，以OE为起始边的角1个",
+            "累加得总数 4+3+2+1=10"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "几何图形中的角计数",
+          "tags": [
+            "角的计数",
+            "枚举",
+            "组合数",
+            "射线"
+          ]
+        },
+        "difficulty": {
+          "level": 3,
+          "levelName": "中档",
+          "levelDictLabel": "较难",
+          "modelHits": [
+            {
+              "modelId": "TY04",
+              "name": "归纳找规律",
+              "tier": 2,
+              "freqBand": 2
+            }
+          ],
+          "proxy": false,
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 1,
+          "L": 0,
+          "rule": "L3(a)",
+          "warn": false,
+          "notes": []
+        },
+        "_table_hits": [
+          {
+            "id": "TY04",
+            "name": "归纳找规律",
+            "tier": "高阶",
+            "freqHint": "通法"
+          }
+        ]
+      },
+      "raw_len": 1661
+    }
+  ]
+}

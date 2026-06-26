@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819227585400834",
+  "source": "ai_lesson_prep:biz_question:2069819227585400834",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "有理数加法的应用",
+    "kp_id": "100002001001002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "有理数加法的应用",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "有理数大小比较"
+      ]
+    },
+    "stem_hash": [
+      "b3f6112bb65b725d82471cc48fa195ea681b73ae1b0082d3d8f423c4b3697c3a",
+      "23908cdfbeb8a25c7d138cddbd400b0592f06951b6e0ce70556137e88425e506",
+      "bdabe2c9e33dfb399824cad5dd190b458cb95f8d730ba14987971947f069d0e3"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 3,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 129.7
+}

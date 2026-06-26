@@ -1,0 +1,501 @@
+{
+  "summary": {
+    "model": "claude-opus-4-8",
+    "relay": "sui-xiang",
+    "questions": 4,
+    "llm_calls": 4,
+    "wall_s": 20.8,
+    "tokens": {
+      "prompt": 23415,
+      "completion": 7803,
+      "total": 31218
+    },
+    "cost_estimate": {
+      "usd_list": 0.087402,
+      "usd_kiro_x0.28": 0.024473,
+      "cny_kiro": 0.176202
+    },
+    "proposed_new_models": []
+  },
+  "results": [
+    {
+      "qid": 2069819518682681346,
+      "ok": true,
+      "duration_s": 16.0,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 1,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "本题为纯代数方程，无实际情境"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "中，需保证小数系数结构完整"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "升维变换": {
+            "usable": true,
+            "risk": "中，可升维至含参或分式方程但需控制难度"
+          },
+          "分类讨论化": {
+            "usable": true,
+            "risk": "中，可引入参数导致分类但需合理"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "{'slot': '左端分子系数', 'current': '1', 'constraint': '整数'}",
+            "{'slot': '左端第一分母', 'current': '0.1', 'constraint': '一位小数'}",
+            "{'slot': '中端分子系数', 'current': '0.4和-0.5', 'constraint': '一位小数'}",
+            "{'slot': '中端分母', 'current': '0.2', 'constraint': '一位小数'}",
+            "{'slot': '右端常数', 'current': '1/2', 'constraint': '分数'}"
+          ],
+          "modelingFrame": "含小数系数的一元一次分式方程",
+          "conditions": [
+            "左端：(1+x)/0.1",
+            "中端：(0.4x-0.5)/0.2",
+            "右端：1/2",
+            "需先化小数分母为整数"
+          ]
+        },
+        "questionType": "解答",
+        "dna": {
+          "solutionSkeleton": [
+            "将分母化为整数，得 (10+10x)-(4x-5)/2=1/2",
+            "【去分母，得 (20+20x)-(4x-5)=1】",
+            "去括号，得 20+20x-4x+5=1",
+            "移项，得 20x-4x=1-20-5",
+            "合并同类项，得 16x=-24",
+            "系数化为1，得 x=-3/2"
+          ],
+          "hardPoints": [
+            "小数分母化整数时需同时处理分子",
+            "去分母时括号内整体乘公分母",
+            "去括号时负号分配易出错"
+          ],
+          "breakthroughPoints": [
+            "识别小数系数需先化整",
+            "正确通分找最小公倍数2",
+            "去括号时-(4x-5)符号变化"
+          ],
+          "hardPointCount": 3,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "一元一次方程",
+            "小数系数",
+            "去分母",
+            "去括号",
+            "分式方程基础"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 1,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 2049
+    },
+    {
+      "qid": 2069819519202775042,
+      "ok": true,
+      "duration_s": 19.2,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 1,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "不适用纯代数方程"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "不适用一元一次"
+          },
+          "分类讨论化": {
+            "usable": true,
+            "risk": "中"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "{'slot': '分子系数', 'current': [0.3, 0.8, 0.02, 0.3, 0.8, 0.4], 'constraint': '小数,需避免化简后分母为0'}",
+            "{'slot': '分母', 'current': [0.5, 0.3, 3], 'constraint': '非零小数或整数'}",
+            "{'slot': '常数项', 'current': [-1], 'constraint': '任意实数'}"
+          ],
+          "modelingFrame": "小数分式方程标准流程：小数化整数(×10^n) → 通分找最简公分母 → 去分母 → 移项合并 → 系数化1",
+          "conditions": [
+            "方程含三个小数分式项和一个常数项",
+            "需先将小数化为整数形式",
+            "最简公分母为30",
+            "解需验证是否使原方程分母为0"
+          ]
+        },
+        "questionType": "解答",
+        "dna": {
+          "solutionSkeleton": [
+            "将各分式中的小数系数同时乘以10的幂次化为整数：0.3x+0.8 → 3x+8(分子分母同×10), 0.02x+0.3 → 2x+30(分子分母同×100), 0.8x-0.4 → 8x-4(分子分母同×10)",
+            "化简各分式分母：0.5→5, 0.3→3(实为30因前面已×100), 3→30",
+            "【找最简公分母30,去分母：方程两边同乘30得 6(3x+8)-(2x+30)-30=8x-4】",
+            "去括号展开：18x+48-2x-30-30=8x-4",
+            "移项合并同类项：18x-2x-8x=-4-48+30+30, 得 8x=8",
+            "系数化1：x=1"
+          ],
+          "hardPoints": [
+            "小数化整数时需注意分子分母同步处理,易漏乘分母",
+            "确定最简公分母30需同时兼顾5,30,30三个分母"
+          ],
+          "breakthroughPoints": [
+            "识别出小数系数需先化为整数再处理",
+            "正确找到最简公分母并统一去分母"
+          ],
+          "hardPointCount": 2,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "小数分式方程",
+            "去分母",
+            "一元一次方程",
+            "化小数为整数"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 1,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1723
+    },
+    {
+      "qid": 2069819519689314306,
+      "ok": true,
+      "duration_s": 13.8,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "不适用——纯代数计算题无情境"
+          },
+          "条件增删": {
+            "usable": false,
+            "risk": "高——方程去条件或加条件易失解题性"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "升维变换": {
+            "usable": true,
+            "risk": "中"
+          },
+          "分类讨论化": {
+            "usable": true,
+            "risk": "中"
+          },
+          "定值化": {
+            "usable": false,
+            "risk": "高——方程本身就是求定值解"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "{'slot': '外层系数', 'current': '3/2', 'constraint': '非零有理数'}",
+            "{'slot': '次层系数', 'current': '2/3', 'constraint': '非零有理数'}",
+            "{'slot': '内层分母', 'current': '4', 'constraint': '正整数'}",
+            "{'slot': '内层常数', 'current': '-1', 'constraint': '有理数'}",
+            "{'slot': '次层常数', 'current': '-2', 'constraint': '有理数'}",
+            "{'slot': '右侧常数', 'current': '2', 'constraint': '有理数'}"
+          ],
+          "modelingFrame": "多层嵌套括号的一元一次方程：a[b(cx+d)+e]-fx=g",
+          "conditions": [
+            "方程含三层嵌套括号结构",
+            "未知数 x 在最内层",
+            "系数含分数",
+            "需逐层去括号、移项、合并同类项、系数化为1"
+          ]
+        },
+        "questionType": "解答",
+        "dna": {
+          "solutionSkeleton": [
+            "去括号：展开最外层得 (x/4-1-3)-x=2",
+            "移项、合并同类项：得 -3x/4=6",
+            "【系数化为1：两边同除以 -3/4 得 x=-8】"
+          ],
+          "hardPoints": [],
+          "breakthroughPoints": [],
+          "hardPointCount": 0,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "多层嵌套括号",
+            "分数系数方程",
+            "去括号",
+            "一元一次方程"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 3,
+          "D": 0,
+          "T": 0,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1514
+    },
+    {
+      "qid": 2069819520121327618,
+      "ok": true,
+      "duration_s": 20.8,
+      "has_images": false,
+      "image_b64_ok": 0,
+      "image_notes": [],
+      "grade_text": "数学七年级上(浙教版)",
+      "label": {
+        "_parse_ok": true,
+        "models": [],
+        "factors": {
+          "highStrategies": [],
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 1,
+          "G": 0
+        },
+        "variationProfile": {
+          "数值变换": {
+            "usable": true,
+            "risk": "低"
+          },
+          "结构变换": {
+            "usable": true,
+            "risk": "中—改变嵌套层数会影响计算步数和复杂度"
+          },
+          "情境变换": {
+            "usable": false,
+            "risk": "高—纯代数方程无情境依附"
+          },
+          "条件增删": {
+            "usable": true,
+            "risk": "低"
+          },
+          "逆向变换": {
+            "usable": true,
+            "risk": "低—可改为已知解求参数"
+          },
+          "推广变换": {
+            "usable": true,
+            "risk": "中—可推广为n层嵌套但需配合递推表达"
+          },
+          "升维变换": {
+            "usable": false,
+            "risk": "高—一元方程升维无自然路径"
+          },
+          "分类讨论化": {
+            "usable": true,
+            "risk": "低—可引入参数或绝对值增加讨论"
+          },
+          "定值化": {
+            "usable": true,
+            "risk": "低—可将嵌套中某层改为参数后求参数使解为定值"
+          }
+        },
+        "material": {
+          "parametricSlots": [
+            "各层嵌套的系数分母可参数化：1/2, 1/3, 1/4, 1/5",
+            "各层常数项可参数化：-1, -6, +4",
+            "右侧常数可参数化：1"
+          ],
+          "modelingFrame": "多层嵌套分式一元一次方程：从外向内逐层去分母、移项合并，直至解出未知数",
+          "conditions": [
+            "四层嵌套的花括号-中括号-小括号结构",
+            "最外层系数1/2",
+            "第二层系数1/3，常数项+4",
+            "第三层系数1/4，常数项-6",
+            "最内层系数1/5，常数项-1",
+            "方程右侧为1"
+          ]
+        },
+        "questionType": "解答",
+        "dna": {
+          "solutionSkeleton": [
+            "识别多层嵌套结构，确定从外向内逐层化简策略",
+            "【第一层去分母：两边乘2，得 1/3[1/4(1/5·x-1)-6]+4=2，移项合并得 1/3[1/4(1/5·x-1)-6]=-2】",
+            "第二层去分母：两边乘3，得 1/4(1/5·x-1)-6=-6，移项合并得 1/4(1/5·x-1)=0",
+            "第三层去分母：由 1/4(1/5·x-1)=0 得 1/5·x-1=0",
+            "第四层去分母并移项：1/5·x=1",
+            "系数化1：x=5"
+          ],
+          "hardPoints": [
+            "多层嵌套的括号识别与逐层剥离顺序把握",
+            "每层去分母后的移项合并同类项不出错",
+            "中间步骤 1/4(...)=0 直接得内层为0的处理"
+          ],
+          "breakthroughPoints": [
+            "认识到从外到内逐层去分母是处理嵌套分式方程的标准路径",
+            "发现某层化简为0后可直接令内层表达式为0，跳过该层去分母"
+          ],
+          "hardPointCount": 2,
+          "assessmentType": "直接计算",
+          "scenario": "纯代数",
+          "tags": [
+            "多层嵌套分式方程",
+            "逐层去分母",
+            "移项合并",
+            "括号层次识别",
+            "一元一次方程"
+          ]
+        },
+        "difficulty": {
+          "level": 1,
+          "levelName": "送分",
+          "modelHits": [],
+          "proxy": true,
+          "K": 1,
+          "R": 6,
+          "D": 0,
+          "T": 1,
+          "G": 0,
+          "L": 0,
+          "rule": "L1(a)",
+          "warn": false,
+          "notes": [
+            "无模型命中（labeler 未观察到高阶策略）"
+          ]
+        }
+      },
+      "raw_len": 1889
+    }
+  ]
+}

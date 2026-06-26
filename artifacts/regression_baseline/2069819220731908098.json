@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819220731908098",
+  "source": "ai_lesson_prep:biz_question:2069819220731908098",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "全章综合训练",
+    "kp_id": "100001005"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "fail_after_regen",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "全章综合训练",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "有理数的混合运算"
+      ]
+    },
+    "stem_hash": [
+      "851b65a3ce18c5a651dc22184e5ef0f59ef1a694abac5b1e4c08caa227cf3b26",
+      "c574df65af089d9aa74ca00da11852b169b592b7e707c62d06c74ebe78a16e32",
+      "30e9be7c483b39cf30c28641cec8c59357347c5c7e24bd8e34c682ddba98eda2"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 3,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 182.2
+}

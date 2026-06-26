@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819220148899841",
+  "source": "ai_lesson_prep:biz_question:2069819220148899841",
+  "mother_meta": {
+    "qtype": "解答",
+    "grade": "七年级上册",
+    "main_kp": "全章综合训练",
+    "kp_id": "100001005"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "unverified",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "全章综合训练",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "绝对值"
+      ]
+    },
+    "stem_hash": [
+      "2f5ed2ef8542aa9a24650410b0bd5514938b89e686a942c63b2ced8473f1dab0",
+      "5be7c42e89dcee73c46f612ca3e312b70ec96136eb6facbececab09c9f2407b3",
+      "8ad8198fcc9e432c0acbd20d6ffcd38f074818136b24afd4034977b75a670578"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 3,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 162.0
+}

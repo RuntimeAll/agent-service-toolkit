@@ -1,0 +1,93 @@
+{
+  "mother_id": "2069819199483564034",
+  "source": "ai_lesson_prep:biz_question:2069819199483564034",
+  "mother_meta": {
+    "qtype": "填空",
+    "grade": "七年级上册",
+    "main_kp": "利用法则比较大小",
+    "kp_id": "100001004002"
+  },
+  "variant_count": 3,
+  "frozen_assertions": {
+    "gateA": [
+      {
+        "idx": 0,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 1,
+        "gate": "pass",
+        "flags": []
+      },
+      {
+        "idx": 2,
+        "gate": "pass",
+        "flags": []
+      }
+    ],
+    "gateB": [
+      {
+        "idx": 0,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 1,
+        "verify": "unverified",
+        "badge": "ok"
+      },
+      {
+        "idx": 2,
+        "verify": "sympy_pass",
+        "badge": "ok"
+      }
+    ],
+    "surface_check": [
+      {
+        "idx": 0,
+        "verdict": "clean"
+      },
+      {
+        "idx": 1,
+        "verdict": "clean"
+      },
+      {
+        "idx": 2,
+        "verdict": "clean"
+      }
+    ],
+    "conservation": {
+      "main_kp": "利用法则比较大小",
+      "grade": "七年级上册",
+      "injected_kps": [
+        "有理数的减法"
+      ]
+    },
+    "stem_hash": [
+      "99daae386f686d6423237276343cfd73a02b89ac3e6d5cab19ec90e0b32fe5c0",
+      "963c1bad959fe463f8dbd4c51794ca0877de8f8e5623189d19c0ad8858fa2c26",
+      "65cec1000337af7f90aeeade99aadeb2179009e86a6bc8395c4b22072d2b869d"
+    ]
+  },
+  "difficulty_snapshot": {
+    "variant_levels": [
+      {
+        "idx": 0,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 1,
+        "difficulty": 2,
+        "level": "normal"
+      },
+      {
+        "idx": 2,
+        "difficulty": 3,
+        "level": "hard"
+      }
+    ]
+  },
+  "_elapsed_s": 72.2
+}

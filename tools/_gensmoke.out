@@ -1,0 +1,9 @@
+[token ok] ALG=https://question-1256278081.cos.ap-shanghai.myqcloud.com/2026-05
+
+--- ① 母题(打 :8093 服务) ---
+{"mother_card": true, "stage": 3, "error": null, "items": 1, "paper": false, "raw_events": 5, "dur": 126}
+
+--- ② 开始举一反三(同 thread) ---
+{"mother_card": false, "stage": 0, "error": null, "items": 0, "paper": false, "raw_events": 1, "dur": 277}
+
+服务层冒烟: 母题=PASS 生成链=FAIL

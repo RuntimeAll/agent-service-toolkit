@@ -1,0 +1,17 @@
+{
+  "skipped": [
+    {
+      "file": "06f6d4ceb369bc6b7df66791374707b4.jpg",
+      "reason": "本地图无 OSS URL，route_entry 图门只认 http(s) 图片 URL"
+    },
+    {
+      "file": "f599a64dea8a2c954db53d6760152bc9.jpg",
+      "reason": "同上；且 OSS 图确认 resume 路径当前 0 变式"
+    },
+    {
+      "file": "奕辰错题.pdf",
+      "reason": "PDF 需切图为题图，同样卡在本地文件→无 URL 的图门"
+    }
+  ],
+  "backfilled_with": "15 system mothers"
+}
