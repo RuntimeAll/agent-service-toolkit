@@ -3176,6 +3176,48 @@ def mother_md_from_table(state: VariantState) -> int | None:
     return bill.get("level")
 
 
+# 解析分步：把变式 solution 文本拆成步骤行（R 推理链步数的确定性来源）。
+_SOLUTION_STEP_RE = re.compile(r"\n|；|;|。(?=\S)|步骤|第[一二三四五六七八九1-9]步")
+
+
+def _solution_steps(solution: str) -> list[str]:
+    """把变式解析文本拆成步骤行（去空），作 R 的确定性近似（变式无 JSON skeleton 时用）。"""
+    if not solution:
+        return []
+    parts = [p.strip() for p in _SOLUTION_STEP_RE.split(solution) if p and str(p).strip()]
+    return parts
+
+
+def grade_variant_item(item: dict, mother_dna: dict | None) -> dict:
+    """🔴 WS1·AC1：单道变式确定性判档（grade_observed），替代 generate 内嵌 rubric 的 LLM 自评。
+
+    - model_hits = 继承母题锚定模型（mother_dna.dna.models，带表真值 tier_int/freq_int）；
+      变式自带 models（edit-dna 改过）时优先用变式自己的。
+    - K/R/D/G = 从该变式自己的 stem/solution 抽（R 走解析分步、D 走小问、K 走依据数、G 走几何）。
+    - 难度永不取 LLM 自评：item 原 difficulty 不参与判档（被本函数覆盖）。
+    返回 grade_observed 账单（含 level/modelHits/K/R/D/rule/...）。纯函数、零 LLM。
+    """
+    mother_dna = mother_dna or {}
+    mdna_dna = mother_dna.get("dna") or {}
+    # 变式 model_hits：变式自带优先，否则继承母题（变式当前主路径继承母题 models）
+    item_models = item.get("models")
+    model_hits = item_models if item_models else (mdna_dna.get("models") or [])
+    stem = str(item.get("stem") or "")
+    solution = str(item.get("solution") or "")
+    steps = _solution_steps(solution)
+    R = len(steps)
+    # K：母题 KG 锚定数（变式守恒同知识点）+ 解析依据数兜底（取较大，见 extract_K）
+    kp_count = (1 if (mdna_dna.get("main_kp") or {}).get("id") else 0) + len(
+        [s for s in (mdna_dna.get("secondary_kps") or []) if isinstance(s, dict) and s.get("id")]
+    )
+    K = difficulty.extract_K(solution, kp_count or None)
+    D = difficulty.extract_D(stem, solution)
+    G = difficulty.extract_G(stem, mdna_dna.get("verify_kind"), mdna_dna.get("dna_type"))
+    return difficulty.grade_observed(
+        model_hits=model_hits, K=K, R=R, D=D, G=G, high_strategies=[],
+    )
+
+
 # ---------------------------------------------------------------------------
 # 🔴 W2 守恒注入（PRD-C-014 B2·T1）：母题 DNA（facts.dna，由 B1 dna_extract 抽）→ 出题
 # 硬约束段，GENERATE / REGEN / ADD 三处共用单一事实源。守恒四件套：
@@ -5721,11 +5763,26 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     assemble **不再独立走一轮 _grade_difficulty 复评**（省掉首轮 + 整组重做各一次 nano 调用）。
     缺/非法 difficulty 沿用入库口径兜底（_clamp 到 1~4，缺→2）。P9 排序在下面做。"""
     budget = _budget_bind(state)  # P13：轮内下游节点携带预算（assemble 已无独立难度调用）
-    # 🔴 整改2：删除独立难度复评调用；难度随生题产出。仅做缺/非法兜底钳到 1~4（不再额外 LLM 调用）。
+    # 🔴 PRD-C-103 WS1·AC1（2026-06-26，推翻整改2「难度随生题 LLM rubric 产出」）：变式难度档来源
+    #   改为 **grade_observed 确定性判档**（继承母题锚定模型表 tier/freq + 该变式自抽 K/R/D），
+    #   砍掉 generate 内嵌 rubric 的 LLM 自评数字（item 原 difficulty 不再被采信）。难度永不取 LLM 自评
+    #   （铁律：pass/fail 只读 grade_observed）。降级（铁律④）：判档异常 → 回退 item 原 difficulty 钳
+    #   1~4、缺→2，绝不卡死。账单挂 item['difficulty_bill']（AC9 trace 的 actual_level 读它）。
+    mother_dna = state.get("mother_dna") or {}
     items = [dict(it) for it in (state.get("items") or [])]
     for it in items:
-        d = _to_int(it.get("difficulty"))
-        it["difficulty"] = max(1, min(DIFFICULTY_CAP, d)) if d is not None else 2  # 缺→2 兜底链
+        try:
+            bill = grade_variant_item(it, mother_dna)
+            lvl = bill.get("level")
+            if isinstance(lvl, int) and 1 <= lvl <= DIFFICULTY_CAP:
+                it["difficulty"] = lvl
+                it["difficulty_bill"] = bill  # 确定账单留痕（modelHits/K/R/D/rule），供 trace/外显
+            else:
+                d = _to_int(it.get("difficulty"))
+                it["difficulty"] = max(1, min(DIFFICULTY_CAP, d)) if d is not None else 2
+        except Exception:  # noqa: BLE001 — 判档是增强不是关卡，异常回退原值（铁律④/G5）
+            d = _to_int(it.get("difficulty"))
+            it["difficulty"] = max(1, min(DIFFICULTY_CAP, d)) if d is not None else 2
     # 🔴 P9 默认序（PRD-C-013）：assemble 前按总评难度**升序稳定排序**（同难度保持生成序）。
     #   seq 由 _artifact_payload/入库按当前 list 序现编（index=i+1），persisted 簿记跟 item 走
     #   （persisted 是 item 字段，排序不丢、不错位）。指令排序走 exec_reorder（纯代码重排）。
