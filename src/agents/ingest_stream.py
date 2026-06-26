@@ -34,18 +34,17 @@ SENTINEL = "===STRUCT==="
 
 def build_solve_stream_prompt() -> str:
     exam_types = "/".join(dna_extract.EXAM_TYPES)
-    return f"""你是数学老师。下面是老师框选的**一道题的照片**。请按顺序做两件事：
+    return f"""你是数学老师。下面是老师框选的**一道题的照片**。请直接输出给老师看的解题内容（不要写"第一部分""给老师看"之类的说明性标题）：
 
-【第一部分·给老师看（用 Markdown + 行内 $LaTeX$，像给学生讲解一样自然流畅）】
-1) 识别出图中的**印刷体原题**（去掉手写/批改痕迹），先把题干清晰写出来。
-2) **一步步把它解出来**（展示完整解题过程，不跳步、不臆造），最后明确写出**答案**。
+先用 `**题目**` 小标题写出识别的**印刷体原题**（去掉手写/批改痕迹，Markdown + 行内 $LaTeX$）；
+再用 `**解题过程**` 小标题**一步步把它解出来**（展示完整过程，不跳步、不臆造）；
+最后用 `**答案**` 小标题写出最终答案。语气像给学生讲解一样自然流畅。
 
-【第二部分·给系统入库（老师看不到）】
-另起一行输出一行 `{SENTINEL}`，紧接一个 JSON（不要 markdown fence）：
+全部讲解写完后，**另起一行**输出一行 `{SENTINEL}`，紧接一个 JSON（给系统入库，老师看不到，不要 markdown fence）：
 {{"stem":"识别出的题干(markdown+$latex$)","qtype":"选择/填空/解答","options":["选项正文"],"answer":"最终答案","analysis":"干净的解题过程","need_grading":true/false}}
 （need_grading：图中含学生手写作答/笔迹则 true，否则 false；options 非选择题给空数组。）
 
-🔴 务必先输出第一部分完整人类可读内容，再输出 `{SENTINEL}` 和 JSON。"""
+🔴 `{SENTINEL}` 之前只输出干净的解题讲解，`{SENTINEL}` 之后才是 JSON。"""
 
 
 def build_grade_stream_prompt(*, knowledge: str | None, chapter: str | None) -> str:
@@ -56,19 +55,15 @@ def build_grade_stream_prompt(*, knowledge: str | None, chapter: str | None) -> 
         ctx.append(f"相关知识点：{knowledge.strip()}")
     ctx_block = ("\n".join(ctx) + "\n") if ctx else ""
     return f"""你是数学老师，正在**批改学生作答**。下面是一道题区照片（含印刷体原题 + 学生手写作答）。
-{ctx_block}请按顺序做两件事：
+{ctx_block}请直接输出给老师看的批改内容（不要写"第一部分"之类说明性标题，Markdown + $LaTeX$，像当面批改讲解一样）：
 
-【第一部分·给老师看（Markdown + $LaTeX$，像老师当面批改讲解一样）】
-1) 识别原题（去手写）。
-2) **先自己严谨解出标准答案**（展示过程；题目没给答案也要自己解）。
-3) 读学生手写作答，**对照标准答案判对错**，指出错在哪、扣分点、给出建议。
-   - 图中无任何手写作答 → 明说「学生未作答」。
+先用 `**标准答案**` 小标题：识别原题（去手写）后**自己严谨解出标准答案并展示过程**（题目没给答案也要自己解）；
+再用 `**批改**` 小标题：读学生手写作答，**对照标准答案判对错**，指出错在哪、扣分点、给建议；图中无任何手写作答则明说「学生未作答」。
 
-【第二部分·给系统（老师看不到）】
-另起一行 `{SENTINEL}` + JSON（不要 fence）：
+全部写完后**另起一行** `{SENTINEL}` + JSON（给系统，老师看不到，不要 fence）：
 {{"stem":"原题","standard_answer":"标准答案","student_answer":"学生作答(无则空)","has_handwriting":true/false,"verdict":"correct/wrong/partial/blank/uncertain","feedback":"一句话点评"}}
 
-🔴 先输出第一部分完整人类可读批改，再输出 `{SENTINEL}` 和 JSON。"""
+🔴 `{SENTINEL}` 之前只输出干净批改讲解，之后才是 JSON。"""
 
 
 async def _stream_messages(
