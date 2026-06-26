@@ -179,6 +179,16 @@ class Settings(BaseSettings):
     #   母题 opus 一把**拦截**（不调，提示老师稍后/明日再试）、造图**降级**（needs_figure，不调翻命令）。
     #   None/≤0 = 关（不限，默认）。三级预算（会话/老师/日）推多用户期，本轮只做单一全局日。
     GLOBAL_DAILY_BUDGET_YUAN: float | None = None
+    # 🔴 PRD-C-103 WS4·AC10/D5「去 sympy 硬验算」：闸B 的 sympy 程序验算**不再作 pass/fail 硬门**——
+    #   正确性靠线上人工审核兜底。本开关 = sympy 硬门总闸，**默认 False（关）**：
+    #     - 关（默认）：sympy 验算照常算（产 check 徽章/computed 证据/解析供打标变式用），但
+    #       **fail / 退化构型一律不剔除变式、不卡流程**——降级标 ⚠ 放行到 assemble，交人审。
+    #     - 开（VARIANT_SYMPY_GATE_ON=true）：恢复旧硬门语义（退化构型超限剔除 = _anti_degen_gate
+    #       原行为），将来想让 sympy 重新硬拦时一行打开。
+    #   🔴 判分铁律不破：本开关只改「sympy 判出 fail/退化时是否硬拦」，不改「怎么判」（判决仍只读
+    #     math_verify verdict，永不采信 LLM 自评）。注：产品默认 auto_verify=False 时 sympy 本就不跑，
+    #     本开关管的是 auto_verify=True（单测 / 回归 in-process 驱动 / 老师手动点验算）路径的硬门去留。
+    VARIANT_SYMPY_GATE_ON: bool = False
     # 闸B 回炉（REGEN）瘦身 max_tokens 上限（整改4·2026-06-12）：回炉只带单题题面+错因+确定
     # 上下文块，比首稿出题（一次出 N 道）小得多 → 单独压一个上限防输出失控（ct 9k-11k）。
     # 出题主调用（generate/add）仍走 VARIANT_MAX_TOKENS，不动。≤0 视为回退 VARIANT_MAX_TOKENS。

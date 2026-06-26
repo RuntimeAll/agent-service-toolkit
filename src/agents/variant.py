@@ -217,6 +217,29 @@ def _auto_verify_on(config: RunnableConfig | None = None) -> bool:
     return bool(conf.get("auto_verify"))
 
 
+# 🔴 PRD-C-103 WS4·AC10/D5：sympy 硬门总闸。默认 **关**（settings.VARIANT_SYMPY_GATE_ON=False）。
+#   关 → sympy 验算照算（产 check 徽章/computed/解析），但 **fail/退化构型一律不剔除变式、不卡流程**，
+#       降级标 ⚠ 放行交人审（线上正确性兜底走人工审核）。
+#   开 → 恢复旧硬门语义（退化构型超限剔除）。config.configurable.sympy_gate 可逐请求覆盖（优先于
+#       settings 默认），便于单测/回归在不改全局 .env 的前提下临时开硬门验旧行为。
+#   判分铁律不破：只改「sympy 判出 fail/退化时是否硬拦」，不改「怎么判」（仍只读 verdict）。
+def _sympy_gate_on(config: RunnableConfig | None = None) -> bool:
+    """sympy 是否作硬门（剔除退化构型）。config.configurable.sympy_gate 优先，缺省回退
+    settings.VARIANT_SYMPY_GATE_ON（默认 False=不硬门）。"""
+    try:
+        conf = ((config or {}).get("configurable") or {}) if config else {}
+    except Exception:  # noqa: BLE001
+        conf = {}
+    if "sympy_gate" not in conf:
+        try:
+            conf = (ensure_config() or {}).get("configurable", {}) or {}
+        except Exception:  # noqa: BLE001
+            conf = {}
+    if "sympy_gate" in conf:
+        return bool(conf.get("sympy_gate"))
+    return bool(getattr(settings, "VARIANT_SYMPY_GATE_ON", False))
+
+
 # ---------------------------------------------------------------------------
 # 🔴 PRD-A-021 S4·items merge reducer（治本：杜绝 last-writer-wins 全量覆盖丢 figure_url/手改）
 # ---------------------------------------------------------------------------
@@ -5017,6 +5040,12 @@ async def _anti_degen_gate(
     res = await _degeneracy_verdict(item)
     if res.get("verdict") != math_verify.DEGENERATE:
         return item, False  # 非退化 / 不可判（degrade）→ 放行（闸门降级路径）
+
+    # 🔴 PRD-C-103 WS4·AC10/D5：sympy 硬门关（默认）→ 退化构型也**不剔除、不回炉**，标 ⚠ 放行交人审
+    #   （线上正确性靠人工审核兜底；sympy 仍算出退化判定供徽章/审计，但绝不卡流程到 assemble）。
+    if not _sympy_gate_on(config=None):
+        _append_card_note(item, "⚠ 反退化闸：检出退化构型（sympy 硬门已关），已放行交人审")
+        return item, False
 
     # 已确认退化构型：老师点名编辑题不动（老师意志优先，仅标注交人审）。
     if item.get("from_edit"):
