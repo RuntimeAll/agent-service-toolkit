@@ -1190,6 +1190,50 @@ async def grade_endpoint(input: GradeInput) -> dict[str, Any]:
         var_child_runnable_config.reset(ctok)
 
 
+class SolveStreamInput(BaseModel):
+    """B2·路A 解题流（识别+解题，SSE 实时流式）。"""
+
+    image_url: str | None = None
+    image_base64: str | None = None
+
+
+@router.post("/solve_stream")
+async def solve_stream_endpoint(input: SolveStreamInput) -> StreamingResponse:
+    """B2·路A 解题流（识别+解题，实时流式不黑盒）。SSE：{type:token|result|error}+[DONE]。
+
+    🔴 路径用单段 /solve_stream 不用 /solve/stream —— 后者会被更早注册的 catch-all
+    @router.post("/{agent_id}/stream")（agent_id="solve"）吞掉，校验 message 必填报 422。"""
+    from agents.ingest_stream import solve_stream_sse
+
+    return StreamingResponse(
+        solve_stream_sse(image_url=input.image_url, image_base64=input.image_base64),
+        media_type="text/event-stream",
+    )
+
+
+class GradeStreamInput(BaseModel):
+    """B4·路A 批改流（识别+先解题+判对错，SSE 实时流式）。"""
+
+    image_url: str | None = None
+    image_base64: str | None = None
+    knowledge: str | None = None
+    chapter: str | None = None
+
+
+@router.post("/grade_stream")
+async def grade_stream_endpoint(input: GradeStreamInput) -> StreamingResponse:
+    """B4·路A 批改流（实时流式不黑盒）。SSE：{type:token|result|error}+[DONE]。单段路径避开 /{agent_id}/stream。"""
+    from agents.ingest_stream import grade_stream_sse
+
+    return StreamingResponse(
+        grade_stream_sse(
+            image_url=input.image_url, image_base64=input.image_base64,
+            knowledge=input.knowledge, chapter=input.chapter,
+        ),
+        media_type="text/event-stream",
+    )
+
+
 class VariantSetFigureUrlInput(BaseModel):
     """PRD-C-100 BC2 + PRD-A-021 R2b·U1：变式配图回写请求（零 LLM）。index=1-based。
 
