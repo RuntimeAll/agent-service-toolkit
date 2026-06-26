@@ -221,14 +221,78 @@ async def run_one(app, m: dict, token: str) -> dict:
     return cap
 
 
+def _compare_to_baseline(results: list[dict], out_dir: Path) -> int:
+    """🔴 PRD-C-103 批4·AC12 `--compare` 模式：与冻结基线 `artifacts/regression_baseline/` 比对。
+
+    - `frozen_assertions`（闸A/闸B/防撞/守恒/stem_hash）**逐道 assert 相等**——任一道破 = 回归（RED）。
+    - `difficulty_snapshot` **只 diff 不 assert**（WS1 接线后难度档预期变，G-REG 允许）。
+    本函数**只读基线、写临时目录（out_dir）**，绝不碰 `OUT_DIR`（基线）—— 复跑安全。
+    """
+    rc = 0  # 红计数（frozen 破）
+    diff_diff = 0  # difficulty 出 diff 的道数（预期，不算红）
+    miss = 0
+    print("\n========== AC12 frozen 比对（--compare，不碰基线）==========", flush=True)
+    for r in results:
+        qid = r["mother_id"]
+        base_p = OUT_DIR / f"{qid}.json"
+        if not base_p.exists():
+            print(f"  [MISS] {qid} 基线缺文件 → 无法比对", flush=True)
+            miss += 1
+            continue
+        base = json.loads(base_p.read_text(encoding="utf-8"))
+        cur_fa = r.get("frozen_assertions") or {}
+        base_fa = base.get("frozen_assertions") or {}
+        if r.get("_error"):
+            print(f"  [RED ] {qid} 当前跑出错: {r.get('_error')}", flush=True)
+            rc += 1
+            continue
+        # frozen 逐类 assert 相等
+        broken = [k for k in ("gateA", "gateB", "surface_check", "conservation", "stem_hash")
+                  if cur_fa.get(k) != base_fa.get(k)]
+        if broken:
+            rc += 1
+            print(f"  [RED ] {qid} frozen 破: {broken}", flush=True)
+            for k in broken:
+                print(f"          基线[{k}]={json.dumps(base_fa.get(k), ensure_ascii=False)[:200]}", flush=True)
+                print(f"          当前[{k}]={json.dumps(cur_fa.get(k), ensure_ascii=False)[:200]}", flush=True)
+        else:
+            # difficulty 只 diff 不 assert
+            cur_d = (r.get("difficulty_snapshot") or {}).get("variant_levels")
+            base_d = (base.get("difficulty_snapshot") or {}).get("variant_levels")
+            if cur_d != base_d:
+                diff_diff += 1
+                print(f"  [OK·Δ难] {qid} frozen 全等；difficulty 出 diff（预期）", flush=True)
+                print(f"          基线难度={json.dumps(base_d, ensure_ascii=False)}", flush=True)
+                print(f"          当前难度={json.dumps(cur_d, ensure_ascii=False)}", flush=True)
+            else:
+                print(f"  [OK ] {qid} frozen 全等；difficulty 无变化", flush=True)
+    ran = len([r for r in results if not r.get("_error")])
+    green = (rc == 0) and (miss == 0)
+    print(f"\nAC12 G-REG: 跑 {len(results)} 道 | frozen 破 {rc} 道 | 难度 diff {diff_diff} 道 | 基线缺 {miss} 道 "
+          f"→ {'GREEN(frozen 不破)' if green else 'RED'}", flush=True)
+    print(f"临时产物目录: {out_dir}（基线 {OUT_DIR} 未动）", flush=True)
+    return 0 if green else 1
+
+
 async def main() -> int:
-    ap = argparse.ArgumentParser(description="PRD-C-103 批0 回归网基线采集")
+    ap = argparse.ArgumentParser(description="PRD-C-103 批0 回归网基线采集 / 批4 --compare 比对")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=3)
+    ap.add_argument("--compare", action="store_true",
+                    help="🔴 AC12 比对模式：写临时目录 + 与冻结基线 diff(frozen assert 相等 / "
+                         "difficulty 只 diff)，绝不覆盖基线 artifacts/regression_baseline/。")
+    ap.add_argument("--out-dir", type=str, default="",
+                    help="--compare 时临时产物目录（默认 artifacts/regression_compare/）。")
     args = ap.parse_args()
 
     mothers = _load_mothers(args.limit)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # 🔴 --compare 模式：写临时目录，绝不碰基线 OUT_DIR；非 compare：写基线（原行为）。
+    if args.compare:
+        write_dir = Path(args.out_dir) if args.out_dir else (
+            Path(__file__).resolve().parent.parent / "artifacts" / "regression_compare")
+    else:
+        write_dir = OUT_DIR
+    write_dir.mkdir(parents=True, exist_ok=True)
     token = await real_token()
     app = graph.compile(checkpointer=MemorySaver())
     sem = asyncio.Semaphore(max(1, args.concurrency))
@@ -247,14 +311,18 @@ async def main() -> int:
 
     results = await asyncio.gather(*(_guarded(m) for m in mothers))
 
-    # 落盘每道
+    # 落盘每道（compare 模式落 write_dir=临时目录；基线模式落 OUT_DIR）
     written = []
     for r in results:
-        p = OUT_DIR / f"{r['mother_id']}.json"
+        p = write_dir / f"{r['mother_id']}.json"
         p.write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
         written.append(p.name)
 
-    # 跳过台账
+    # 🔴 --compare：与基线 diff（frozen assert 相等 / difficulty 只 diff），不跑 G0 采集自检。
+    if args.compare:
+        return _compare_to_baseline(results, write_dir)
+
+    # 跳过台账（仅基线采集模式写）
     (OUT_DIR / "_SKIPPED_test_files.json").write_text(
         json.dumps({"skipped": SKIPPED_TEST_FILES, "backfilled_with": "15 system mothers"},
                    ensure_ascii=False, indent=2), encoding="utf-8")
