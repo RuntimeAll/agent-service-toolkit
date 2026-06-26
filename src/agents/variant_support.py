@@ -1124,10 +1124,25 @@ def record_link_manifest(receipts: list[dict[str, Any]], facts: dict[str, Any]) 
                 "mother_question_id": mother_qid,
             }
             if role == "variant" and mother_qid:
-                row["trace"] = {
-                    "method": (r.get("operator") or r.get("method") or "forward-gen"),
-                    "similarity": r.get("similarity"),
-                }
+                # 🔴 PRD-C-103 WS3·AC9：优先用 persist_to_bank 喂的富 trace_block（含算子/相似度真值
+                #   + target_level/actual_level/retries，由 variant.variant_trace_block 从双旋钮 knobs
+                #   + 该变式 difficulty_bill 算出）；缺则回落批2 的 method/similarity 兜底（向后兼容）。
+                tb = r.get("trace_block")
+                if isinstance(tb, dict):
+                    row["trace"] = {
+                        "method": (tb.get("operator") or tb.get("method") or "forward-gen"),
+                        "similarity": tb.get("similarity"),
+                        "similarity_band": tb.get("similarity_band"),
+                        "target_level": tb.get("target_level"),
+                        "actual_level": tb.get("actual_level"),
+                        "retries": tb.get("retries"),
+                        "created_by": tb.get("created_by") or "forward-gen",
+                    }
+                else:
+                    row["trace"] = {
+                        "method": (r.get("operator") or r.get("method") or "forward-gen"),
+                        "similarity": r.get("similarity"),
+                    }
             rows.append(row)
         if not rows:
             return False

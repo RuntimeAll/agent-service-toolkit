@@ -165,6 +165,9 @@ def write_variation_trace(cur, rec: dict, model_id_hint: str | None, *, dry_run:
     if degree is None:
         degree = trace.get("similarity")
     band = trace.get("similarity_band") or _degree_to_band(degree)
+    # 🔴 PRD-C-103 WS3·AC9：created_by 由 trace 块带（举一反三正向 = forward-gen，打标反推 = reverse-dna）；
+    #   缺 → forward-gen（本脚本主消费者 = 举一反三入库清单）。
+    created_by = str(trace.get("created_by") or "forward-gen").strip()[:32] or "forward-gen"
     if dry_run:
         cur.execute("SELECT 1 FROM biz_variation_trace WHERE variant_question_id=%s", (variant,))
         return cur.fetchone() is None
@@ -172,9 +175,9 @@ def write_variation_trace(cur, rec: dict, model_id_hint: str | None, *, dry_run:
         """INSERT IGNORE INTO biz_variation_trace
              (mother_question_id, variant_question_id, method, method_detail,
               variation_degree, similarity_band, same_source, created_by, create_time)
-           VALUES (%s, %s, %s, %s, %s, %s, 1, 'reverse-dna', NOW())""",
+           VALUES (%s, %s, %s, %s, %s, %s, 1, %s, NOW())""",
         (mother, variant, method, detail,
-         round(float(degree), 2) if degree is not None else None, band),
+         round(float(degree), 2) if degree is not None else None, band, created_by),
     )
     return cur.rowcount > 0
 

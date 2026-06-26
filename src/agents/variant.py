@@ -3222,6 +3222,45 @@ def grade_variant_item(item: dict, mother_dna: dict | None) -> dict:
     )
 
 
+def variant_trace_block(item: dict, knobs: dict | None) -> dict[str, Any]:
+    """🔴 WS3·AC9 纯函数（零 LLM/零 IO，可单测）：单道变式 → biz_variation_trace 喂料块。
+
+    填真值（批2 的 method=forward-gen/similarity=None 兜底 → 本函数补真）：
+      - operator/method = 变式系数轴落带的代表算子（knobs.operator_band.operator），缺 → 'forward-gen'。
+      - similarity/variation_degree = 变式系数（knobs.operator_band.similarity 或 knobs.variant_coeff），
+        缺 → 默认 0.7（VARIANT_COEFF_DEFAULT，= 默认变式系数，仍是确定值非 None）。
+      - target_level = 难度轴目标档（knobs.difficulty_target），缺 → None（=keep 母题档，无显式目标）。
+      - actual_level = 该变式确定判档 level（item.difficulty_bill.level，assemble 落的 grade_observed 真值）。
+      - retries = 该题回炉次数（item._regen_count，未追踪 → 0）。
+    🔴 method/variation_degree 有 DB 列（落库真值）；target/actual/retries 库无列、仅落 manifest 供审计。
+    created_by = 'forward-gen'（举一反三正向生成，区别于打标 reverse-dna）。
+    """
+    knobs = knobs or {}
+    op_band = knobs.get("operator_band") if isinstance(knobs.get("operator_band"), dict) else {}
+    operator = str(op_band.get("operator") or "forward-gen").strip() or "forward-gen"
+    similarity = op_band.get("similarity")
+    if similarity is None:
+        similarity = knobs.get("variant_coeff")
+    if similarity is None:
+        similarity = VARIANT_COEFF_DEFAULT
+    bill = item.get("difficulty_bill") or {}
+    actual_level = bill.get("level")
+    if actual_level is None:
+        actual_level = _to_int(item.get("difficulty"))
+    target_level = _to_int(knobs.get("difficulty_target"))  # None = keep（母题档，无显式目标）
+    retries = _to_int(item.get("_regen_count")) or 0
+    return {
+        "operator": operator,
+        "method": operator,
+        "similarity": round(float(similarity), 2),
+        "similarity_band": (op_band.get("band") if op_band else None),
+        "target_level": target_level,
+        "actual_level": actual_level,
+        "retries": retries,
+        "created_by": "forward-gen",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 🔴 W2 守恒注入（PRD-C-014 B2·T1）：母题 DNA（facts.dna，由 B1 dna_extract 抽）→ 出题
 # 硬约束段，GENERATE / REGEN / ADD 三处共用单一事实源。守恒四件套：
@@ -3647,6 +3686,88 @@ PLAN_INCREASING = "increasing"
 _PLAN_INCREASING_WORDS = ("increasing", "递增", "越来越难", "逐题变难", "一道比一道难")
 DIFFICULTY_CAP = 4  # 难度封顶（递增计划逐题 +1 的上限；S1.3 由 5→4 对齐绝对 rubric 1-4）
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-103 WS3·双旋钮（AC8/AC9）：变式系数轴（相似度→选算子带）+ 难度轴（目标档移 md）。
+#   事实源 = `举一反三策略-定稿.md §二/§三`（9 算子 + 相似度系数带）。两轴独立：
+#     · 变式系数（similarity，0–1，默认 0.7）：管"像不像母题" —— 落在某相似度带 → 选该带算子。
+#     · 难度（difficulty，'keep' 或目标档 1–4，默认 keep）：管"难不难" —— 相对母题档移 md。
+#   🔴 与「线性/不上大图」一致：两轴都做成纯函数 + 配方段注入 + trace 落真值，不改宏观 DAG。
+#   🔴 母题 variationProfile（C/D 层）尚未由 mother_opus 产出（落地顺序 item4，future）→ 本轮
+#      算子选择走「相似度带 → 代表算子」确定映射（不依赖 profile 可用性），profile 上线后再收窄。
+# ---------------------------------------------------------------------------
+VARIANT_COEFF_DEFAULT = 0.7  # 变式系数默认（策略定稿 §二）
+# 9 算子相似度系数带（策略定稿 §三）：(算子名, 带下限, 带上限)。系数落区间 → 选代表算子。
+#   高仿带(0.8~1.0)=数值；中变带(0.4~0.7)=结构/情境/条件增删；远迁带(0.2~0.4)=逆向/推广/升维/分类。
+_OPERATOR_BANDS: list[tuple[str, float, float, str]] = [
+    # (代表算子, 下限, 上限, 相似度带名)
+    ("数值", 0.75, 1.01, "高"),       # ①数值(0.8~0.9) 高仿
+    ("结构", 0.45, 0.75, "中"),       # ②结构 / ③情境 / ⑧条件增删 中变（代表取「结构」）
+    ("推广一般化", 0.0, 0.45, "低"),  # ⑤逆向/⑥推广/⑦升维/⑨分类 远迁（代表取「推广一般化」）
+]
+# 算子 → 出题人话指令（注入 GENERATE 配方段，让"像不像"随系数真变）。
+_OPERATOR_GUIDANCE: dict[str, str] = {
+    "数值": "高仿母题（只换数字/表皮，结构与考法尽量贴母题，像不像≈0.8+）",
+    "结构": "中度变式（可改结构/情境/增删条件，保留母题核心考法，像不像≈0.5）",
+    "推广一般化": "远迁变式（可逆向/推广/升维/分类讨论化，考点守恒但形态大变，像不像≈0.3）",
+}
+
+
+def operator_band_from_similarity(coeff: Any) -> dict[str, Any] | None:
+    """🔴 WS3 纯函数（零 LLM/零 IO，可单测）：变式系数 → {operator, similarity, band, guidance}。
+
+    coeff 缺/非数 → None（调用方回落默认配方，不注入算子段 = 旧行为）。
+    coeff 钳到 [0,1]；落在某相似度系数带 → 取该带代表算子 + 出题人话指令 + 高/中/低带名。
+    similarity = 钳后的系数本身（落 trace.variation_degree；method = operator）。
+    """
+    try:
+        c = float(coeff)
+    except (TypeError, ValueError):
+        return None
+    c = max(0.0, min(1.0, c))
+    for op, lo, hi, band in _OPERATOR_BANDS:
+        if lo <= c < hi:
+            return {
+                "operator": op,
+                "similarity": round(c, 2),
+                "band": band,
+                "guidance": _OPERATOR_GUIDANCE.get(op, ""),
+            }
+    # 兜底（理论不达，区间已覆盖 0~1）：归高仿带
+    return {
+        "operator": "数值",
+        "similarity": round(c, 2),
+        "band": "高",
+        "guidance": _OPERATOR_GUIDANCE["数值"],
+    }
+
+
+def normalize_two_knobs(conf: dict[str, Any] | None) -> dict[str, Any]:
+    """🔴 WS3 纯函数：config.configurable 的双旋钮原值 → 受约束 knobs 增量段。
+
+    读两键（FE 经 agent_config 透传，见 book-ui streamVariant）：
+      - `variant_similarity`（变式系数 0–1）→ out['variant_coeff'] + out['operator_band']（带代表算子）。
+      - `difficulty_target`（'keep' 或目标档 1–4）→ out['difficulty_target']（int）；'keep'/缺 → 不设。
+    任一缺/非法 → 该轴不设键（回落默认：相似度走 0.7 由调用方补、难度走 keep=母题档 md+i）。
+    纯函数、零 IO，可单测。返回的段会并进 state['knobs']（与 LLM 抽的 count/qtype 不冲突）。
+    """
+    out: dict[str, Any] = {}
+    conf = conf or {}
+    sim = conf.get("variant_similarity")
+    if sim is None:
+        sim = conf.get("variantSimilarity")  # camelCase 容错
+    band = operator_band_from_similarity(sim) if sim is not None else None
+    if band is not None:
+        out["variant_coeff"] = band["similarity"]
+        out["operator_band"] = band
+    dt = conf.get("difficulty_target")
+    if dt is None:
+        dt = conf.get("difficultyTarget")
+    if dt is not None and str(dt).strip().lower() not in ("keep", "", "none", "null"):
+        tgt = _to_int(dt)
+        if tgt is not None:
+            out["difficulty_target"] = max(1, min(DIFFICULTY_CAP, tgt))
+    return out
+
 
 def normalize_knobs(parsed: Any) -> dict[str, Any]:
     """🔴 纯函数钳制（零 LLM/零 IO，可单测）：LLM 抽取产物 → 受约束 knobs dict。
@@ -3778,10 +3899,23 @@ def recipe_from_knobs(knobs: dict[str, Any] | None, mother_difficulty: Any = Non
         DEFAULT_SHAPE["normal"] + DEFAULT_SHAPE["hard"]
     )
     md = _to_int(mother_difficulty) or 3
+    # 🔴 WS3·难度轴（AC8）：difficulty_target 给了目标档（1–4）→ 把起步档 md 移到目标档，
+    #   md+i 递增逻辑不动（只换 md 输入）。'keep'/缺 → md 保持母题档（旧行为）。
+    #   两轴独立：变式系数(operator_band)管"像不像"，难度轴只移 md 管"难不难"。
+    dtgt = _to_int(knobs.get("difficulty_target"))
+    if dtgt is not None and 1 <= dtgt <= DIFFICULTY_CAP:
+        md = dtgt
     plan = knobs.get("difficulty_plan")
     expected: list[int] | None = None
 
     lines = [f"- 共 {n} 道（必须恰好 {n} 道，不多不少）。"]
+    # 🔴 WS3·变式系数轴（AC8）：operator_band 给了相似度带 → 注入算子人话指令（让"像不像"随系数变）。
+    op_band = knobs.get("operator_band")
+    if isinstance(op_band, dict) and op_band.get("guidance"):
+        lines.append(
+            f"- 变式幅度（变式系数 {op_band.get('similarity')}，"
+            f"{op_band.get('band')}相似度带·算子「{op_band.get('operator')}」）：{op_band['guidance']}。"
+        )
     if dist:
         dist_s = "、".join(f"{k}×{v}" for k, v in dist.items())
         if knobs.get("qtype_partial"):
@@ -4201,6 +4335,13 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             "knobs", "解析配方", "done",
             knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）",
         )
+
+    # 🔴 PRD-C-103 WS3·双旋钮（AC8）：FE 经 agent_config 透传 variant_similarity / difficulty_target
+    #   → config.configurable → 这里并进 knobs（与 LLM 抽的 count/qtype 正交，不冲突）。
+    #   缺/keep → 不设键（回落默认：相似度 0.7 / 难度=母题档 md+i）。纯函数钳制，零 LLM。
+    two = normalize_two_knobs((config or {}).get("configurable") or {})
+    if two:
+        knobs = {**(knobs or {}), **two}
 
     facts = _mother_facts(state)
     # 🔴 W2 守恒守门（T1）：母题 DNA 白名单为空集 → 不放行生成，降级回 clarify 语义（不裸出）。
@@ -7058,6 +7199,16 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
         manifest_facts = dict(facts)
         if mother and mother.get("ok") and mother.get("id") is not None:
             manifest_facts["mother_question_id"] = mother.get("id")
+        # 🔴 PRD-C-103 WS3·AC9：把双旋钮真值（算子/相似度/目标档/实际档/回炉数）喂进变式回执 →
+        #   record_link_manifest 据此落 trace 块（method=算子、variation_degree=相似度真值，补批2
+        #   留下的 forward-gen/None 兜底）。var_receipts 与 pending_items 同序（persist_items 逐题回执）。
+        knobs_now = state.get("knobs") or {}
+        for r, it in zip(var_receipts, pending_items):
+            if r.get("ok") and r.get("id") is not None:
+                tb = variant_trace_block(it, knobs_now)
+                r["operator"] = tb["operator"]
+                r["similarity"] = tb["similarity"]
+                r["trace_block"] = tb  # record_link_manifest 优先读它（含 target/actual/retries）
         record_link_manifest(receipts, manifest_facts)
     except Exception:  # noqa: BLE001 — 清单落盘是增强，绝不拖垮入库主流程
         pass
