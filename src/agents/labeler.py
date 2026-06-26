@@ -525,16 +525,50 @@ def parse_label(raw: str, *, qtype_dict: list[str] | None = None) -> dict[str, A
 # ---------------------------------------------------------------------------
 # 难度（确定性算 · 交 difficulty.grade_observed，不让 LLM 判档）
 # ---------------------------------------------------------------------------
-def label_and_grade(parsed: dict[str, Any]) -> dict[str, Any]:
+def _enrich_models_tier_from_table(
+    models: list[dict[str, Any]], candidate_models: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    """🔴 PRD-C-103 WS2·AC7 打标口径统一：命中已有模型（有 id、非 isNew）的 tier/freq 以**模型表
+    真值**为准（candidate_models 由 lookup 带 tier_int/freq_int），覆盖 LLM 文本 tier。
+
+    与 model_anchor.confirm_models 同口径：grade_observed._resolve_tier 优先吃 tier_int(表) → 不论
+    走举一反三锚定还是批处理打标，难度都由同一张表驱动（不采信 LLM 自评 tier）。临时模型(isNew)
+    无表行 → 保留 LLM 临时 tier 文本（待审草案，转正脚本落表后即成表真值）。
+    """
+    if not candidate_models:
+        return models
+    by_id = {str(c.get("id")): c for c in candidate_models if c.get("id")}
+    out: list[dict[str, Any]] = []
+    for m in models or []:
+        m2 = dict(m)
+        mid = str(m2.get("id") or "").strip()
+        if mid and not m2.get("isNew") and mid in by_id:
+            c = by_id[mid]
+            if c.get("tier_int") is not None:
+                m2["tier_int"] = c.get("tier_int")  # 表真值整数（_resolve_tier 优先吃）
+            if c.get("freq_int") is not None:
+                m2["freq_int"] = c.get("freq_int")
+        out.append(m2)
+    return out
+
+
+def label_and_grade(
+    parsed: dict[str, Any],
+    candidate_models: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """据 parse_label 的 factors + models 调 difficulty.grade_observed 出难度档 + 账单。
 
     返回原 parsed 浅拷贝并挂上 `difficulty` 块（{level,levelName,rule,...}）。
     🔴 难度永不取 LLM 自评：labeler 只产 factors，档由 difficulty.py 据 model tier/freq + K/R/D 算。
+    🔴 WS2·AC7：传 candidate_models（同 prompt 那份，带表真值 tier_int/freq_int）→ 命中已有模型
+       的 tier/freq 以表为准（与 model_anchor 锚定路径同口径），不采信 LLM 自评 tier。
     """
     out = dict(parsed)
     factors = parsed.get("factors") or {}
+    model_hits = _enrich_models_tier_from_table(parsed.get("models") or [], candidate_models)
+    out["models"] = model_hits  # 回写 enriched（带表真值）供下游落链/落库
     bill = difficulty.grade_observed(
-        model_hits=parsed.get("models") or [],
+        model_hits=model_hits,
         K=_int(factors.get("K")),
         R=_int(factors.get("R")),
         D=_int(factors.get("D")),
