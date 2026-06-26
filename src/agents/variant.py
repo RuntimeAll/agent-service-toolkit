@@ -62,6 +62,7 @@ from agents.variant_support import (
     persist_items,
 )
 from core import get_model, relay_pool, settings
+from core import difficulty  # 🔴 PRD-C-103 WS1：确定性难度判档（grade_observed，表反控的代码点）
 
 # DNA 三锚高置信门槛
 CONF_GATE = 0.75
@@ -3123,6 +3124,59 @@ def _mother_facts(state: VariantState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 🔴 PRD-C-103 WS1·母题起步档查表（AC2）：母题 md = 锚定模型查表(tier/freq) 经 grade_observed
+#   确定算，替代 mother_opus dim8 的 LLM 自评 difficulty。喂进 recipe_from_knobs 的 md（md+i 递增
+#   逻辑 L3695 不动，只换 md 来源）。难度永不取 LLM 自评（铁律：pass/fail 只读 grade_observed）。
+# ---------------------------------------------------------------------------
+def _dna_factors_for_grade(dna: dict | None, stem: str = "", analysis_text: str = "") -> dict:
+    """从母题 DNA 抽 grade_observed 需要的确定性因子 K/R/D/G + model_hits。
+
+    - model_hits = dna.models（锚定模型，已带表真值 tier_int/freq_int，见 model_anchor）。
+    - R = 解法骨架步骤条数（dna.skeleton list 长度）。
+    - K = KG 锚定知识点数（主+副 kp）；不足则由解析独立依据数兜（复用 difficulty.extract_K）。
+    - D = 递进小问深度（题面小问 + 解析引用前问）。
+    - G = 数形结合（题面/几何标识）。
+    纯函数、零 LLM。缺则各因子 0（grade_observed 自带降级哨兵）。
+    """
+    dna = dna or {}
+    skeleton = dna.get("skeleton") or []
+    R = len(skeleton) if isinstance(skeleton, (list, tuple)) else 0
+    # K：主 kp + 副 kp 锚定数（KG 计数）；difficulty.extract_K 内部会与解析依据数取较大值
+    kp_count = (1 if (dna.get("main_kp") or {}).get("id") else 0) + len(
+        [s for s in (dna.get("secondary_kps") or []) if isinstance(s, dict) and s.get("id")]
+    )
+    analysis_blob = analysis_text or (
+        "\n".join(str(s) for s in skeleton) if isinstance(skeleton, (list, tuple)) else ""
+    )
+    K = difficulty.extract_K(analysis_blob, kp_count or None)
+    D = difficulty.extract_D(stem or "", analysis_blob)
+    G = difficulty.extract_G(stem or "", dna.get("verify_kind"), dna.get("dna_type"))
+    return {"model_hits": dna.get("models") or [], "K": K, "R": R, "D": D, "G": G,
+            "high_strategies": []}
+
+
+def mother_md_from_table(state: VariantState) -> int | None:
+    """🔴 WS1·AC2：母题起步档 = 锚定模型查表 经 grade_observed 确定算（替 dim8 LLM 自评）。
+
+    返回 level（1..4）。降级（契约 §异常）：
+      - 无锚定模型 / 抽不出 K/R → grade_observed 自带哨兵兜底（仍返回 level，不报错、不返回 None）。
+      - 仅当 mother_dna/dna 完全缺失（库内母题旧线程无 DNA）→ 返回 None，由调用方回退旧 dim8 值。
+    """
+    mdna = state.get("mother_dna") or {}
+    dna = mdna.get("dna") or {}
+    if not dna:
+        return None  # 无 DNA（库内母题等）→ 调用方回退原 difficulty 值
+    f = _dna_factors_for_grade(
+        dna, stem=mdna.get("stem") or "", analysis_text=mdna.get("solution_skeleton") or ""
+    )
+    bill = difficulty.grade_observed(
+        model_hits=f["model_hits"], K=f["K"], R=f["R"], D=f["D"], G=f["G"],
+        high_strategies=f["high_strategies"],
+    )
+    return bill.get("level")
+
+
+# ---------------------------------------------------------------------------
 # 🔴 W2 守恒注入（PRD-C-014 B2·T1）：母题 DNA（facts.dna，由 B1 dna_extract 抽）→ 出题
 # 硬约束段，GENERATE / REGEN / ADD 三处共用单一事实源。守恒四件套：
 #   ① 知识点白名单：解题所需 kp ⊆ 母题{main_kp + secondary_kps}（列 id+名称），白名单为空集
@@ -4114,7 +4168,13 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
                 )
             ]
         }
-    mother_d = (state.get("mother_dna") or {}).get("difficulty")
+    # 🔴 PRD-C-103 WS1·AC2：母题起步档 md = 锚定模型查表 经 grade_observed 确定算
+    #   （替代 mother_opus dim8 的 LLM 自评 difficulty）。md+i 递增逻辑（recipe_from_knobs L3695）
+    #   保留不动，只换 md 来源。降级：无 DNA（库内母题旧线程）→ 回退原 dim8/difficulty 值，不卡死。
+    mother_d = mother_md_from_table(state)
+    if mother_d is None:
+        mother_d = (state.get("mother_dna") or {}).get("difficulty") \
+            or (state.get("mother_dna") or {}).get("dna", {}).get("difficulty")
     recipe = recipe_from_knobs(knobs, mother_d)
     _emit_stage("generate", "生成题目", "running", f"{recipe['n']} 道")
     prompt = (

@@ -1,0 +1,6 @@
+INFO:     127.0.0.1:64009 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63683 - "POST /variant/stream HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53359 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54543 - "POST /variant/stream HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64146 - "POST /variant/stream HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57139 - "GET /health HTTP/1.1" 200 OK
