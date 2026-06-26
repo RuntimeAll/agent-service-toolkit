@@ -221,17 +221,33 @@ async def run_one(app, m: dict, token: str) -> dict:
     return cap
 
 
-def _compare_to_baseline(results: list[dict], out_dir: Path) -> int:
-    """🔴 PRD-C-103 批4·AC12 `--compare` 模式：与冻结基线 `artifacts/regression_baseline/` 比对。
+def _gate_dist(rows: list[dict], key: str) -> dict:
+    """闸判决分布计数（pass/warn/fail…），复用 c103_b3_reg_probe 口径。"""
+    out: dict[str, int] = {}
+    for r in rows or []:
+        v = str(r.get(key) or "")
+        out[v] = out.get(v, 0) + 1
+    return out
 
-    - `frozen_assertions`（闸A/闸B/防撞/守恒/stem_hash）**逐道 assert 相等**——任一道破 = 回归（RED）。
-    - `difficulty_snapshot` **只 diff 不 assert**（WS1 接线后难度档预期变，G-REG 允许）。
+
+def _compare_to_baseline(results: list[dict], out_dir: Path) -> int:
+    """🔴 PRD-C-103 批4·AC12/G-REG `--compare` 模式：与冻结基线 `regression_baseline/` 比对。
+
+    🔴 比对口径（与 `c103_b3_reg_probe.py` 一致，单一事实源——不是字符级复现）：
+       LLM 生成 stem **run-to-run 非确定**（温度 0.5、中转无法固定 seed），故 `stem_hash` 与
+       逐题 `gateA.flags`/`gateB.badge` 的**具体位**本就每跑不同，**不作字符级 assert**（基线冻的是
+       某一次采样，不是确定函数）。AC12「frozen 不破」的可机器判口径 = 结构不破：
+         ① 守恒 conservation(main_kp/grade)：注入态决定、与 LLM 无关 → **必等**（破=RED）。
+         ② 闸 gateA/gateB 判决分布：允许 ±（变式不同），但**不许涌现新 fail 类**（新 fail=RED）。
+         ③ 防撞 surface_check：允许 ±，但**不许涌现新 defect 类**（基线全 clean → 出非 clean=RED）。
+         ④ variant_count>0：仍出题（catch import/runtime 破坏）。
+       `difficulty_snapshot` 只 diff 不 assert（WS1 接线后难度预期变）。`stem_hash` 仅打印参考。
     本函数**只读基线、写临时目录（out_dir）**，绝不碰 `OUT_DIR`（基线）—— 复跑安全。
     """
-    rc = 0  # 红计数（frozen 破）
-    diff_diff = 0  # difficulty 出 diff 的道数（预期，不算红）
+    red = 0
+    diff_diff = 0
     miss = 0
-    print("\n========== AC12 frozen 比对（--compare，不碰基线）==========", flush=True)
+    print("\n========== AC12/G-REG frozen 结构比对（--compare，不碰基线）==========", flush=True)
     for r in results:
         qid = r["mother_id"]
         base_p = OUT_DIR / f"{qid}.json"
@@ -239,37 +255,56 @@ def _compare_to_baseline(results: list[dict], out_dir: Path) -> int:
             print(f"  [MISS] {qid} 基线缺文件 → 无法比对", flush=True)
             miss += 1
             continue
-        base = json.loads(base_p.read_text(encoding="utf-8"))
-        cur_fa = r.get("frozen_assertions") or {}
-        base_fa = base.get("frozen_assertions") or {}
         if r.get("_error"):
             print(f"  [RED ] {qid} 当前跑出错: {r.get('_error')}", flush=True)
-            rc += 1
+            red += 1
             continue
-        # frozen 逐类 assert 相等
-        broken = [k for k in ("gateA", "gateB", "surface_check", "conservation", "stem_hash")
-                  if cur_fa.get(k) != base_fa.get(k)]
-        if broken:
-            rc += 1
-            print(f"  [RED ] {qid} frozen 破: {broken}", flush=True)
-            for k in broken:
-                print(f"          基线[{k}]={json.dumps(base_fa.get(k), ensure_ascii=False)[:200]}", flush=True)
-                print(f"          当前[{k}]={json.dumps(cur_fa.get(k), ensure_ascii=False)[:200]}", flush=True)
+        base = json.loads(base_p.read_text(encoding="utf-8"))
+        bfa = base.get("frozen_assertions") or {}
+        cfa = r.get("frozen_assertions") or {}
+        issues: list[str] = []
+
+        # ① 守恒（确定性，必等）
+        bc, cc = bfa.get("conservation") or {}, cfa.get("conservation") or {}
+        if bc.get("main_kp") != cc.get("main_kp") or bc.get("grade") != cc.get("grade"):
+            issues.append(f"守恒破 main_kp/grade 基线={bc.get('main_kp')}/{bc.get('grade')} "
+                          f"本次={cc.get('main_kp')}/{cc.get('grade')}")
+
+        # ② 闸分布：无新 fail 类
+        for gk, key in (("gateA", "gate"), ("gateB", "verify")):
+            bd, nd = _gate_dist(bfa.get(gk), key), _gate_dist(cfa.get(gk), key)
+            new_fail = {k for k in nd if "fail" in k.lower() and k not in bd}
+            if new_fail:
+                issues.append(f"{gk} 涌现新 fail 类={new_fail}（基线={bd} 本次={nd}）")
+
+        # ③ 防撞：无新 defect 类（基线 verdict 集合外的非 clean）
+        b_verdicts = {str(x.get("verdict")) for x in (bfa.get("surface_check") or [])}
+        new_defect = {str(x.get("verdict")) for x in (cfa.get("surface_check") or [])
+                      if str(x.get("verdict")) != "clean" and str(x.get("verdict")) not in b_verdicts}
+        if new_defect:
+            issues.append(f"防撞涌现新 defect 类={new_defect}")
+
+        # ④ 仍出题
+        vc = r.get("variant_count", 0)
+        if vc <= 0:
+            issues.append("variant_count=0（不出题）")
+
+        if issues:
+            red += 1
+            print(f"  [RED ] {qid}: " + " | ".join(issues), flush=True)
         else:
-            # difficulty 只 diff 不 assert
-            cur_d = (r.get("difficulty_snapshot") or {}).get("variant_levels")
-            base_d = (base.get("difficulty_snapshot") or {}).get("variant_levels")
-            if cur_d != base_d:
+            bl = [x.get("level") for x in (base.get("difficulty_snapshot") or {}).get("variant_levels", [])]
+            nl = [x.get("level") for x in (r.get("difficulty_snapshot") or {}).get("variant_levels", [])]
+            note = ""
+            if bl != nl:
                 diff_diff += 1
-                print(f"  [OK·Δ难] {qid} frozen 全等；difficulty 出 diff（预期）", flush=True)
-                print(f"          基线难度={json.dumps(base_d, ensure_ascii=False)}", flush=True)
-                print(f"          当前难度={json.dumps(cur_d, ensure_ascii=False)}", flush=True)
-            else:
-                print(f"  [OK ] {qid} frozen 全等；difficulty 无变化", flush=True)
-    ran = len([r for r in results if not r.get("_error")])
-    green = (rc == 0) and (miss == 0)
-    print(f"\nAC12 G-REG: 跑 {len(results)} 道 | frozen 破 {rc} 道 | 难度 diff {diff_diff} 道 | 基线缺 {miss} 道 "
-          f"→ {'GREEN(frozen 不破)' if green else 'RED'}", flush=True)
+                note = f" | 难度Δ 基线={bl}→本次={nl}（预期）"
+            print(f"  [OK ] {qid} 守恒等+无新fail/defect类+出题({vc})" + note, flush=True)
+
+    green = (red == 0) and (miss == 0)
+    print(f"\nAC12 G-REG: 跑 {len(results)} 道 | 结构破 {red} 道 | 难度Δ {diff_diff} 道 | 基线缺 {miss} 道 "
+          f"→ {'GREEN(frozen 结构不破)' if green else 'RED'}", flush=True)
+    print(f"  口径=守恒必等+闸无新fail类+防撞无新defect类+出题；stem_hash/难度非 assert（LLM 非确定/WS1 预期）", flush=True)
     print(f"临时产物目录: {out_dir}（基线 {OUT_DIR} 未动）", flush=True)
     return 0 if green else 1
 
