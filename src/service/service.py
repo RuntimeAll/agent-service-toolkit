@@ -1018,9 +1018,9 @@ async def recognize_endpoint(input: RecognizeInput) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001 — recognize 本应自兜，这里纯保险（不 500）
         logger.error(f"recognize_endpoint error: {e}")
         return {
-            "ok": False, "has_figure": False, "stem": "", "qtype": "解答", "options": [],
-            "answer": "", "analysis": "", "solved_answer": "", "dna": None, "verify": None,
-            "richtext_issues": [], "error": f"识别异常: {str(e)[:120]}",
+            "ok": False, "has_figure": False, "need_grading": False, "stem": "", "qtype": "解答",
+            "options": [], "answer": "", "analysis": "", "solved_answer": "", "dna": None,
+            "verify": None, "richtext_issues": [], "error": f"识别异常: {str(e)[:120]}",
         }
     finally:
         var_child_runnable_config.reset(ctok)

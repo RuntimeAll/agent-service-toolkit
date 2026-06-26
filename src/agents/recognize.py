@@ -54,12 +54,14 @@ def build_recognize_prompt(*, solve: bool, grade_hint: str | None = None) -> str
 - 题面含表格 → 用 <table> 还原结构，不拍平成一行。
 - 选择题：把选项逐项放进 options 数组（每项**不含** "A." 前缀），题干 stem **不重复**选项文本；非选择题 options 留空数组。
 - has_figure：题面真含几何图/函数图/图表填 true，纯文字题填 false（本端点不切图，仅标记）。
+- need_grading：框区内若含**学生手写作答 / 铅笔笔迹 / 批改痕迹（对勾叉、红笔）**填 true（该题可批改），纯印刷体无作答填 false。
 - 看不清/框内无完整印刷体题 → stem 留空串、has_figure=false（下游会兜底提示重框，绝不编造题目）。"""
 
     if not solve:
         output = """================ 输出（只输出一个 JSON，无解释、无 markdown fence） ================
 {
   "has_figure": true/false,
+  "need_grading": true/false,
   "stem": "题干(Markdown+行内$LaTeX$，已去手写)",
   "qtype": "选择/填空/解答",
   "options": ["选项A正文", "选项B正文"]
@@ -79,6 +81,7 @@ def build_recognize_prompt(*, solve: bool, grade_hint: str | None = None) -> str
     output = f"""================ 输出（只输出一个 JSON，无解释、无 markdown fence） ================
 {{
   "has_figure": true/false,
+  "need_grading": true/false,
   "stem": "题干(Markdown+行内$LaTeX$，已去手写)",
   "qtype": "选择/填空/解答",
   "options": ["选项A正文", "选项B正文"],
@@ -190,12 +193,14 @@ async def recognize(
 
     stem = str(data.get("stem") or "").strip()
     has_figure = bool(data.get("has_figure"))
+    need_grading = bool(data.get("need_grading"))
     qtype = dna_extract._norm_qtype(data.get("qtype"))
     options = [str(o).strip() for o in (data.get("options") or []) if str(o).strip()]
 
     out: dict[str, Any] = {
         "ok": bool(stem),
         "has_figure": has_figure,
+        "need_grading": need_grading,
         "stem": stem,
         "qtype": qtype,
         "options": options,
