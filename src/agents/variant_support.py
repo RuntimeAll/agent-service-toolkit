@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -1059,6 +1060,84 @@ async def _flush_item_figure_base64_to_oss(
             item["figure_url"] = url
     except Exception:  # noqa: BLE001 — 解码/上传失败 → 跳过 image 块，题正文照常入库
         return
+
+
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-103 WS2·AC6 落链清单（biz_question_model / 临时模型转正喂料）
+#   入库成功后落本地 JSONL（与 model_anchor.record_overflow_candidate 同风格），由
+#   tools/c103_promote_models.py（纯 pymysql，D11 直改库）消费 → 转正临时模型 + 题↔模型落链。
+#   🔴 toolkit 不直写 biz_question_model/biz_solution_model（架构铁律：数据归 RuoYi/脚本，计算归
+#   Python）；这里只落「待落链清单」（read-only 侧产物），写库是转正脚本的事。
+# ---------------------------------------------------------------------------
+_LINK_MANIFEST_PATH = Path(__file__).resolve().parents[2] / "artifacts" / "c103_link_manifest.jsonl"
+
+
+def _models_for_manifest(models: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """归一 models → 落链清单条目（保 id/name/isNew/tier_int/freq_int/model_kind/triggerFeature/action）。"""
+    out: list[dict[str, Any]] = []
+    for m in models or []:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("name") or "").strip()
+        mid = str(m.get("id") or "").strip()
+        if not name and not mid:
+            continue
+        out.append({
+            "id": mid or None,
+            "name": name,
+            "isNew": bool(m.get("isNew")),
+            "tier_int": m.get("tier_int"),
+            "freq_int": m.get("freq_int"),
+            "tier_text": m.get("tier_text"),
+            "freq_text": m.get("freq_text"),
+            "model_kind": m.get("model_kind"),
+            "triggerFeature": m.get("triggerFeature") or m.get("trigger_feature"),
+            "action": m.get("action") or m.get("action_conclusion"),
+        })
+    return out
+
+
+def record_link_manifest(receipts: list[dict[str, Any]], facts: dict[str, Any]) -> bool:
+    """🔴 WS2·AC6：把本次入库的题↔模型映射落 c103_link_manifest.jsonl（转正脚本消费）。
+
+    每条 = {question_id, role, models, temp_models, mother_question_id, trace?}。
+      - 母题(role=mother) models = facts.dna.models（含命中已有 + 临时模型，参与判档那份）。
+      - 变式(role=variant) 继承母题 models（变式守恒同套路）。
+      - temp_models = facts.dna.temp_models（待转正临时模型；mother 行带，variant 不重复带）。
+    best-effort：落盘失败返回 False，不拖垮入库（入库已成功，落链可补跑脚本）。
+    """
+    try:
+        dna = facts.get("dna") or {}
+        mother_models = _models_for_manifest(dna.get("models"))
+        temp_models = _models_for_manifest(dna.get("temp_models"))
+        mother_qid = facts.get("mother_question_id")
+        rows: list[dict[str, Any]] = []
+        for r in receipts:
+            if not r.get("ok") or r.get("id") is None:
+                continue
+            role = r.get("role") or "variant"
+            row: dict[str, Any] = {
+                "question_id": r.get("id"),
+                "role": role,
+                "models": mother_models,  # 变式继承母题 models（同套路）
+                "temp_models": temp_models if role == "mother" else [],
+                "mother_question_id": mother_qid,
+            }
+            if role == "variant" and mother_qid:
+                row["trace"] = {
+                    "method": (r.get("operator") or r.get("method") or "forward-gen"),
+                    "similarity": r.get("similarity"),
+                }
+            rows.append(row)
+        if not rows:
+            return False
+        _LINK_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _LINK_MANIFEST_PATH.open("a", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return True
+    except Exception:  # noqa: BLE001 — 落链清单是增强不是关卡（G4：写失败不静默成成功，但不拖垮入库）
+        return False
 
 
 async def persist_items(

@@ -60,6 +60,7 @@ from agents.variant_support import (
     chapter_name_for_id,
     leaf_pool_for_grade,
     persist_items,
+    record_link_manifest,
 )
 from core import get_model, relay_pool, settings
 from core import difficulty  # 🔴 PRD-C-103 WS1：确定性难度判档（grade_observed，表反控的代码点）
@@ -7050,6 +7051,16 @@ async def persist_to_bank(state: VariantState, config: RunnableConfig) -> Varian
 
     mother = next((r for r in receipts if r.get("role") == "mother"), None)
     var_receipts = [r for r in receipts if r.get("role") != "mother"]
+    # 🔴 PRD-C-103 WS2·AC6：落「题↔模型」清单（转正脚本 c103_promote_models.py 消费 → 落
+    #   biz_question_model + 临时模型转正）。母题 id 用回执回填（persist_items 在局部 facts 回填，
+    #   这里据 mother 回执补到 facts 供变式血缘指针）。best-effort，落盘失败不拦入库。
+    try:
+        manifest_facts = dict(facts)
+        if mother and mother.get("ok") and mother.get("id") is not None:
+            manifest_facts["mother_question_id"] = mother.get("id")
+        record_link_manifest(receipts, manifest_facts)
+    except Exception:  # noqa: BLE001 — 清单落盘是增强，绝不拖垮入库主流程
+        pass
     ok = [r for r in var_receipts if r.get("ok")]
     fail = [r for r in var_receipts if not r.get("ok")]
     _emit_stage(
