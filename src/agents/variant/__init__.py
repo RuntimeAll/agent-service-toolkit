@@ -2308,59 +2308,7 @@ async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
 
 # 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
 # 含 {占位符} 的变动段（配方/铁律的考点名、母题 DNA）移到末尾；语义一字不改。
-GENERATE_PROMPT = (
-    """你是浙教版初中数学命题专家。基于母题 DNA，造 {n} 道举一反三变式。
-
-只输出 JSON 数组(不要解释)，每个元素：
-{{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
-  "qtype":"选择/填空/解答","difficulty":1~4,"level":"normal/hard","injected_kp":"相邻kp名或null",
-  "figure_spec":{{"layout":"...","angle_labels":[...]}} 或 "" （配图决策对象/空串，契约见下；纯代数题给 ""）,
-  "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
-
-"""
-    + _FIGURE_SPEC_CONTRACT
-    + """
-
-"""
-    + _DIFFICULTY_RUBRIC
-    + """
-
-格式硬规定（stem/answer/solution 三个字段都遵守）：
-- 🔴 题面(stem)与选项里的数学式**一律行内 $...$**，如 $\\sqrt{{2}}$、$x^2-3x+2=0$、$\\frac{{px+a}}{{4}}=2-\\frac{{x+bp}}{{8}}$；
-  **严禁** `$$...$$` / `\\[ \\]` / 任何 display 块级公式（会渲染成撑满整行的大号公式、强制换行，破坏阅读）。
-- **仅 solution 里多行分步推导**可用 $$...$$（一步一行的竖排演算）；其余单个等式仍优先行内 $...$。
-- **禁止**裸 LaTeX 命令、禁止 \\( \\) 定界符。
-- 🔴 选项间距禁用 `\\quad`/`\\qquad`/`\\,` 等 LaTeX 间距命令，**选项各自成项**（用换行或并列文本分隔），
-  绝不写成 `A. 37° \\quad B. 53°` 这种一行内 $...$ 外裸 \\quad（渲染层不认、会裸露）。
-- 换行用 JSON 标准转义 \\n（一个反斜杠），不要写成 \\\\n。
-
-"""
-    + _QTYPE_CONTRACT
-    + """
-
-verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题自己的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 该题标准答案）：
-"""
-    + _PAYLOAD_CONTRACT
-    + """
-抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ verify_payload 填 {{"kind":"none","reason":"原因"}}。
-
-铁律：
-- **主考点 + 年级 硬守恒**：每道题都必须仍考「{kp_name}」、仍在该年级范围内。
-- 守{{解题结构, 难度(普通题)}}；只换{{数字, 场景}}。
-- 难题 1 道升一档；可综合 1 个相邻知识点(主考点仍守，注入为副点)，填到 injected_kp。
-- **答案可程序验算**(PRD-C-012 4c)：answer 优先给可计算的数值/表达式（如 $x_1=2, x_2=3$、
-  $3\\sqrt{{2}}$、选项字母），能出数值答案就不要出纯文字表述答案（证明/作图类除外）；
-  数字设计成解恰好整洁可验（避免无理数逼近、区间叙述、带单位混排）。
-
-配方(默认)：共 {n} 道 = {n_normal} 道普通(守难度) + {n_hard} 道难题(升一档)。
-
-母题 DNA：
-- 主考点(硬守恒，不可改): {kp_name}
-- 年级(硬守恒): {grade}
-- 题型: {qtype}
-- 母题题干: {stem}
-- 母题答案/解法骨架: {skeleton}"""
-)
+# 🔴 PRD-C-104 B3a：GENERATE_PROMPT 已抽到 stage2_variant/prompts.py（末尾 re-export）。
 
 
 def _figure_type_gate_block(state: VariantState, facts: dict) -> str:
@@ -2426,31 +2374,7 @@ def _mother_facts(state: VariantState) -> dict:
 #   确定算，替代 mother_opus dim8 的 LLM 自评 difficulty。喂进 recipe_from_knobs 的 md（md+i 递增
 #   逻辑 L3695 不动，只换 md 来源）。难度永不取 LLM 自评（铁律：pass/fail 只读 grade_observed）。
 # ---------------------------------------------------------------------------
-def _dna_factors_for_grade(dna: dict | None, stem: str = "", analysis_text: str = "") -> dict:
-    """从母题 DNA 抽 grade_observed 需要的确定性因子 K/R/D/G + model_hits。
-
-    - model_hits = dna.models（锚定模型，已带表真值 tier_int/freq_int，见 model_anchor）。
-    - R = 解法骨架步骤条数（dna.skeleton list 长度）。
-    - K = KG 锚定知识点数（主+副 kp）；不足则由解析独立依据数兜（复用 difficulty.extract_K）。
-    - D = 递进小问深度（题面小问 + 解析引用前问）。
-    - G = 数形结合（题面/几何标识）。
-    纯函数、零 LLM。缺则各因子 0（grade_observed 自带降级哨兵）。
-    """
-    dna = dna or {}
-    skeleton = dna.get("skeleton") or []
-    R = len(skeleton) if isinstance(skeleton, (list, tuple)) else 0
-    # K：主 kp + 副 kp 锚定数（KG 计数）；difficulty.extract_K 内部会与解析依据数取较大值
-    kp_count = (1 if (dna.get("main_kp") or {}).get("id") else 0) + len(
-        [s for s in (dna.get("secondary_kps") or []) if isinstance(s, dict) and s.get("id")]
-    )
-    analysis_blob = analysis_text or (
-        "\n".join(str(s) for s in skeleton) if isinstance(skeleton, (list, tuple)) else ""
-    )
-    K = difficulty.extract_K(analysis_blob, kp_count or None)
-    D = difficulty.extract_D(stem or "", analysis_blob)
-    G = difficulty.extract_G(stem or "", dna.get("verify_kind"), dna.get("dna_type"))
-    return {"model_hits": dna.get("models") or [], "K": K, "R": R, "D": D, "G": G,
-            "high_strategies": []}
+# 🔴 PRD-C-104 B3a：_dna_factors_for_grade 已抽到 stage2_variant/difficulty.py（末尾 re-export）。
 
 
 def mother_md_from_table(state: VariantState) -> int | None:
@@ -2486,34 +2410,7 @@ def _solution_steps(solution: str) -> list[str]:
     return parts
 
 
-def grade_variant_item(item: dict, mother_dna: dict | None) -> dict:
-    """🔴 WS1·AC1：单道变式确定性判档（grade_observed），替代 generate 内嵌 rubric 的 LLM 自评。
-
-    - model_hits = 继承母题锚定模型（mother_dna.dna.models，带表真值 tier_int/freq_int）；
-      变式自带 models（edit-dna 改过）时优先用变式自己的。
-    - K/R/D/G = 从该变式自己的 stem/solution 抽（R 走解析分步、D 走小问、K 走依据数、G 走几何）。
-    - 难度永不取 LLM 自评：item 原 difficulty 不参与判档（被本函数覆盖）。
-    返回 grade_observed 账单（含 level/modelHits/K/R/D/rule/...）。纯函数、零 LLM。
-    """
-    mother_dna = mother_dna or {}
-    mdna_dna = mother_dna.get("dna") or {}
-    # 变式 model_hits：变式自带优先，否则继承母题（变式当前主路径继承母题 models）
-    item_models = item.get("models")
-    model_hits = item_models if item_models else (mdna_dna.get("models") or [])
-    stem = str(item.get("stem") or "")
-    solution = str(item.get("solution") or "")
-    steps = _solution_steps(solution)
-    R = len(steps)
-    # K：母题 KG 锚定数（变式守恒同知识点）+ 解析依据数兜底（取较大，见 extract_K）
-    kp_count = (1 if (mdna_dna.get("main_kp") or {}).get("id") else 0) + len(
-        [s for s in (mdna_dna.get("secondary_kps") or []) if isinstance(s, dict) and s.get("id")]
-    )
-    K = difficulty.extract_K(solution, kp_count or None)
-    D = difficulty.extract_D(stem, solution)
-    G = difficulty.extract_G(stem, mdna_dna.get("verify_kind"), mdna_dna.get("dna_type"))
-    return difficulty.grade_observed(
-        model_hits=model_hits, K=K, R=R, D=D, G=G, high_strategies=[],
-    )
+# 🔴 PRD-C-104 B3a：grade_variant_item 已抽到 stage2_variant/difficulty.py（末尾 re-export）。
 
 
 def variant_trace_block(item: dict, knobs: dict | None) -> dict[str, Any]:
@@ -3954,36 +3851,7 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
 
 # 🔴 排版（PRD-C-012 任务3）：固定契约段前移，变动段（题干）移末尾；语义一字不改。
 
-REGEN_PROMPT = (
-    """下面这道变式题，独立解出的答案与题面标答不一致，请**重新出一道**等价变式重做。
-
-主考点(硬守恒): {kp_name}
-年级(硬守恒): {grade}
-原题干: {stem}
-要求：仍考「{kp_name}」、仍在「{grade}」、{level} 难度（目标难度档约 {difficulty}）；换数字/场景使题面与答案自洽；
-answer 优先给可计算的数值/表达式（可程序验算），数字设计成解恰好整洁。
-
-只输出 JSON：
-{{"stem":"新题干","answer":"标准答案","solution":"完整解析","qtype":"{qtype}","difficulty":1~4,"level":"{level}","injected_kp":{injected_kp},
-  "verify_payload":{{...新题的程序验算载荷，契约见下...}}}}
-🔴 difficulty 字段（整改2·难度并入生题）：拿下面这张 rubric 对**你重出的这道新题**断一个 1~4 的难度档（不是照抄目标档，是按 rubric 实判）：
-
-"""
-    + _DIFFICULTY_RUBRIC
-    + """
-
-格式硬规定：🔴 题面(stem)与选项数学式**一律行内 $...$**，**严禁** $$...$$ / \\[ \\] / display 块级公式（撑满整行）；**仅 solution 多行分步推导**可用 $$。禁止裸 LaTeX / \\( \\) 定界；换行用标准 \\n。
-
-"""
-    + _QTYPE_CONTRACT
-    + """
-
-verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**新题的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 新题标准答案）：
-"""
-    + _PAYLOAD_CONTRACT
-    + """
-抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ verify_payload 填 {{"kind":"none","reason":"原因"}}。"""
-)
+# 🔴 PRD-C-104 B3a：REGEN_PROMPT 已抽到 stage2_variant/prompts.py（末尾 re-export）。
 
 
 # B5-fix4（PRD-C-017）：老师在变式卡显式把题型从 A 改成 B（edit-dna field=qtype）→ 该题
@@ -5086,36 +4954,7 @@ def _grade_difficulty_payload(items: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
-async def _grade_difficulty(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """P8 难度总评（S1.2）：一次 nano call 按绝对 rubric 复评全组，覆盖 item['difficulty']。
-
-    ⚠️ 整改2（2026-06-12）已**退出主流程**：难度判定并入生题（GENERATE/REGEN/ADD 出题调用
-       同步按嵌入的四档 rubric 产出 difficulty），assemble/revise whole 不再独立调用本函数。
-       函数本体保留供单测 + 潜在按需复评用，rubric 与 _DIFFICULTY_RUBRIC 同口径（22-SSOT §2）。
-
-    🔴 G5 降级：items 空 / LLM 异常 / 解析失败 / 个数对不上 → 保留各 item 原 difficulty 值，
-    绝不抛、绝不卡死。逐项越界钳到 1-4（与 _clamp_difficult 入库口径一致）。
-    返回新 list（不原地改入参）；用 LLM_MODEL_LIGHT 经 _ainvoke_text 的 per-call model 覆盖。
-    """
-    out = [dict(it) for it in items]
-    if not out:
-        return out
-    try:
-        prompt = _GRADE_DIFFICULTY_PROMPT.format(items=_grade_difficulty_payload(out))
-        text = await _ainvoke_text(
-            [HumanMessage(content=prompt)], model=settings.LLM_MODEL_LIGHT
-        )
-        parsed = _parse_json(text)
-    except Exception:  # noqa: BLE001 — 难度总评是增强不是关卡，失败保留原值
-        return out
-    if not isinstance(parsed, list) or len(parsed) != len(out):
-        return out  # 个数对不上 → 整体降级保留原值（不冒险错位覆盖）
-    for it, raw in zip(out, parsed):
-        d = _to_int(raw)
-        if d is not None:
-            it["difficulty"] = max(1, min(DIFFICULTY_CAP, d))  # 越界钳 1-4
-        # d 解析不出 → 该题保留原 difficulty（不动）
-    return out
+# 🔴 PRD-C-104 B3a：_grade_difficulty 已抽到 stage2_variant/difficulty.py（末尾 re-export）。
 
 
 def difficulty_consistency_defects(items: list[dict[str, Any]]) -> list[str]:
@@ -7490,6 +7329,22 @@ async def ask_for_image(state: VariantState, config: RunnableConfig) -> VariantS
 # ---------------------------------------------------------------------------
 # 图（StateGraph）
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-104 B3a：stage2_variant/{prompts,difficulty}.py re-export（纯搬零改）。
+#   置于此处（所有 __init__ 依赖已定义、图 wiring 之前）→ 子模块顶部 from agents.variant import
+#   取依赖时本模块命名空间已就绪，无循环；调用方按 variant.X / V.X 仍解析得到。
+# ---------------------------------------------------------------------------
+from agents.variant.stage2_variant.prompts import (  # noqa: E402
+    GENERATE_PROMPT,
+    REGEN_PROMPT,
+)
+from agents.variant.stage2_variant.difficulty import (  # noqa: E402
+    _dna_factors_for_grade,
+    grade_variant_item,
+    _grade_difficulty,
+)
+
 graph = StateGraph(VariantState)
 # 🔴 PRD-C-100 B1a 塌缩入口：mother_opus_entry 替代 analyze+mother_precheck（新图入口）。
 #   🔴 PRD-A-021 R4·F19：旧 analyze/mother_precheck 退役节点 + 其 edge + path_map 死映射已删
