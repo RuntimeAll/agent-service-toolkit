@@ -241,215 +241,36 @@ def _sympy_gate_on(config: RunnableConfig | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 🔴 PRD-A-021 S4·items merge reducer（治本：杜绝 last-writer-wins 全量覆盖丢 figure_url/手改）
+# 🔴 PRD-C-104 B1：state 契约（merge reducer + VariantState）已抽到 variant/state.py，
+#    本处 re-export 保 service.py / variant_entry.py / 本模块内其余引用零感（纯搬零改）。
 # ---------------------------------------------------------------------------
-# 背景根因：旧 VariantState.items 无 reducer = LangGraph 默认 last-writer-wins 全量覆盖。任何节点
-#   （通道A graph 内）或 aupdate_state（通道B /variant/* graph 外）写 {"items": full_list} 都整组替换。
-#   于是「通道B 设了 figure_url → 通道A 某节点回写整组（拿的是更早的快照 / 重组时漏带 figure_url）」
-#   → figure_url/手改静默丢失（跨轮非并发也丢，是最普遍的丢图通道）。
-#
-# 修法 = 给 items 挂「按稳定 id 合并 + 同时支持显式清空」的 reducer：
-#   ① 右操作数（new = 本次写入）是**权威集合与顺序**：只有 new 里的题留下（不复活 old 里被删的题），
-#      顺序完全照 new（reorder/默认序都不被 reducer 扰动）。→ 「按 id 合并」是**在 new 的骨架上回填**，
-#      不是并集。
-#   ② 稳定 id = item["_seq"]（§P2b「题原始生成序」既有稳定 merge 键）。new 里缺 _seq 的题，reducer
-#      就地补 _seq（首次全量集落库即补齐，此后跨轮稳定）→ 后续 backfill 一律能按 _seq 命中、不靠位置。
-#   ③ 回填策略两类（只在 new 缺该键时回填，绝不覆盖 new 已带的新值）：
-#      - PRESERVE_ALWAYS（簿记/手改印记）：按 _seq 命中即回填（入库 id/已入库标记/手改印记等，
-#        节点重组时漏带也不丢）。
-#      - PRESERVE_IF_SAME_STEM（figure_url）：**仅当 old/new 同 _seq 且题面(stem)未变**才回填——
-#        题面变了（重生/换题）= 旧配图对新内容失效，绝不把过期图嫁接到新题面上。
-#   ④ 显式「整体替换/清空」= **空列表语义约定**：new 为 []（或非 list 容错）→ 直接返回 []（真清空）。
-#      所有「清 items」调用（mother_opus_entry.base_out / analyze 退役入口 / patch 改硬锚 / generate
-#      裸奔兜底）写的就是 "items": []，本 reducer 据此真清空，**不需另设哨兵**（[] 在本域永远=清空，
-#      无「[] 表示合并空集保留旧组」的歧义——已逐处核对全部 items 赋值点确认）。
-# 🔴 红线：本 reducer 不改 M3（高置信空池 picker 兜底，走 generate 正常出题）/ M4（新母题清旧 items=
-#   写 []，reducer 清空）/ B2（niche 重锚不死循环，走 classify/控制流，与 items 合并正交）的任何行为；
-#   它只在「整组覆盖」这一步把 figure_url/手改/簿记按 id 安全续上，对清空/替换/重排字节级透明。
-_ITEMS_PRESERVE_ALWAYS: tuple[str, ...] = (
-    "_persist_id",      # 在库雪花 id（防重落库 / 覆盖入库键）——重组漏带会致重复落行
-    "persisted",        # 已入库标记
-    "_draft_id",        # 🔴 PRD-A-022 批1：assemble 自动落的草稿行雪花 id（status=0，未发布）——
-    #                     跨轮重组（排序/编辑非替换路径）漏带会致 assemble 重复落草稿；与 _persist_id
-    #                     同口径走 PRESERVE_ALWAYS 续上。重生（换题）路径显式 strip（不 carry 旧草稿 id），
-    #                     由 assemble 对新题重落新草稿，与本续上正交（new 已带=不覆盖，new 缺才回填）。
-    "_content_dirty",   # 已入库题内容已改待覆盖
-    "question_id",      # FE 进 A-015 编辑器用
-    "manual_edited",    # 老师手改印记（重生前二次确认 + 闸B 不回炉）
-    "manual_block",     # 老师手动排版印记
-)
-_ITEMS_PRESERVE_IF_SAME_STEM: tuple[str, ...] = (
-    "figure_url",       # 变式配图 OSS url：仅题面未变才续（题面变=旧图失效，不嫁接）
-    # 🔴 PRD-A-021 R2b·U1：生成态配图 PNG base64。旧实现配图 base64 仅活在 FE 内存
-    #   （variantFigures[idx].png），刷新/切 tab 即丢，且只在入库动作才传 OSS——生成态配图
-    #   永不落 checkpoint。现把 base64 也按 figure_url 同口径走 reducer 续上（仅题面未变才续，
-    #   题面变=重生=旧图失效不嫁接）→ FE 造图后写一次 state，刷新即从 checkpoint 取回。
-    "figure_base64",
+from agents.variant.state import (  # noqa: E402
+    VariantState,
+    merge_items,
+    _item_stem_norm,
+    _ITEMS_PRESERVE_ALWAYS,
+    _ITEMS_PRESERVE_IF_SAME_STEM,
 )
 
-
-def _item_stem_norm(it: Any) -> str:
-    """题面归一（仅供 reducer 判「题面是否变了」；与 _norm 同口径但本函数定义早于 _norm，独立实现）。"""
-    if not isinstance(it, dict):
-        return ""
-    return " ".join(str(it.get("stem") or "").split())
-
-
-def merge_items(old: Any, new: Any) -> list[dict[str, Any]]:
-    """items 通道 reducer（见上方设计块）。new=本次写入（权威集合+序），old=已落库前态。
-
-    - new 非 list → 容错返回 old（不让坏写炸状态；理论上不该发生）。
-    - new == [] → 显式清空（M4 新母题/patch 改硬锚/裸奔兜底都靠它真清空）。
-    - 否则在 new 骨架上：按 _seq 命中 old 同题 → 回填 PRESERVE_ALWAYS（缺即补）；题面未变再回填
-      figure_url。new 缺 _seq 的题就地补 _seq（位置序兜底，仅 old 全无 _seq 的纯首轮场景才用位置匹配）。
-    """
-    if not isinstance(new, list):
-        return old if isinstance(old, list) else []
-    if len(new) == 0:
-        return []  # 🔴 显式清空（空列表语义约定）
-    old_list = old if isinstance(old, list) else []
-    old_by_seq: dict[Any, dict[str, Any]] = {
-        o["_seq"]: o
-        for o in old_list
-        if isinstance(o, dict) and o.get("_seq") is not None
-    }
-    any_old_seq = bool(old_by_seq)
-    out: list[dict[str, Any]] = []
-    for pos, n in enumerate(new):
-        if not isinstance(n, dict):
-            out.append(n)  # 非 dict 原样保留（不该发生，纯防御）
-            continue
-        m = dict(n)
-        seq = m.get("_seq")
-        if seq is not None:
-            match = old_by_seq.get(seq)
-        elif not any_old_seq and pos < len(old_list) and isinstance(old_list[pos], dict):
-            # 纯首轮兜底：old 整组都没 _seq（理论上仅极早期）→ 退化为位置匹配；一旦补了 _seq
-            # 此分支后续不再走（稳定键优先），避免 reorder 后位置错配。
-            match = old_list[pos]
-        else:
-            match = None
-        if isinstance(match, dict):
-            for k in _ITEMS_PRESERVE_ALWAYS:
-                if k not in m and k in match:
-                    m[k] = match[k]
-            if _item_stem_norm(m) == _item_stem_norm(match):
-                for k in _ITEMS_PRESERVE_IF_SAME_STEM:
-                    if k not in m and k in match:
-                        m[k] = match[k]
-        if m.get("_seq") is None:
-            m["_seq"] = pos + 1  # 就地补稳定键（此后跨轮按 _seq 命中，不靠位置）
-        out.append(m)
-    return out
-
-
 # ---------------------------------------------------------------------------
-# State（设计 prompt 指定结构）
+# 🔴 PRD-C-104 B1：prompt 字符串常量已抽到 variant/prompts.py，本处 re-export 保零感。
+#    须在 GENERATE/REGEN/EXTRACT/ADD 等拼接型 prompt 使用 _PAYLOAD_CONTRACT 等片段前导入。
 # ---------------------------------------------------------------------------
-class VariantState(MessagesState, total=False):
-    image_url: str | None
-    # 🔴 PRD-A-022 批2·D8：母题「切图」OSS https url（toolkit crop_mother_figure 产 → FE 上 OSS
-    #   → 经 /variant/set-mother-figure 回写）。build_mother_bo 入库优先取它（切图），缺则不带图
-    #   （D8 不退原图兜底）。语义同变式 figure_url，但这是顶层 scalar、单次写定，无需 reducer。
-    mother_figure_url: str | None
-    images_count: int
-    questions_in_image: int
-    # analysis：年级/考点(kp)/题型(qtype) 各带置信
-    analysis: dict[str, Any]
-    mother_dna: dict[str, Any]
-    mother_confirmed: bool
-    # 🔴 PRD-C-017 B2·母题 nano 前置判（年级册+章+带图）。analyze 后、classify 前由 mother_precheck
-    #   节点写。awaiting_mother_confirm=True = 已发 needConfirm 停下等老师确认（复用 clarify→END
-    #   chat-resume，不引 LangGraph interrupt）。下一轮老师确认（confirmed_chapter_id 经 config 回传）→
-    #   route 直奔 classify。mother_rejected=True = 带图打回（终止流程，不调 opus、不出变式）。
-    #   confirmed_chapter_id/confirmed_grade_book_id = 老师确认后的章/年级册 id（接 classify 闸B）。
-    mother_precheck: dict[str, Any] | None
-    awaiting_mother_confirm: bool
-    mother_rejected: bool
-    confirmed_chapter_id: str | None
-    confirmed_grade_book_id: str | None
-    # 🔴 PRD-C-017 B5·母题卡硬停闸：classify 解出 mother_dna + 发母题卡帧后，置 True 并 END
-    #   （不自动流向 generate）。下一轮老师点「开始举一反三」→ FE 经 config.configurable 回传
-    #   start_variants=True → route_entry 见信号 + 已有 mother_dna（checkpointer 持久 thread state）
-    #   → 直奔 generate（不重跑 classify、不重调 opus，复用 state.mother_dna）。
-    awaiting_mother_review: bool
-    # items[{stem, answer, solution, qtype, difficulty, level, injected_kp?,
-    #        check:{badge:ok|warn, solved_answer}  ← 闸B(solve_explain)填,
-    #        gene:{gate:pass|warn|skipped, reason?} ← 闸A(gene_gate)填}]
-    # 🔴 PRD-A-021 S4：挂 merge_items reducer（按 _seq 稳定 id 合并 + 空列表显式清空），治本丢
-    #   figure_url/手改/簿记的 last-writer-wins 全量覆盖。语义/红线见 merge_items 上方设计块。
-    items: Annotated[list[dict[str, Any]], merge_items]
-    history: list[dict[str, Any]]
-    # 交互层：parse_instruction 的解析结果（intent/ops/knobs/...），路由后各分支消费并清空
-    pending: dict[str, Any] | None
-    # 🔴 首轮配方旋钮（设计 §5 五旋钮的"首轮接线"）：None=还没抽过；{}=抽过但老师没提(走默认)。
-    # {"count": int, "difficulty_plan": "increasing"|str, "qtype_dist": {"选择":2,...}, "note": str}
-    # analyze（新母题轮）负责抽取/重置：新图新要求 → 重抽覆盖；同图重贴无新要求 → 保留；
-    # 新图无要求 → 重置 {}（旧母题配方绝不泄漏到新母题）。generate 仅对库内母题路径兜底抽。
-    knobs: dict[str, Any] | None
-    # generate 的代码级配方校验缺陷清单（整组 retry 1 次后仍不符 → assemble 头部外显 ⚠）
-    shape_defects: list[str]
-    # 🔴 BUG-01（2026-06-19）·改主考点可回退：edit-dna 改 main_kp 前的旧考点快照
-    #   {"main_kp": {id,name}|None, "kp": analysis.kp 旧值|None}，FE 据它给「撤销改考点」入口。
-    #   不破坏 items（改主考点不再清 items）→ 撤销 = 把主考点改回旧值即可，变式都还在。
-    main_kp_prev: dict[str, Any] | None
-    # 4d 方案A（PRD-C-012）：本轮被剔除题的叙事（sympy 证实标答错且重生未果 → 不外发），
-    # solve_explain 每轮重写（非累计），assemble 摘要外显「本组少 N 道」
-    dropped_notes: list[str]
-    # 🔴 P9 手排 sticky（对抗审③·PRD-C-013）：exec_reorder 置 True，标记老师已手动排过序。
-    # assemble 见 True 时**跳过** _sort_by_difficulty（默认难度升序排序），不静默重排覆盖手排；
-    # 改变题集的编辑（exec_add/exec_remove）清掉该标记（题集变了，手排次序失效，回默认序）。
-    # exec_regenerate 是原位改单题不变序 → 不清（手排保留）。
-    manual_order: bool
-    # 🔴 P13 预算闸（PRD-C-013）：state 级 LLM 调用计数器 {"used":int,"limit":int}。
-    # 出题/编辑轮**入口**节点（generate / parse_instruction）按 settings 重置；轮内下游节点
-    # （gene_gate/solve_explain/assemble/exec_*）从 state 携带、累计 used，并把它放回返回值
-    # state（跨 superstep 保活）。超限后增强类调用跳过走 G5 降级（_budget_exhausted）。
-    llm_call_budget: dict[str, int] | None
-    # 🔴 批3（2026-06-13）·事实源冻结：每批次一份「老师锚准的事实源」（年级学期/主考点/DNA
-    #   基础元素 = analysis.grade/kp + mother_dna.dna）。定死/确认时 facts_locked 置位 → 此后
-    #   **只许老师指令改、LLM 输出不许反向覆盖**。每次老师修正记一条 audit（字段/旧值/新值/
-    #   指令原文）。不搞重型版本系统，setter 统一收口写入。
-    facts_locked: bool
-    facts_audit: list[dict[str, Any]]
-    # ===================================================================
-    # 🔴 PRD-C-015 批1·DNA 契约 v2 增量（在 C-014 v1 上加，不动既有字段；一次升 v2 无 v1.5）
-    # ===================================================================
-    # (a) 模型维（原双轴；批1 仅建字段占位，批2 才真填）：
-    #   mother_dna.dna.models = [{id,name}]（1~3 项，非空）由批2 model_anchor 写；
-    #   mother_dna.dna.model_overflow = [str]（池外名，⚠/待命名池用）。批1 不动 dna_extract 产物，
-    #   字段缺省即「未抽」（None/缺），下游容缺。
-    # (b) 母题守恒确认状态（块①·D-merge7 确定性异常门控·非置信非硬锁 + 缺口5 合并闸）：
-    #   mother_confirm = {
-    #     flags: [str],            # 确定性异常标记（FLAG_SECONDARY_KP_OOB/EXAM_TYPE_OOB/SKELETON_EMPTY），无逐维置信分
-    #     needs_confirm: bool,     # (flags 非空) ∨ (年级+主考点三锚没定死) → 弹合并确认面；否则直接放行
-    #     confirmed_dims: [str],   # 老师已过/改的守恒维（留痕用）
-    #     audit_ref: int | None,   # 指向 facts_audit 的索引（不另起审计表）
-    #   }
-    mother_confirm: dict[str, Any]
-    # (c) DNA 改→重生四分流·待重生态·防脏·快照（块③·批1 仅建字段，批4 才接真重生逻辑）：
-    #   - regen_class 是约定/枚举映射（哪维属哪类）= 模块级常量 REGEN_CLASS（前后端共用，不逐题落库）。
-    #   - items[i].dna_dirty: bool（重生维/骨架/models 改置位；纯元数据维改不置位）→ 致命①入库硬闸。
-    #   - items[i].regen_snapshot: 重生前快照（缺口12 撤销重生，批4 真用）。
-    #   - mother_dna.dirty: bool（母题守恒维改置位）。
-    #   - regen_dirty: 会话态，已改未重生的重生维列表（打角标；待重生集合=变式自身脏∪母题脏波及）。
-    regen_dirty: list[str]
-    # 🔴 PRD-C-100 B1a 塌缩入口（mother_opus_entry）增量：
-    #   mother_has_figure：opus 一把判定题面是否含图（带图不再 reject，给 B3 切图管线判定钩子）。
-    #   entry_decision：D1 条件 confirm 判据快照（needs_confirm/reason/候选/置信）。
-    #   _entry_finalized：本轮入口是否走到 finalize（高置信路径）= after_mother_entry 路由信号
-    #     （错误早退显式置 False，避免 checkpointer 跨轮 stale True 误路由到 await_review）。
-    mother_has_figure: bool
-    entry_decision: dict[str, Any]
-    _entry_finalized: bool
-    # 🔴 PRD-A-021 R2a·闸3（BUG-03）：复用首解强锚路径下「老师选定章↔AI 判主考点冲突」（章里锚不到
-    #   主考点真叶子）→ 闸断/强确认（不静默强锚放行）。记录已就该冲突闸断过的章 id；老师**再次确认
-    #   同一章**（坚持）→ 接受强锚放行，不再二次闸断（防死循环）；改成别的章 → 重新走锚定。
-    _bug03_gated_chapter: str | None
-    # 🔴 PRD-A-021 R2a·闸4（BUG-04）：母题读图置信极低（< 0.40）/ 章未判出 → resume 轮在 classify
-    #   **之前**前置拦截，建议换清晰图，不进 classify 烧 opus token。置 True = 已拦过一次；老师坚持
-    #   （再回传 confirmed_chapter_id）→ 放行进 classify（防永久卡死）。
-    _lowconf_blocked: bool
+from agents.variant.prompts import (  # noqa: E402
+    ANALYZE_PROMPT,
+    _PAYLOAD_CONTRACT,
+    _QTYPE_CONTRACT,
+    _DIFFICULTY_RUBRIC,
+    _FIGURE_SPEC_CONTRACT,
+    KNOBS_PROMPT,
+    SOLVE_PROMPT,
+    _GRADE_DIFFICULTY_PROMPT,
+    PARSE_PROMPT,
+    ANSWER_PROMPT,
+    SOLUTION_ONLY_PROMPT,
+    REVISE_FIELD_PROMPT,
+    _REWRITE_SOLVE_PROMPT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1932,34 +1753,6 @@ def route_entry(
 # ---------------------------------------------------------------------------
 # 节点
 # ---------------------------------------------------------------------------
-ANALYZE_PROMPT = """你是浙教版初中数学命题专家。看这张题目图，**流式**输出母题分析。
-🔴 老师贴图时可能附带了出题要求（出几道、难度安排、题型配比等），如下：
-{utterance}
-（仅作语境参考——出题配方由独立纯文本抽取器另行解析，这里**不要**抽 knobs。）
-
-🔴 接地（grade/qtype 从闭集选，别自由造，否则与题库口径对不上、弹窗预填错）：
-- grade.value **只能从这 6 个浙教版教材册里选一个**（"册"是教材分册，不是"初一/7年级/上学期"这类口径）：
-  七年级上册、七年级下册、八年级上册、八年级下册、九年级上册、九年级下册。
-  题面无年级线索、判不出 → 留空串 ""（confidence 给低），别硬猜杂口径。
-- qtype.value **只能从这 3 类里选**：选择 / 填空 / 解答（计算题/证明题归入"解答"）。
-
-只输出一个 JSON（不要解释），结构：
-{{
-  "is_question_image": true/false,   // 非题目图(风景/截图/空白)填 false
-  "images_count": 1,                  // 检测到几张图
-  "questions_in_image": 1,            // 这张图里有几道题
-  "grade": {{"value": "七年级上册", "confidence": 0.0~1.0}},  // 6 册之一或留空 ""
-  "subject": "数学",
-  "kp": {{"value": "核心考点粗描述(如:一元二次方程求根)", "confidence": 0.0~1.0}},
-  "qtype": {{"value": "选择/填空/解答 三选一", "confidence": 0.0~1.0}},
-  "stem": "题干(Markdown+LaTeX)",
-  "answer": "标准答案(图里没有就先解母题得出)",
-  "difficulty": 1~5,
-  "structure": "结构指纹/解法骨架简述",
-  "solution_skeleton": "解法骨架(步骤)"
-}}
-🔴 无答案先解母题得答案/解法骨架(作 verify 基准)。各锚(年级/考点/题型)如实给 confidence。
-🔴 BUG-002 D1：出题配方（数量/难度/题型配比）由独立 _extract_knobs 纯文本抽取，本调用**不输出 knobs**。"""
 
 
 # 🔴 阶段灯·锚定考点首灯定时翻绿（PRD-C-009 整改·改动2）：合并读图+配方+锚定后，
@@ -2939,30 +2732,6 @@ async def clarify(state: VariantState, config: RunnableConfig) -> VariantState:
 # .format() 的 prompt 模板里使用，不要单独 .format() 它。
 # 排版（吃 aigeek 前缀缓存）：契约属固定段，各 prompt 把它排在变动段（题干/facts）之前。
 # ---------------------------------------------------------------------------
-_PAYLOAD_CONTRACT = """载荷契约（kind 多选一；所有表达式必须是 sympy 可解析的纯 ASCII 数学串：乘号写 *、乘方写 ** 或 ^、分数写 /、根号写 sqrt()；禁止 LaTeX、中文、单位、等号外的标点）。
-🔴 表达式硬边界（违反 = 程序直接拒收变 degrade，浪费一次验算机会）：
-- 只允许这些函数：sqrt / Abs / Min / Max（比大小、最值题用 Min(...)/Max(...)，绝对值用 Abs()）。
-- **禁止任何 Python 语法**：不许 if/else 三元、列表推导、len()/range()、布尔 True/False、比较式（< > ==）。
-- 选项/claimed 必须是**可算出的数值或表达式**（如 "-sqrt(25)"、"7/2"），不是真假陈述；某选项本身不是数值（如文字判断、区间）→ 整题输出 kind:none。
-- 计数类问题（"有几个是…"）若每项判定都是数值比较可写成 Min/Max/Abs 组合才抽，否则 kind:none——不要发明 Piecewise/Eq/逻辑与。
-1. 方程求解: {{"kind":"equation_solve","equations":["x**2-5*x+6=0"],"unknowns":["x"],"claimed":["2","3"]}}
-   （claimed = 标准答案申报的全部解；只支持单未知数。🔴 程序按"解集完全相等"判：若题目含舍根/取值范围
-   约束——如分式方程验增根后舍去、几何/应用题边长必须为正——标答只保留部分解时，**不要用本 kind**
-   （claimed 会少于裸方程全部解被误判 fail）：能数值验保留解就改用 kind 3 numeric，否则输出 kind:none）
-2. 表达式等价(化简/展开/因式分解): {{"kind":"expr_equiv","expr_a":"题面原式","expr_b":"标准答案给的结果式"}}
-3. 数值计算: {{"kind":"numeric","expr":"3*7/2","claimed":"10.5","tol":1e-6}}
-4. 选择题: {{"kind":"choice","ground":{{上述1/2/3任一子载荷}},"options":{{"A":"2","B":"3"}},"claimed_correct":"B"}}
-   （options 的值 = 各选项的数学值；ground = 由题干建立的真值载荷；claimed_correct = 标准答案的选项字母）
-5. 不等式解集: {{"kind":"inequality_solve","inequality":"2*x-3>1","unknown":["x"],"claimed":"x>2"}}
-   （inequality = 题面不等式，须含关系符 < > <= >= ；claimed = 标答解集，同样写成关系式如 "x>2"、"x<=-1"；
-   程序按解集相等判，单未知数）
-6. 分式方程(含舍根/增根): {{"kind":"rational_roots","equation":"1/(x-1)=2/(x**2-1)","unknowns":["x"],"claimed":["3"]}}
-   （🔴 分式方程标答因「使分母为 0 的增根需舍去」只保留部分解时，用本 kind 而非 kind 1：
-   程序自动求出裸方程候选解、剔除让任一分母为 0 的增根，按存活解集与 claimed 完全相等判；
-   claimed = 标答舍根后保留的解，漏剔增根/把舍掉的根写进 claimed 都会被判 fail）
-🔴 应用题（行程/工程/利润等）：直接复用 kind 1 equation_solve —— 列出题面方程组到 equations、
-   未知数到 unknowns、标答到 claimed（应用题往往有正负/取值约束只取部分解，此时若 claimed 少于
-   裸方程全部解会被误判 fail，应改用 kind 3 numeric 逐解验或输出 kind:none）。"""
 
 # ---------------------------------------------------------------------------
 # 🔴 题型结构契约（PRD-C-013 P11 单一事实源）：GENERATE / REGEN / ADD 共用，
@@ -2972,23 +2741,12 @@ _PAYLOAD_CONTRACT = """载荷契约（kind 多选一；所有表达式必须是 
 # 同 _PAYLOAD_CONTRACT，以「format 模板片段」形态存在（无 {占位符}，但与会被 .format()
 # 的模板拼接，故文本内若出现花括号须双写——当前无）。
 # ---------------------------------------------------------------------------
-_QTYPE_CONTRACT = """题型结构契约（每道题必须按其 qtype 字段长成对应结构，违反 = 程序结构 lint 抓出并回炉）：
-- 选择：**单一设问** + 恰 4 个选项（A、B、C、D 各一），answer 为选项字母（A/B/C/D 之一）。
-  🔴 禁止把多小问 (1)(2)(3) 或 ①②③ 嵌进一道选择题（那是「解答」题的形态，不是选择题）。
-- 填空：题干含空位标记（____ 下划线 或 ( ) 括号空），answer 为要填的值。
-- 判断：单一陈述句，answer 为「对」或「错」（正确/错误亦可）。
-- 解答：**允许** (1)(2)(3) 多小问，answer/solution 分小问作答；这是唯一可含多小问的题型。"""
 
 # 🔴 难度四档 rubric（整改2·2026-06-12·单一事实源）：难度判定并入生题——出题调用同步产出
 #   每道题的 difficulty（不再独立走一轮 _grade_difficulty 复评）。rubric 标准本身不变（仍是
 #   22-SSOT §2 四档断言），由 GENERATE/REGEN/ADD/revise 出题 prompt 嵌入，让出题时就按 rubric
 #   断言难度。难度是「评级」（LLM rubric 断言）≠「判对错」（归闸B sympy，铁律不破）。
 #   🔴 本常量将被拼进会 .format() 的 prompt 模板，文本内花括号须双写转义（{{ }}）。
-_DIFFICULTY_RUBRIC = """难度四档 rubric（每道题的 difficulty 按下面标准判级，1~4 绝对难度，不是相对母题；难度是评级不是判对错）：
-- 4（压轴）：≥2 个真实难点 / 多突破口综合。
-- 3（多步综合）：1 个难点，或 考察类型∈{{证明推理·应用建模·探究归纳}}，或 解法骨架含【最难步】构造。
-- 2（常规）：无难点 + 考察类型∈{{直接计算·公式套用·性质判定}} + 多步骨架。
-- 1（送分）：无难点 +（概念辨析 或 单步骨架）。"""
 
 # 🔴 配图描述契约（PRD-A-018 治本A·单一事实源）：出题时（上下文最全——有母题题面+母题配图+
 #   变式题面）顺手为每道变式产一份**自然语言配图描述 figure_spec**，下游 compose 直接照它翻
@@ -2996,44 +2754,6 @@ _DIFFICULTY_RUBRIC = """难度四档 rubric（每道题的 difficulty 按下面�
 #   GeoGebra 命令——说清「这道图有哪些点、大致布局、标哪些角/度数、什么旋转/平移/对称到哪、
 #   哪些虚线」即可，把"画什么"想清楚，"怎么翻成命令"留给 compose。
 #   🔴 与 GENERATE 同以「format 模板片段」形态存在（无 {占位符}；文本内若出现花括号须双写——当前无）。
-_FIGURE_SPEC_CONTRACT = """figure_spec 字段（配图描述 = 这道图「画什么」的权威决策，下游 compose 只照此忠实翻成 GeoGebra，自己不增不减、不做内容取舍、不判已知/求解。所以「画什么、标哪些角、哪些不画」全在你这里一次定死）：
-
-🔴 你现在手里有**母题原配图**（多模态附在消息里）+ 母题题干 + 你刚造的变式题面 —— 上下文最全，由你（出题方）来定这道图画什么、标什么，这是你的职责，不要推给下游。
-
-【何时给 / 何时空】
-- **只对几何/图形题给 figure_spec**（含角、三角形、圆、折叠、旋转、对称、平移、平行、垂直、数轴、坐标系、
-  函数图象、扇形、弧、立体三视图、棱柱棱锥、各类四边形/多边形 等需要配图才说得清的题）。
-- **纯代数/纯文字题（解方程、化简、应用题文字建模、纯数值计算等无几何意义）→ figure_spec 给空串 ""**
-  （表示无需配图；绝不硬凑几何描述）。
-
-【🔴 内容决策（这些「画什么」的判断全归你 —— 下游不做内容裁剪）】
-- 配图是**给学生做的题图**（不是解题图、不是答案图）：**简洁明了、最小忠实集、宁少勿多**。
-- **必要性闸（描述每个元素——点/线/弧/标注——前先自问，不通过就不写进 figure_spec）**：
-  「这个**必须**画吗？**不画它，学生还能看懂这道题吗？**」——**能看懂，就不写。**
-- ⛔ **绝不描述/标注需要学生求解的角、推导出的中间角度值**（那是答案，画出来=泄题）。
-- ⛔ **被平分/被分割的角，不要把它的每一半子角画出来**（连弧都不要）——平分关系**只用射线表示**
-  （必要时在两半边加等长刻度记号），既不给各半子角描述、更不标度数。
-- ⛔ **只说题面/答案里已明确的构型**，不推断、不脑补题面没明说的关系（P 是否共线、某点是否在某射线上等，
-  题面给了就照给的说、没给的别推）；不要在 figure_spec 里解题/算答案/验证结论。
-
-【figure_spec 写成什么形态（半结构化：布局走自然语言，标注决策走结构化）】
-🔴 推荐写成一个 **JSON 对象**（让你的「标哪些角=什么文字」无损传给下游，不再让下游从自然语言猜）：
-  {{
-    "layout": "自然语言说清：有哪些点及大致布局（如「△ABC，A 在顶部，B、C 在底边」「O 为坐标原点」）；
-               变换关系（绕谁/沿什么/转或移多少/到哪个像，如「△ABC 绕 A 逆时针旋转 60° 得 △AB′C′」）；
-               哪些是虚线/辅助线（如「连结 BB′ 为虚线」「对称轴虚线」）；其它必要记号（平行/垂直/等长记号）。",
-    "angle_labels": []
-  }}
-  🔴🔴 **图上一律不标任何角度度数（限死，2026-06-20 用户拍板）**：配图是给学生做的题，**度数信息在题目
-    文字里、图上一概不写**（20°/30° 等度数文字一律不画，画了=泄题/冗余）。所以：
-  - **"angle_labels" 默认给空数组 []**——不要往里放任何度数。下游只按构型画弧、不标度数。
-  - 直角小方块、等长刻度、平行/垂直记号 = **构型记号**（不是度数），需要时**写进 layout 文字描述**
-    （如「∠ABC 处画直角小方块」「OS、OT 两侧加等长刻度表平分」），它们不是度数、照画。
-  - （唯一例外：老师后续在对话里**明确强制要求**把某角度数标到图上——那是下游图片重生时的事，与你出题无关，
-    你这里 angle_labels 始终空。）
-- 也允许把 figure_spec 写成**纯字符串**（自然语言描述布局/构型/变换/记号，同样不写度数）；但**优先 JSON 对象**。
-- 🔴 figure_spec 是**可选字段**：拿不准/嫌麻烦时给空串 "" 即可（下游会退回老办法从题面现推），
-  绝不要因为这个字段卡住出题或编造内容。"""
 
 # 🔴 排版（PRD-C-012 任务3·吃 aigeek 前缀自动缓存）：固定规则/契约段在前，
 # 含 {占位符} 的变动段（配方/铁律的考点名、母题 DNA）移到末尾；语义一字不改。
@@ -3637,22 +3357,6 @@ def _context_block(facts: dict) -> str:
 #   （B2·T2：闸A LLM judge 退役后，配方对齐不再注入 judge prompt——闸A 改纯代码三检）。
 # 🔴 抽取失败/解析失败 → knobs={} 回落默认，绝不卡死出题（G5）。
 # ---------------------------------------------------------------------------
-KNOBS_PROMPT = """你是举一反三 agent 的出题配方抽取器（受约束抽取：只抽老师明说的，绝不脑补）。老师贴题目图时附带了下面这句话，请从中抽出出题配方旋钮。
-
-老师的话：
-{utterance}
-
-只输出一个 JSON（不要解释、不要 markdown fence）：
-{{
-  "count": null,            // 要出几道题（正整数，1~8）；没说填 null。🔴 中文数量词必须映射成阿拉伯数字：一/壹/一道/一个→1，两/俩/二/一对/两道→2，仨/三→3，四→4，五→5，六→6，七→7，八→8（"再来两道"=2，"出俩"=2，"一对"=2）
-  "difficulty_plan": null,  // 难度安排："increasing"=难度递增/越来越难/一道比一道难；没提难度安排填 null；其它难度要求把老师原话填进来（如"都出难题"）
-  "qtype_dist": null,       // 题型配比，如 {{"选择":2,"填空":2,"解答":1}}；题型只能用 选择/填空/解答 三类（应用题/计算题/证明题等都归"解答"）；没说填 null
-  "note": ""                // 其余装不进上面旋钮的自由要求原话（如"贴近生活场景"、"数字简单点"）；没有填 ""
-}}
-
-硬约束：
-- 只抽老师明确说了的；没说的旋钮一律 null/""，绝不脑补默认值。
-- qtype_dist 的值必须是正整数；如与 count 看似矛盾也如实抽取，程序会做最终校验。"""
 
 # 题型归一表（normalize_knobs 用）：只认 选择/填空/解答 三类
 _QTYPE_ALIAS: dict[str, str] = {
@@ -4698,15 +4402,6 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
 
 
 # 🔴 排版（PRD-C-012 任务3）：固定契约段前移，变动段（题干）移末尾；语义一字不改。
-SOLVE_PROMPT = """你是严谨的数学阅卷老师。真解下面这道题（不看给定答案，独立算一遍）。
-
-只输出 JSON：
-{{"solved_answer":"你独立算出的答案","solution":"完整解题过程(含答案)",
-  "kp_name":"这道题实际考的主考点","grade":"这道题适配的年级"}}
-
-格式硬规定：solution 数学式优先行内 $...$；**仅多行分步推导**可用 $$...$$（单个等式仍用行内 $...$）。禁止裸 LaTeX / \\( \\) / \\[ \\] 定界；换行用标准 \\n。
-
-题干：{stem}"""
 
 REGEN_PROMPT = (
     """下面这道变式题，独立解出的答案与题面标答不一致，请**重新出一道**等价变式重做。
@@ -5827,19 +5522,6 @@ def _status_summary(items: list[dict]) -> str:
 # 🔴 难度四档 rubric（B2·T3，事实源 = 22-题目维度-唯一事实源.md §2，2026-06-12 改 LLM rubric 断言）。
 #   难度是「评级」归 LLM rubric 断言，对错是「判决」归闸B sympy——两件事不混（铁律不破）。
 #   档语义照 SSOT §2 原文：1 送分 / 2 常规 / 3 多步综合 / 4 压轴。
-_GRADE_DIFFICULTY_PROMPT = """你是浙教版初中数学难度评定器。下面是同一组变式题（已编号），请拿着下面这张【难度四档 rubric】给每道题断一个 1-4 的难度档（按标准判级，不是相对母题，是绝对难度；难度是评级不是判对错）：
-
-- 4（压轴）：≥2 个真实难点 / 多突破口综合。
-- 3（多步综合）：1 个难点，或 考察类型∈{{证明推理·应用建模·探究归纳}}，或 解法骨架含【最难步】构造。
-- 2（常规）：无难点 + 考察类型∈{{直接计算·公式套用·性质判定}} + 多步骨架。
-- 1（送分）：无难点 +（概念辨析 或 单步骨架）。
-
-只输出 JSON 数组，每项是一个整数难度档，顺序、个数与下面题目严格一一对应，禁止多写少写、禁止解释：
-例：[2,2,3,1]
-
-题目：
-{items}
-"""
 
 
 def _grade_difficulty_payload(items: list[dict[str, Any]]) -> str:
@@ -6052,67 +5734,6 @@ ADD_COUNT_MAX = 5  # 与 exec_add 单轮上限同口径（min(n,5)），护栏�
 # 🔴 排版（PRD-C-012 任务3）：分类标准/输出契约/硬约束固定段前移，变动段
 # （母题 DNA、老师最新一句话）移末尾（runtime 追加的 17 号无题组语境段照旧排最后）；
 # 语义一字不改。
-PARSE_PROMPT = """你是举一反三 agent 的指令解析器（受约束分类器：intent 只能从 6 个枚举值里选 1 个，禁止发明新值）。老师正在看一组已出的变式题（共 {n} 道），下面是他的最新一句话。
-
-【分类标准】逐条对照，命中哪条选哪条；都不命中选 "clarify"（其中"编辑"细分 4 种 action）：
-1. "答疑" —— 判别：只是要老师**讲解/解惑**某题（问怎么解、为什么，**或祈使式要求讲一遍**），不要求改动任何题。
-   - 疑问句例：「为什么第3题选B？」「第2题怎么解？」
-   - 🔴 祈使式也算答疑（常见漏判）：「第2题讲一遍」「给学生讲」「按给学生讲的方式讲讲」「再讲讲第1题」「这道题展开说说」——都是要讲解，不是改题。
-   - 🔴 承接上一轮 AI 主动提议时尤其要认（见末尾「上一轮 AI 说了什么」）：若 AI 上一句提议「我可以把第N题完整讲一遍」，老师回「好/可以/讲/给学生讲」= 承接该提议 → 答疑（讲第N题），别判 clarify。
-2. "编辑"+remove —— 判别：点名删掉某道题，且能给出 1~{n} 内的题号。例：「第2题删掉」→ ops=[{{"action":"remove","index":2}}]
-3. "编辑"+regenerate —— 判别：点名**改造/重出某道题**（换数字 / 换一道新题 / **改题型 / 换题型 / 加情境/换场景 / 难一点 / 简单点 / 改某属性**），把目标要求写进 note。**改题型与换场景都归这里**（题型、场景都不在硬守恒里，可以改）。
-   🔴 **作用范围三态（最关键，默认单题、不污染全组）——每道题上下文独立，老师对某题的调整默认不共享给其它题**：
-   (a) **单题（默认）**：老师点名或语境明确指向**某一道**（「第1题」「这道」「这个」「它」「上面那道」），或老师只是泛泛说一句改造要求（如「换数字」「难一点」「换个场景」）——一律只作用**那一道**。
-       · 给了明确题号 → ops=[{{"action":"regenerate","index":N,"note":"..."}}]。
-       · 没给题号但语境明确是"当前/这一道"（如紧接着某题在聊）→ 取那一道的题号。
-       · 真说不清是哪一道（既没题号、也没"这道/当前"指向，无法定位）→ 留空 ops、intent 取 "clarify" 反问"是哪一道？"——**绝不默认广播到全组，绝不随便挑一道**。
-   (b) **显式全组**：老师**明确说了「所有 / 全部 / 每一道 / 每道 / 整组 / 都」**等覆盖词（如「所有题都换成选择题」「每道题数字都简单点」「全部难一点」）→ 对 1~{n} **每一道各发一条** regenerate op（同一 note）：ops=[{{"action":"regenerate","index":1,"note":"..."}},{{"action":"regenerate","index":2,"note":"..."}},…直到第{n}题]。
-   (c) **点名多题**：老师**点名几道具体题号**（「第1、3题」「第2和第4题」「2到4题」）→ 只对**点到的那几道各发一条** regenerate op（同 note），别的题不动。例（点 1、3）：ops=[{{"action":"regenerate","index":1,"note":"..."}},{{"action":"regenerate","index":3,"note":"..."}}]。
-   - 例（单题·换题）：「第1题换一道，数字简单点」→ ops=[{{"action":"regenerate","index":1,"note":"数字简单点"}}]
-   - 例（单题·改题型）：「第1题改成选择题」/「这题改填空」→ ops=[{{"action":"regenerate","index":1,"note":"改成选择题"}}]
-   - 例（单题·换场景）：「第2题加入杭州元素」/「换成行程问题的情境」→ ops=[{{"action":"regenerate","index":2,"note":"加入杭州元素场景"}}]
-   - 例（全组，共3道）：「所有题都改成选择题」→ ops=[{{"action":"regenerate","index":1,"note":"改成选择题"}},{{"action":"regenerate","index":2,"note":"改成选择题"}},{{"action":"regenerate","index":3,"note":"改成选择题"}}]
-   - 例（点名多题）：「第1题和第3题都难一点」→ ops=[{{"action":"regenerate","index":1,"note":"难一点"}},{{"action":"regenerate","index":3,"note":"难一点"}}]
-4. "编辑"+add —— 判别：要求再加 N 道题（N 为正整数，单轮最多 5）。例：「再来2道难的」→ ops=[{{"action":"add","count":2,"note":"难的"}}]
-4b. "编辑"+reorder —— 判别：只调整题目**顺序**（不改题/不增删），且能给出一个**覆盖全部 {n} 道**的新次序。例（共3道）：「把顺序换成 3 1 2」→ ops=[{{"action":"reorder","order":[3,1,2]}}]。order 必须是 1~{n} 的**全排列**（每个题号恰出现一次）；只说「按难度排」「倒过来」这种没给出明确全排列的，**不要自己编 order**，留空 ops、intent 取 "clarify" 让老师给次序。
-5. "解法修正" —— 判别：老师**约束解题方法**、或**纠正年级/进度从而限定能用的解法**，但**不要求换题**（题面保留，只改解析/解法）。例：「这里是7年级的题目，没学二元方程，只能用一元一次去解题」→ intent=解法修正，method_constraint=「只能用一元一次方程，不用二元方程」，grade_correction=「七年级」。又例：「解析别用因式分解，改用配方法」→ 解法修正，method_constraint=「改用配方法，不用因式分解」。🔴 关键区分：老师明确改的是**怎么解**（解析/方法），不是**换一道题**——别误判成"修正(整组重锚重做)"或"编辑+regenerate(换题)"。
-6. "修正" —— 判别：老师纯纠正母题的年级或考点**本身**、要重新锚定**重出整组**（不是只改解法）。例：「这其实是八年级的二次函数题，重新出」→ mother_correction={{"grade":"八年级","kp":"二次函数"}}。⚠ 若老师只是限定解法（见第5条），优先判"解法修正"，别走整组重做。
-7. "确认" —— 判别：老师对这组题满意，要入库/保存/结束。例：「这组可以了，入库吧」
-8. "clarify" —— 判别：撞硬守恒（要换主考点）、题号给不出或超出 1~{n}、或意图真说不清。例：「改成考函数的题」（撞守恒换考点）
-
-只输出一个 JSON（不要解释、不要 markdown fence）：
-{{
-  "intent": "解法修正|修正|编辑|确认|答疑|clarify",   // 6 选 1
-  "ops": [                                  // intent=编辑 时的操作列表（其余为空数组）
-    {{"action":"remove|regenerate|add|reorder", "index": 1, "count": 1, "order": [3,1,2], "note":"自由约束/旋钮说明(改题型/换场景/数字等要求一律写这里)"}}
-  ],
-  "comp": "可被旋钮吸收的软约束(超旋钮但 best-effort 能顺的)，没有填 null",
-  "extra_constraints": ["其余自由约束句"],
-  "mother_correction": {{"grade":null, "kp":null}},  // intent=修正 时老师纠正的年级/考点，否则全 null
-  "method_constraint": null,   // intent=解法修正 时老师对解题方法的约束（原话归纳，如"只能用一元一次方程"），否则 null
-  "grade_correction": null,    // intent=解法修正 时若老师顺带纠正了年级（如"七年级"），填规范化年级，否则 null
-  "confidence": 0.0~1.0
-}}
-
-硬约束（违反任何一条，程序护栏会把你的输出整体降级为 clarify）：
-- intent 只能是上述 6 个枚举值之一；ops.action 只能是 remove/regenerate/add/reorder。
-- remove/regenerate 的 index 从 1 起、必须 ≤ {n}；拿不准题号时 ops 留空、intent 取 "clarify"。
-- reorder 的 order 必须是 1~{n} 的全排列（长度={n}、每号恰一次）；给不全/有重复/越界 → ops 留空、intent 取 "clarify"。
-- add 的 count 必须是正整数；intent=答疑/确认/修正/解法修正/clarify 时 ops 必须为空数组。
-- intent=解法修正 时 method_constraint 必须非空（说清不能用什么/必须用什么）；说不清就 clarify。
-- 同一句里不要混多类操作（如又删又排）；混了 → intent 取 "clarify" 请老师分句说。
-- 🔴 regenerate 作用范围**默认单题、绝不广播全组**：只有老师明确说「所有/全部/每一道/都」才对每道各发一条 op；点名几道就只发那几道；既没题号也没"这道/当前"指向、定位不到 → clarify 反问，**绝不把单题改造默认成改全组、也绝不随便挑一道**。
-- 解析不出来 = "clarify"，绝不猜成删题。
-
-母题 DNA（硬守恒，老师不能改这两项，撞它即 clarify 驳回）：
-- 主考点: {kp_name}
-- 年级: {grade}
-
-上一轮 AI 说了什么（🔴 BUG-006·承接判别用：老师最新一句若在承接/回应 AI 上一句的提议，按上一句语境定意图，比如 AI 提议「我可以讲一遍第2题」、老师回「给学生讲」= 答疑·讲第2题）：
-{prev_ai}
-
-老师最新一句话：
-{utterance}"""
 
 
 def _items_brief(items: list[dict]) -> str:
@@ -6345,17 +5966,6 @@ def dispatch(state: VariantState) -> Literal["remove", "regenerate", "add", "reo
 
 
 # --- 答疑：只问不改（🔴 物理上 return 不含 items） -----------------------------
-ANSWER_PROMPT = """你是数学老师，老师对下面这组变式题的某道有疑问，请耐心解惑（讲思路/为什么这么解）。
-
-题组：
-{brief}
-
-各题答案/解析摘要：
-{detail}
-
-老师的问题：{question}
-
-直接用人话回答（数学式一律 $...$ 包裹）。只解惑，不要改题、不要重出题。"""
 
 
 async def answer_question(state: VariantState, config: RunnableConfig) -> VariantState:
@@ -6704,27 +6314,6 @@ async def exec_reorder(state: VariantState, config: RunnableConfig) -> VariantSt
 # ===========================================================================
 # 单题解析重写器：题面/答案保留不动，只按新方法约束重写解析。判断本题在新约束下是否可解：
 #   solvable=true → 给出新解析；solvable=false → 说明为何（如必须二元才能解）→ 调用方单题重出。
-SOLUTION_ONLY_PROMPT = """你是浙教版初中数学解题老师。下面这道题的**题面和标准答案保持不变**，老师对解题方法提了新约束，请**只重写解析（解题过程）**，使其严格遵守新约束。
-
-主考点(硬守恒): {kp_name}
-年级(硬守恒): {grade}
-题型: {qtype}
-题干（不要改）: {stem}
-标准答案（不要改）: {answer}
-当前解析: {solution}
-
-🔴 老师对解题方法的新约束（必须遵守）: {method_constraint}
-
-请判断：在老师的新方法约束下，**这道题的题面**是否还能解出（得到与标准答案一致的结果）？
-- 若能解：solvable=true，重写一份只用约束内方法的完整解析（过程 + 答案），不改题面、不改标准答案。
-- 若根本无法用约束内方法求解（如题面本身必须用被禁止的方法才能解）：solvable=false，filled reason 说明原因（这种题会被换成另一道符合约束的题，由后续流程处理）。
-
-只输出一个 JSON（不要解释、不要 markdown fence）：
-{{"solvable": true, "solution": "重写后的完整解析（只用约束内方法）"}}
-或
-{{"solvable": false, "reason": "为什么这道题面无法用约束内方法求解"}}
-
-格式硬规定：solution 数学式优先行内 $...$；**仅多行分步推导**可用 $$...$$（单个等式仍用行内 $...$）。禁止裸 LaTeX / \\( \\) / \\[ \\] 定界；换行用标准 \\n。"""
 
 
 async def _rewrite_solution_one(
@@ -7947,23 +7536,6 @@ def edit_dna_state(
 # T2·有界 LLM 锚定重做（revise_item）：骨架/场景文本维改写（diff 锁 target，不漂移其余维）
 # 或 whole 整题重出（走 REGEN + 闸B sympy 重验）。
 # ---------------------------------------------------------------------------
-REVISE_FIELD_PROMPT = (
-    """你是浙教版初中数学命题专家。老师要求**只重写这道变式题的「{target_cn}」这一维**，其余维度
-（题型/答案/知识点/难度等）一律**保持不动**。
-
-母题考点(硬守恒): {kp_name}
-年级(硬守恒): {grade}
-本题现状：
-- 题干: {stem}
-- 题型: {qtype}
-- 当前{target_cn}: {current}
-
-老师的修改要求：{instruction}
-
-只输出一个 JSON（不要解释），仅含被改维：
-{{"{target_key}": "重写后的{target_cn}文本"}}
-🔴 只改「{target_cn}」，不要顺手改题型/答案/知识点；{target_cn}是纯文本维，改它**不影响**本题的标准答案与判分。"""
-)
 
 # revise 文本维 → (人话名, JSON 键, item 字段)。skeleton 落 item.solution（解法骨架=解析载体）；
 # scene 落 mother_dna.dna.scene（场景是母题级表皮维）。
@@ -8112,22 +7684,6 @@ async def revise_item(
 # ===========================================================================
 
 # 重写解析 prompt（rewrite_solve 维：骨架/models 改 → 按新解法重写 solution，不动题面/答案）。
-_REWRITE_SOLVE_PROMPT = (
-    """你是浙教版初中数学命题专家。老师改了这道题的**解法基准（解法骨架 / 解题模型）**，
-要求按新基准**重写解析（solution）**，但**题干、标准答案、题型一律不动**（只换"怎么解"的写法，
-不换"题目"和"答案"）。
-
-母题考点(硬守恒): {kp_name}
-年级(硬守恒): {grade}
-题干(不动): {stem}
-标准答案(不动): {answer}
-新解法骨架(老师定): {skeleton}
-新解题模型(老师定): {models}
-
-只输出一个 JSON（不要解释）：
-{{"solution": "按新解法骨架/模型重写的解析全文（要能推出上面那个标准答案）"}}
-🔴 重写后的解析必须仍然推得出题面给定的标准答案；不要改题目、不要改答案。"""
-)
 
 
 async def _rewrite_solve_once(item: dict, facts: dict) -> str | None:
