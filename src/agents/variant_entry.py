@@ -1467,6 +1467,7 @@ async def _finalize_high_conf(
             invoke=_ainvoke_text, model=V.settings.variant_model("model_confirm"),
             record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
                 name, mm, question_ref=m_ref),
+            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回（高置信首解路，同 classify 口径）
         )
     except Exception as e:  # noqa: BLE001
         analysis.setdefault("_model_anchor_error", str(e))

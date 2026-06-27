@@ -398,6 +398,7 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
                 name, mm, question_ref=m_ref
             ),
+            grade_code=grade_code,  # 🔴 PRD-C-105 B：默认按年级全量召回（治跨章题模型没绑）
         )
     except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底，绝不空维/卡死）
         analysis.setdefault("_model_anchor_error", str(e))
@@ -565,6 +566,7 @@ async def _reanchor_reuse_first_solve(
             record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
                 name, mm, question_ref=m_ref
             ),
+            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回（重锚复用首解路，同 classify 口径）
         )
     except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底）
         analysis.setdefault("_model_anchor_error", str(e))

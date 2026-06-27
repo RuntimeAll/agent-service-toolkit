@@ -37,8 +37,15 @@ M00: dict[str, str] = {"id": M00_ID, "name": M00_NAME}
 
 # 确认上限（§1①：池内确认 ≤3）。
 MODELS_MAX = 3
-# 反查候选上限（26号 §0.5：LIMIT 8）。
+# 反查候选上限（26号 §0.5：LIMIT 8）—— 按章收窄路径用。
 CANDIDATE_LIMIT = 8
+# 🔴 PRD-C-105 B：按年级全量召回上限。单年级实测 distinct 模型 ~10-15（七上=15），放宽到 20
+#   覆盖单年级全量（D2：全量塞 prompt 完胜向量，不上 RAG）。
+GRADE_CANDIDATE_LIMIT = 20
+# 🔴 年级根前缀长度（biz_subject level1 年级根 id = 3 位，如 100=七上 / 200=八下；
+#   章 id = 6 位 100001…、叶子 = 9/12 位 100001002…，全部以年级根 3 位为前缀）。
+#   反查的 biz_solution_model_kp.subject_id 均挂在该年级子树下 → 用 3 位根前缀命中本年级全量绑定。
+GRADE_ROOT_PREFIX_LEN = 3
 
 
 def _db_kwargs() -> dict:
@@ -174,13 +181,111 @@ def lookup_candidates(
         conn.close()
 
 
+def _grade_prefix_from_leaf_codes(leaf_codes: list[str]) -> str | None:
+    """🔴 PRD-C-105 B：从已锚定的 kp 叶子 code 取「年级根 3 位前缀」（如 100=七上 / 200=八下）。
+
+    为什么从叶子 code 取、不直接用上层传的 grade_code：上层 grade_code 有两条来源不同源——
+      ① 预设章 `preset_chapter_id[:4]`（如七上章 100001 → '1000'）= DB 对齐前缀，可命中；
+      ② opus 判年级走 `_grade_to_code`（七上 → **'3071'**）= **历史映射，与 live 库 100/200 根不一致**，
+         拿它当前缀 LIKE 永远命中 0（这正是「模型没生效」的隐性二号坑）。
+    锚定后的叶子 code（main_kp.id / secondary_kps.id）一定是 live 库真 id（100…），最可靠，
+    故年级前缀以「叶子 code 的 3 位根」为准，grade_code 仅作旁证/override（见 _resolve_grade_prefix）。
+    多个叶子若跨年级根（异常）→ 取第一个主 kp 的根（_leaf_codes 已把 main_kp 放首位）。
+    无可用叶子 code → None（上层退回 grade_code override 或按章收窄兜底）。
+    """
+    for c in (leaf_codes or []):
+        s = str(c or "").strip()
+        if len(s) >= GRADE_ROOT_PREFIX_LEN and s[:GRADE_ROOT_PREFIX_LEN].isdigit():
+            return s[:GRADE_ROOT_PREFIX_LEN]
+    return None
+
+
+def _resolve_grade_prefix(
+    leaf_codes: list[str], grade_code: str | None
+) -> str | None:
+    """定本次年级全量召回用的「年级前缀」。优先叶子 code 的 3 位根（DB 对齐、最可靠）；
+    仅当叶子取不到根、且 grade_code 看着是 live 库前缀（数字、与年级根同前 3 位）时才用 grade_code。
+
+    🔴 grade_code='3071' 这类历史映射（非 100/200 根）= 不可信前缀，主动丢弃退 None（宁可让上层
+    按章兜底，也不拿错前缀 LIKE 命中 0 制造「假空候选→M00」）。grade_code='1000' / '100001…'
+    这类 DB 对齐前缀 → 取其 3 位根（'100'）放宽到整年级。
+    """
+    pfx = _grade_prefix_from_leaf_codes(leaf_codes)
+    if pfx:
+        return pfx
+    gc = str(grade_code or "").strip()
+    # grade_code 只有在「纯数字且前 3 位是合法年级根」时才采信。live 年级根 = 1xx/2xx…（3 位）。
+    if gc.isdigit() and len(gc) >= GRADE_ROOT_PREFIX_LEN:
+        return gc[:GRADE_ROOT_PREFIX_LEN]
+    return None
+
+
+def lookup_candidates_by_grade(
+    grade_prefix: str, *, limit: int = GRADE_CANDIDATE_LIMIT
+) -> list[dict[str, Any]]:
+    """🔴 PRD-C-105 B·按年级全量反查（纯只读 ETL）：年级根前缀 → 该年级**所有**解题模型候选。
+
+    与 lookup_candidates 同一 SELECT（含 id/name/trigger_feature/action_conclusion/sort/model_kind/
+    difficulty_tier/freq_band、`bind_type IN('primary','native')`、`status='0'`、`ORDER BY sort`），
+    **唯一区别 = WHERE 换成年级前缀**：`k.subject_id LIKE CONCAT(%s,'%%')`（grade_prefix 作前缀）。
+
+    治什么（D1/AC-B1）：旧 lookup_candidates 按**章** `leaf LIKE subject_id%` 反查——跨章题（如折线
+    数轴折叠题被标进方程章）拿方程章叶子找不到挂在数轴章的数轴大招 → 候选空 → M00 短路 → 模型没绑。
+    年级全量召回拿该年级**所有**大招（七上实测 distinct 15 个）喂 CONFIRM「先解题再挑真正用到的」，
+    跨章大招天然在池内 → 命中真实大招（DZ01 数轴折叠 / DZ08 距离 / DZ09 相遇）。
+
+    🔴 取数失败（库未起/表不存在/网络）→ 抛 pymysql 异常，由上层 anchor_models 兜成 M00+⚠（不卡死）。
+    """
+    grade_prefix = str(grade_prefix or "").strip()
+    if not grade_prefix:
+        return []
+    conn = pymysql.connect(**_db_kwargs())
+    try:
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        cur.execute(
+            """
+            SELECT DISTINCT m.id, m.name, m.trigger_feature, m.action_conclusion,
+                   m.sort, m.model_kind, m.difficulty_tier, m.freq_band
+            FROM biz_solution_model m
+            JOIN biz_solution_model_kp k ON k.model_id = m.id
+            WHERE k.bind_type IN ('primary','native')
+              AND m.status = '0'
+              AND k.subject_id LIKE CONCAT(%s, '%%')
+            ORDER BY m.sort
+            """,
+            (grade_prefix,),
+        )
+        rows_by_id: dict[str, dict[str, Any]] = {}
+        for r in cur.fetchall():
+            mid = str(r.get("id") or "").strip()
+            if mid and mid not in rows_by_id:
+                # 控制面板列 difficulty_tier/freq_band 随候选透传（WS1 电线根，同 lookup_candidates）。
+                rows_by_id[mid] = {
+                    "id": mid,
+                    "name": str(r.get("name") or "").strip(),
+                    "trigger_feature": str(r.get("trigger_feature") or "").strip(),
+                    "action_conclusion": str(r.get("action_conclusion") or "").strip(),
+                    "sort": r.get("sort"),
+                    "model_kind": str(r.get("model_kind") or "").strip() or None,
+                    "tier_int": r.get("difficulty_tier"),
+                    "freq_int": r.get("freq_band"),
+                }
+        out = sorted(
+            rows_by_id.values(),
+            key=lambda x: (x.get("sort") if x.get("sort") is not None else 1 << 30),
+        )
+        return out[:limit]
+    finally:
+        conn.close()
+
+
 # 确认 prompt（H2 定档 gpt-5.4-mini + 「先解题再选」风格：先想这题怎么解，再从候选里挑命中的）。
 # 🔴 PRD-C-103 WS2·AC5（2026-06-26）：临时模型不跳过。候选里没有但确有【可跨题复用的解题套路】→
 #   不再只丢个名字（旧 overflow 落 JSONL 后被丢，难度跑不出来），而是产「临时模型」对象（带 LLM 提的
 #   临时 tier/freq），让它**参与 grade_observed 判档**。临时 tier 是待审草案，最终 authority = 人维护的
 #   表（不违「难度不靠 LLM 自评」铁律：表才是 pass/fail 权威，临时 tier 只是没入库时的占位估计）。
 CONFIRM_PROMPT = """你是初中数学解题模型确认器。下面给你一道题和一份**候选解题模型**清单。
-
+{scope_note}
 任务（先解题再选）：
 1. 先在心里把这道题解一遍，想清楚「这道题真正用到了哪些解题套路/模型」。
 2. 再从【候选模型】里**挑你第 1 步真正用到的**（最多 {max_n} 个），填进 hits（只填候选 id）。
@@ -206,6 +311,16 @@ CONFIRM_PROMPT = """你是初中数学解题模型确认器。下面给你一道
   "newModels": [{{"name": "套路名", "triggerFeature": "触发特征", "action": "招式结论",
                   "tier": "基础或高阶", "freq": "通法或一次性"}}]}}
 """
+
+
+# 🔴 PRD-C-105 B·年级全量护栏（D1：宁缺毋滥）。年级全量分支下，候选 = 本年级**所有**大招（~10-15），
+#   多数与本题无关 → 必须压住 mini 别乱勾一堆。按章收窄路径候选已贴题，不加此护栏（scope_note=""）。
+GRADE_SCOPE_NOTE = (
+    "\n🔴 注意：下面的【候选模型】是**本年级的全部解题模型**，"
+    "其中**多数与本题无关**。只勾你第 1 步解题**确实动用**的那几个，"
+    "拿不准、用不到的一律**不要勾**（hits 留空系统会兜底为「概念直用」），"
+    "宁可少勾、漏勾，也绝不为了凑数把无关大招勾进来。\n"
+)
 
 
 def _candidates_text(candidates: list[dict[str, Any]]) -> str:
@@ -288,6 +403,7 @@ async def confirm_models(
     *,
     invoke: Any,
     model: str | None = None,
+    scope_note: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """池内确认 + 临时模型识别。返回 (confirmed, temp_models, overflow)。
 
@@ -312,6 +428,7 @@ async def confirm_models(
         stem=stem or "（题面缺失）",
         answer=(answer or "（无）")[:1500],
         candidates=_candidates_text(candidates),
+        scope_note=scope_note or "",
     )
     try:
         text = await invoke([HumanMessage(content=prompt)], model=model)
@@ -388,8 +505,19 @@ async def anchor_models(
     invoke: Any,
     model: str | None = None,
     record_overflow: Any = None,
+    grade_code: str | None = None,
+    chapter_scope: bool = False,
 ) -> dict[str, Any]:
-    """W1' 模型锚定主入口（§3.2 处置穷举 + WS2·AC5 临时模型不跳过）。
+    """W1' 模型锚定主入口（§3.2 处置穷举 + WS2·AC5 临时模型不跳过 + PRD-C-105 B 年级全量召回）。
+
+    🔴 PRD-C-105 B·召回粒度（D1）：
+      - **默认（chapter_scope=False）= 按年级全量召回**：拿该年级**所有**解题模型（~10-15）喂 CONFIRM
+        「先解题再挑真正用到的」（≤3、宁缺毋滥、可留空）。治「跨章题（折线数轴折叠题被标进方程章）
+        按章反查找不到挂数轴章的数轴大招 → 候选空 → M00 短路 → 模型没绑」（AC-B1）。
+      - **chapter_scope=True（仅用户明确指定章节时由上层传）= 按章收窄**：走原 lookup_candidates，
+        拿 dna 锚定叶子按章反查（候选更贴题、更窄）（AC-B2，老路径不破）。
+      - 年级前缀取法 = _resolve_grade_prefix（优先锚定叶子 code 的 3 位根，DB 对齐最可靠；grade_code
+        仅作旁证，'3071' 这类历史映射会被主动丢弃，详见该函数）。年级前缀取不到 → 降级回按章召回。
 
     返回 {models, temp_models, model_overflow, model_warn, model_flag}。
       models         : [{id,name,(tier_int),(freq_int),(isNew)}]，1~N 项，**非空**（无命中保底 M00）。
@@ -405,9 +533,17 @@ async def anchor_models(
     """
     leaf_codes = _leaf_codes(dna)
 
+    # 🔴 PRD-C-105 B：定召回策略。默认年级全量；chapter_scope（上层指定章）→ 按章收窄。
+    #   年级前缀取不到（无锚定叶子且 grade_code 不可用）→ 降级回按章（候选可能空，由 M00 兜底）。
+    grade_prefix = None if chapter_scope else _resolve_grade_prefix(leaf_codes, grade_code)
+    use_grade = grade_prefix is not None
+
     # 反查（纯只读 ETL）；库/表不可用 → 降级 M00 + ⚠（C-010 闸门必有降级路径）。
     try:
-        candidates = lookup_candidates(leaf_codes)
+        if use_grade:
+            candidates = lookup_candidates_by_grade(grade_prefix)
+        else:
+            candidates = lookup_candidates(leaf_codes)
     except Exception:
         return {
             "models": [dict(M00)],
@@ -418,7 +554,8 @@ async def anchor_models(
         }
 
     confirmed, temp_models, overflow = await confirm_models(
-        stem, answer, candidates, invoke=invoke, model=model
+        stem, answer, candidates, invoke=invoke, model=model,
+        scope_note=GRADE_SCOPE_NOTE if use_grade else "",
     )
 
     # 裸池外名落待命名池（含题目指针由上层带；这里只回调名 + 母题 models 锚）。
