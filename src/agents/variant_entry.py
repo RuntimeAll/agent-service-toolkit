@@ -31,6 +31,19 @@ from langchain_core.runnables import RunnableConfig
 
 from agents import dna_extract, model_anchor, mother_opus
 
+# 🔴 PRD-C-104 B2b·解循环依赖：迁进 variant/shared/ 的符号改从 shared 直引（shared 反向不 import
+#   variant_entry → 循环断在 shared 层）。仍留在 variant/__init__.py 的符号继续走懒导入 `V.*`。
+from agents.variant.shared.llm import _ainvoke_text, _parse_json
+from agents.variant.shared.sanitize import _sanitize_rich_text, join_skeleton
+from agents.variant.shared.emit import (
+    _emit_stage,
+    _emit_error,
+    _emit_need_confirm,
+    _emit_reasoning,
+    _emit_richtext_stem,
+)
+from agents.variant.shared.ruoyi import RuoyiClient
+
 # D1：条件 confirm 触发阈值（置信 < 0.80 或 ≥2 强候选章 → 弹窗）。
 CONF_CONFIRM_THRESHOLD = 0.80
 # 🔴 BUG-04（2026-06-19）：读图置信「极低」阈值——低于它提示「图可能不适合做母题，建议换清晰图」。
@@ -602,11 +615,11 @@ async def _repair_json_via_llm(broken: str, V: Any) -> Any:
         '\\" 或改成中文「」。只输出 JSON 本身，不要解释、不要 markdown fence。'
     )
     try:
-        fixed = await V._ainvoke_text(
+        fixed = await _ainvoke_text(
             [_SM(content=sys_p), _HM(content=broken)],
             model=None, max_tokens=8192, temperature=0.0,
         )
-        return V._parse_json(fixed)
+        return _parse_json(fixed)
     except Exception:  # noqa: BLE001 — 修复失败 → 上层走原 parse_fail
         return None
 
@@ -695,7 +708,7 @@ async def parse_or_repair_entry(opus_text: str, V: Any) -> Any:
     sent = extract_sentinel_richtext(opus_text)
     if isinstance(sent, dict):
         return sent
-    parsed = _unwrap_obj(V._parse_json(opus_text))
+    parsed = _unwrap_obj(_parse_json(opus_text))
     if isinstance(parsed, dict):
         return parsed
     parsed = _unwrap_obj(await _repair_entry_json(opus_text, V))
@@ -724,7 +737,7 @@ async def solve_and_label_resilient(
     for _attempt in range(2):
         try:
             opus_text = await mother_opus.solve_and_label(
-                image_url=image_url or "", prompt=prompt, invoke=V._ainvoke_text,
+                image_url=image_url or "", prompt=prompt, invoke=_ainvoke_text,
                 model=model, max_tokens=max_tokens,
             )
         except Exception as e:  # noqa: BLE001 — opus 调用异常（超时/全站失败）→ 重试一次
@@ -869,8 +882,8 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     if await cost_guard.is_budget_exceeded_async():
         # 已超 → 取一次 status 拼提示文案（缓存 ~60s，几乎不二次查库）；放线程池保险。
         st = await cost_guard.budget_status_async()
-        V._emit_stage("classify", "锚定考点", "warn", "今日 AI 额度已用尽")
-        V._emit_error("budget_exceeded",
+        _emit_stage("classify", "锚定考点", "warn", "今日 AI 额度已用尽")
+        _emit_error("budget_exceeded",
                       f"今日 AI 额度已用尽（已用 ¥{st['spend']:.2f}/¥{st['limit']:.2f}），请稍后或明日再试。")
         return {
             "_entry_finalized": False, "image_url": url,
@@ -885,7 +898,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     teacher_memory: str | None = None
     try:
         from agents import teacher_memory as TM
-        _mem_client = V.RuoyiClient(token=token)
+        _mem_client = RuoyiClient(token=token)
         teacher_memory = await TM.fetch_memory_block(_mem_client)
         await _mem_client.aclose()
     except Exception:  # noqa: BLE001 — 记忆拉取失败 → 不注入，继续
@@ -912,9 +925,9 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     #     · figure-mother（切图·异步组）：FE 经 upsertFigureStage 自发，toolkit 不发。
     #     · review（确认母题·闸）：await_mother_review 发 await → 老师点开始 done（沿用既有）。
     #   旧 classify 帧继续发（向后兼容 + 仍驱动「读图锚定」legacy/低置信路径），新 key 是 dingNodes 真值源。
-    V._emit_stage("classify", "锚定考点", "running", "① 解题中（一步步算，求稳准）…")
-    V._emit_stage("richtext", "富文本化", "running", "誊抄题面为富文本（异步·并行）…")
-    V._emit_stage("solve", "解题", "running", "一步步算，求稳准…")
+    _emit_stage("classify", "锚定考点", "running", "① 解题中（一步步算，求稳准）…")
+    _emit_stage("richtext", "富文本化", "running", "誊抄题面为富文本（异步·并行）…")
+    _emit_stage("solve", "解题", "running", "一步步算，求稳准…")
 
     # --- ① 富文本化任务（独立异步·sui-xiang 默认网关 = prefer_relay=None；不走 MOTHER_SOLVE_RELAY） ---
     async def _run_richtext() -> str:
@@ -922,7 +935,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
         )
         try:
-            txt = await V._ainvoke_text(
+            txt = await _ainvoke_text(
                 rt_messages, model=opus_model,
                 max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
@@ -930,23 +943,23 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
                 prefer_relay=None,  # 🔴 默认走 sui-xiang（RELAY_POOL[0]），不走 aigeek
             )
         except Exception:  # noqa: BLE001 — 富文本化失败绝不卡主链，回退 R2 stem
-            V._emit_stage("richtext", "富文本化", "warn", "富文本化失败，回退 R2 题面（不影响出题）")
+            _emit_stage("richtext", "富文本化", "warn", "富文本化失败，回退 R2 题面（不影响出题）")
             return ""
-        stem = V._sanitize_rich_text((txt or "").strip())
+        stem = _sanitize_rich_text((txt or "").strip())
         if not (stem and str(stem).strip()):
-            V._emit_stage("richtext", "富文本化", "warn", "富文本化空返回，回退 R2 题面（不影响出题）")
+            _emit_stage("richtext", "富文本化", "warn", "富文本化空返回，回退 R2 题面（不影响出题）")
             return ""
         # 轻量验证（非空已过；富文本机器检失败仅告警、不阻塞、不丢结果）。
         try:
             _rt_chk = mother_opus.validate_rich_text({"stem": stem})
             if not _rt_chk["ok"]:
-                V._emit_stage("classify", "锚定考点", "running",
+                _emit_stage("classify", "锚定考点", "running",
                               f"题面富文本机器检 {len(_rt_chk['issues'])} 处小问题（不阻塞）")
         except Exception:  # noqa: BLE001
             pass
         # 早帧：FE 占位区把原图替换成富文本题面（解题/打标还在跑时就能读到干净题面）。
-        V._emit_richtext_stem(str(stem))
-        V._emit_stage("richtext", "富文本化", "done", "题面已整理为富文本")
+        _emit_richtext_stem(str(stem))
+        _emit_stage("richtext", "富文本化", "done", "题面已整理为富文本")
         return str(stem)
 
     # --- ② R1 解题轮（纯解题·aigeek·public_stream 流式吐对话气泡=看得见思路·宁慢求准） ---
@@ -959,26 +972,26 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         _exc: Exception | None = None
         for _attempt in range(2):  # 解题轮失败/空返回重试一次（治瞬时截断/空返回）
             try:
-                _txt = await V._ainvoke_text(
+                _txt = await _ainvoke_text(
                     solve_messages, model=opus_model,
                     max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
                     temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                     timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
                     public_stream=True,  # 🔴 解题正文流式吐前端打字机（看得见思路·不干等 117s）
-                    on_reasoning=V._emit_reasoning,
+                    on_reasoning=_emit_reasoning,
                     prefer_relay=V.settings.MOTHER_SOLVE_RELAY,  # 🔴 母题解题轮走 aigeek（仍 opus·只换网关）
                 )
             except Exception as e:  # noqa: BLE001 — 解题轮调用异常（超时/全站失败）
                 _exc = e
                 if _attempt == 0:
-                    V._emit_stage("classify", "锚定考点", "running", "母题读图解题重试中…")
+                    _emit_stage("classify", "锚定考点", "running", "母题读图解题重试中…")
                     continue
                 break
             if _txt and _txt.strip():
                 _exc = None
                 break
             if _attempt == 0:
-                V._emit_stage("classify", "锚定考点", "running", "解题空返回，重读一次…")
+                _emit_stage("classify", "锚定考点", "running", "解题空返回，重读一次…")
         return _txt, _exc
 
     # 并发：富文本化 ∥ 解题（gather；富文本化内已吞异常，return_exceptions 兜底解题侧不被波及）。
@@ -992,15 +1005,15 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         solved_text, solve_exc = "", (_solve_res if isinstance(_solve_res, Exception) else None)
 
     if not (solved_text and solved_text.strip()):
-        V._emit_stage("classify", "锚定考点", "error", "母题解题失败（opus 超时/空返回）")
-        V._emit_stage("solve", "解题", "warn", "母题解题失败（opus 超时/空返回）")
-        V._emit_error("mother_solve_failed",
+        _emit_stage("classify", "锚定考点", "error", "母题解题失败（opus 超时/空返回）")
+        _emit_stage("solve", "解题", "warn", "母题解题失败（opus 超时/空返回）")
+        _emit_error("mother_solve_failed",
                       f"母题解题失败（{str(solve_exc)[:80] if solve_exc else '空返回'}），请重试或换更清晰的图。")
         return {
             "image_url": url, "_entry_finalized": False,
             "messages": [AIMessage(content="母题解题失败了（opus 超时或空返回），请重试或换一张更清晰的题目图。")],
         }
-    V._emit_stage("solve", "解题", "done", "母题已解出")
+    _emit_stage("solve", "解题", "done", "母题已解出")
     solved_answer = _extract_solved_answer(solved_text)
     solved_solution = _strip_final_answer_marker(solved_text)
 
@@ -1008,8 +1021,8 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     # 🔴 R5·R2 结构化打标轮（接 R1 权威解答 → 忠实富文本三段 + 10 维 DNA 打标 + 判章；绝不重解）。
     #   solvedAnswer 终钉 = R1 抠出的最终答案（R2 只整理打标，无权改答案）。
     # =========================================================================
-    V._emit_stage("classify", "锚定考点", "running", "② 富文本整理 + 打标分类…")
-    V._emit_stage("label", "深度解析", "running", "深度解析 + 10 维打标分类…")
+    _emit_stage("classify", "锚定考点", "running", "② 富文本整理 + 打标分类…")
+    _emit_stage("label", "深度解析", "running", "深度解析 + 10 维打标分类…")
     struct_messages = build_struct_messages(
         image_url=img_for_llm, solved_solution=solved_solution, solved_answer=solved_answer,
         utterance=user_text or None, teacher_memory=teacher_memory,
@@ -1023,7 +1036,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     _rf = None if _sentinel_mode else RESPONSE_FORMAT_ENTRY
     for _attempt in range(2):
         try:
-            opus_text = await V._ainvoke_text(
+            opus_text = await _ainvoke_text(
                 struct_messages, model=opus_model,
                 max_tokens=V.settings.MOTHER_OPUS_MAX_TOKENS,
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
@@ -1034,40 +1047,40 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         except Exception as e:  # noqa: BLE001 — 结构化轮调用异常
             opus_exc = e
             if _attempt == 0:
-                V._emit_stage("classify", "锚定考点", "running", "富文本打标重试中…")
+                _emit_stage("classify", "锚定考点", "running", "富文本打标重试中…")
                 continue
             break
         # 🔴 免转义哨兵框优先：抠三段 richText 原文 + 瘦 JSON 解结构（绕三段富文本转义坑）。
         parsed = extract_sentinel_richtext(opus_text)
         if not isinstance(parsed, dict):
-            parsed = V._parse_json(opus_text)
+            parsed = _parse_json(opus_text)
         if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
             parsed = parsed[0]
         if not isinstance(parsed, dict):
-            V._emit_stage("classify", "锚定考点", "running", "解析修复中…")
+            _emit_stage("classify", "锚定考点", "running", "解析修复中…")
             parsed = await parse_or_repair_entry(opus_text, V)
         if isinstance(parsed, dict):
             entry, opus_exc = parsed, None
             break
         if _attempt == 0:  # 解析+修复仍失败 → 重整一次（截断/坏 JSON 多为瞬时）
-            V._emit_stage("classify", "锚定考点", "running", "解析失败，重整一次…")
+            _emit_stage("classify", "锚定考点", "running", "解析失败，重整一次…")
     if not isinstance(entry, dict):
         if opus_exc is not None:
-            V._emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")
-            V._emit_stage("label", "深度解析", "warn", "深度解析/打标失败（opus 超时/异常）")
-            V._emit_error("mother_opus_failed", f"母题读图解题失败（{str(opus_exc)[:80]}），请重试或换更清晰的图。")
+            _emit_stage("classify", "锚定考点", "error", "母题读图解题失败（opus 超时/异常）")
+            _emit_stage("label", "深度解析", "warn", "深度解析/打标失败（opus 超时/异常）")
+            _emit_error("mother_opus_failed", f"母题读图解题失败（{str(opus_exc)[:80]}），请重试或换更清晰的图。")
             return {
                 "image_url": url, "_entry_finalized": False,
                 "messages": [AIMessage(content="母题读图解题失败了（opus 超时或异常），请重试或换一张更清晰的题目图。")],
             }
-        V._emit_stage("classify", "锚定考点", "error", "母题富文本打标解析失败")
-        V._emit_stage("label", "深度解析", "warn", "深度解析/打标结果解析失败")
-        V._emit_error("mother_opus_parse_fail", "母题富文本打标结果解析失败，请重试。")
+        _emit_stage("classify", "锚定考点", "error", "母题富文本打标解析失败")
+        _emit_stage("label", "深度解析", "warn", "深度解析/打标结果解析失败")
+        _emit_error("mother_opus_parse_fail", "母题富文本打标结果解析失败，请重试。")
         return {
             "image_url": url, "_entry_finalized": False,
             "messages": [AIMessage(content="母题富文本打标结果没解析出来，请重试。")],
         }
-    V._emit_stage("label", "深度解析", "done", "深度解析 + 10 维打标完成")
+    _emit_stage("label", "深度解析", "done", "深度解析 + 10 维打标完成")
 
     # 🔴 R6（2026-06-22 拍板）：富文本化轮（sui-xiang·只誊抄题面）的结果 = 最终 entry.stem 权威源。
     #   非空 → 覆盖 R2 誊抄的 stem（下游 _finalize_high_conf / early_dna 统一从 entry.richText.stem
@@ -1151,7 +1164,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             "chapter_candidates": [{"id": "", "name": n} for n in decision["chapter_candidates"]],
             "confidence": decision["confidence"],
         }
-        V._emit_need_confirm(payload)
+        _emit_need_confirm(payload)
         # 🔴 BUG-04（2026-06-19）·读图置信极低提示：confidence 极低（< LOW_CONF_HINT_THRESHOLD）时，
         #   多半是图本身不清/非标准题图——状态条 detail + 母题确认气泡里明确建议换清晰图，别让老师在读不清
         #   的图上白点「开始举一反三」。复用既有低置信分支加文案（不改判定逻辑、不新增闸）。
@@ -1160,8 +1173,8 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
             "这张图可能不够清晰·建议换张清晰的图，或确认年级与章后继续"
             if _very_low else "请确认年级与章后继续"
         )
-        V._emit_stage("classify", "锚定考点", V.STAGE_AWAIT, _await_detail)
-        V._emit_stage("knobs", "解析配方", V.STAGE_AWAIT, "待确认年级章后定配方")
+        _emit_stage("classify", "锚定考点", V.STAGE_AWAIT, _await_detail)
+        _emit_stage("knobs", "解析配方", V.STAGE_AWAIT, "待确认年级章后定配方")
         grade_line = decision["grade_book"] or "（未判出，请手选）"
         chapter_line = decision["chapter"] or "（未判出，请手选）"
         _low_conf_note = (
@@ -1180,11 +1193,11 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         rich = entry.get("richText") or {}
         if isinstance(rich, dict):
             if rich.get("stem"):
-                prov_dna["stem"] = V._sanitize_rich_text(rich.get("stem"))
+                prov_dna["stem"] = _sanitize_rich_text(rich.get("stem"))
             if rich.get("answer"):
-                prov_dna["answer"] = V._sanitize_rich_text(rich.get("answer"))
+                prov_dna["answer"] = _sanitize_rich_text(rich.get("answer"))
             if rich.get("analysis"):
-                prov_dna["analysis"] = V._sanitize_rich_text(rich.get("analysis"))
+                prov_dna["analysis"] = _sanitize_rich_text(rich.get("analysis"))
         # 🔴 PRD-C-100 B2 死循环根治：低置信暂存与高置信路径对齐——补 mother_solve_source="opus"
         #   + 完整 dna（含 main_kp/skeleton）。否则 confirm 后 classify 的 _reuse_ok（variant.py:1879）
         #   判 False → 重锚不复用首解 → 重调 opus 二次读图、niche 题偶发坏 JSON → 退回 needs_confirm
@@ -1192,10 +1205,10 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         prov_dna_obj = mother_opus.opus_to_dna(entry)
         prov_skeleton = prov_dna_obj.get("skeleton") or []
         if prov_skeleton:
-            prov_dna["solution_skeleton"] = V.join_skeleton(prov_skeleton)  # P8 逐行净化
+            prov_dna["solution_skeleton"] = join_skeleton(prov_skeleton)  # P8 逐行净化
         prov_solved = entry.get("solvedAnswer")
         if prov_solved:
-            prov_dna["solved_answer"] = V._sanitize_rich_text(prov_solved)
+            prov_dna["solved_answer"] = _sanitize_rich_text(prov_solved)
         prov_dna["dna"] = prov_dna_obj
         prov_dna["mother_solve_source"] = "opus"
         # 🔴 R2a·闸2（B5b）首解范围指纹（写点①·低置信路）：记首解所在年级册 4 位 code 前缀。
@@ -1265,7 +1278,7 @@ async def _finalize_high_conf(
         analysis["grade"]["code"] = grade_code
 
     token = ((config or {}).get("configurable") or {}).get("ruoyi_token")
-    client = V.RuoyiClient(token=token)
+    client = RuoyiClient(token=token)
     leaf_pool: list[tuple[str, str]] = []
     try:
         leaf_pool = await V.leaf_pool_for_grade(
@@ -1277,8 +1290,8 @@ async def _finalize_high_conf(
     if not leaf_pool:
         await client.aclose()
         analysis.setdefault("_anchor_error", "知识点叶子池不可用（库未起/年级未识别）")
-        V._emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
-        V._emit_stage("knobs", "解析配方", "warn", "待老师确认母题后再定配方")
+        _emit_stage("classify", "锚定考点", "warn", "知识点池不可用，待老师确认")
+        _emit_stage("knobs", "解析配方", "warn", "待老师确认母题后再定配方")
         # 🔴 M3/PRD-A-018·高置信 + 叶子池空 = 静默死态修复：对齐 not-confirmed picker 分支（769-802）。
         #   旧实现这里只发 mother_confirm 数据、不置 awaiting_mother_confirm → BE 路由态没置 → 下一轮老师
         #   打字补年级/章时 route_entry（awaiting_mother_confirm=False + items 空 + mother_dna 空）落兜底
@@ -1290,18 +1303,18 @@ async def _finalize_high_conf(
         _rich = entry.get("richText") or {}
         if isinstance(_rich, dict):
             if _rich.get("stem"):
-                early_dna["stem"] = V._sanitize_rich_text(_rich.get("stem"))
+                early_dna["stem"] = _sanitize_rich_text(_rich.get("stem"))
             if _rich.get("answer"):
-                early_dna["answer"] = V._sanitize_rich_text(_rich.get("answer"))
+                early_dna["answer"] = _sanitize_rich_text(_rich.get("answer"))
             if _rich.get("analysis"):
-                early_dna["analysis"] = V._sanitize_rich_text(_rich.get("analysis"))
+                early_dna["analysis"] = _sanitize_rich_text(_rich.get("analysis"))
         _early_dna_obj = mother_opus.opus_to_dna(entry)
         _early_skeleton = _early_dna_obj.get("skeleton") or []
         if _early_skeleton:
-            early_dna["solution_skeleton"] = V.join_skeleton(_early_skeleton)
+            early_dna["solution_skeleton"] = join_skeleton(_early_skeleton)
         _early_solved = entry.get("solvedAnswer")
         if _early_solved:
-            early_dna["solved_answer"] = V._sanitize_rich_text(_early_solved)
+            early_dna["solved_answer"] = _sanitize_rich_text(_early_solved)
         early_dna["dna"] = _early_dna_obj
         early_dna["mother_solve_source"] = "opus"
         # 🔴 R2a·闸2（B5b）首解范围指纹（写点②·高置信空池 early 路）：记首解年级册 4 位 code。
@@ -1315,7 +1328,7 @@ async def _finalize_high_conf(
                                    for n in (decision.get("chapter_candidates") or []) if n],
             "confidence": float(decision.get("confidence") or 0.0),
         }
-        V._emit_need_confirm(picker_payload)
+        _emit_need_confirm(picker_payload)
         early: dict[str, Any] = {
             **base_out,
             "analysis": analysis,
@@ -1339,20 +1352,20 @@ async def _finalize_high_conf(
     rich = entry.get("richText") or {}
     if isinstance(rich, dict):
         if rich.get("stem"):
-            mother_dna["stem"] = V._sanitize_rich_text(rich.get("stem"))
+            mother_dna["stem"] = _sanitize_rich_text(rich.get("stem"))
         if rich.get("answer"):
-            mother_dna["answer"] = V._sanitize_rich_text(rich.get("answer"))
+            mother_dna["answer"] = _sanitize_rich_text(rich.get("answer"))
         if rich.get("analysis"):
-            mother_dna["analysis"] = V._sanitize_rich_text(rich.get("analysis"))
+            mother_dna["analysis"] = _sanitize_rich_text(rich.get("analysis"))
 
     # DNA 归一（mother_opus.opus_to_dna，与 classify 同函数）
     dna = mother_opus.opus_to_dna(entry)
     skeleton_lines = dna.get("skeleton") or []
     if skeleton_lines:
-        mother_dna["solution_skeleton"] = V.join_skeleton(skeleton_lines)  # P8 逐行净化
+        mother_dna["solution_skeleton"] = join_skeleton(skeleton_lines)  # P8 逐行净化
     solved = entry.get("solvedAnswer")
     if solved:
-        mother_dna["solved_answer"] = V._sanitize_rich_text(solved)
+        mother_dna["solved_answer"] = _sanitize_rich_text(solved)
     mother_dna["mother_solve_source"] = "opus"
     # 🔴 R2a·闸2（B5b）首解范围指纹（写点②·高置信成功路同口径）：记首解年级册 4 位 code。
     mother_dna["_solve_range_fp"] = str(grade_code or "")
@@ -1376,7 +1389,7 @@ async def _finalize_high_conf(
     if not rt_check["ok"]:
         analysis["_richtext_issues"] = rt_check["issues"]
         mother_dna["need_richtext_review"] = True
-        V._emit_stage("classify", "锚定考点", "warn",
+        _emit_stage("classify", "锚定考点", "warn",
                       f"母题富文本机器检发现 {len(rt_check['issues'])} 处问题，待人工复核")
 
     # 闸B 锚定·宁空不凑（G11，同 classify）：预设章 id（老师选范围）优先收窄前缀；无预设 → 年级册 4 位
@@ -1397,7 +1410,7 @@ async def _finalize_high_conf(
         m_res = await model_anchor.anchor_models(
             dna, stem=mother_dna.get("stem") or "",
             answer=mother_dna.get("answer") or mother_dna.get("solution_skeleton") or "",
-            invoke=V._ainvoke_text, model=V.settings.variant_model("model_confirm"),
+            invoke=_ainvoke_text, model=V.settings.variant_model("model_confirm"),
             record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
                 name, mm, question_ref=m_ref),
         )
@@ -1456,10 +1469,10 @@ async def _finalize_high_conf(
         }
         confirmed = True
         kp_name = _pkp
-    V._emit_stage("classify", "锚定考点", "done" if confirmed else "warn",
+    _emit_stage("classify", "锚定考点", "done" if confirmed else "warn",
                   f"考点「{kp_name}」·年级「{grade_name}」")
     recipe = V.knobs_desc(base_out.get("knobs")) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
-    V._emit_stage("knobs", "解析配方", "done" if confirmed else "warn", recipe)
+    _emit_stage("knobs", "解析配方", "done" if confirmed else "warn", recipe)
 
     # 🔴 PRD-C-100 B1·锚不到叶子 → 弹真章树 picker，不走 clarify 死胡同：
     #   高置信路径若主考点 opus 给的是开集名、_match_kp_in_pool/闸B 都锚不到年级章内真叶子
@@ -1485,7 +1498,7 @@ async def _finalize_high_conf(
                                    for n in (decision.get("chapter_candidates") or []) if n],
             "confidence": float(decision.get("confidence") or 0.0),
         }
-        V._emit_need_confirm(picker_payload)
+        _emit_need_confirm(picker_payload)
         out_nc: dict[str, Any] = {
             **base_out,
             "analysis": analysis,
