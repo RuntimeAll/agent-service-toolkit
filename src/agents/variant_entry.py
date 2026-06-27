@@ -525,9 +525,61 @@ def build_struct_messages(
     return [SystemMessage(content=_struct_prefix(preset=_preset)), HumanMessage(content=parts)]
 
 
+# 🔴 PRD-C-105 A（D3）：喂模型前下采样上限。Claude 服务端本就把图降到长边 ≤1568px / ≤~1.15MP，
+#   超过这个尺寸的字节全是白送（转富文本/解题慢、撞 180s、"图没过去"）。长边 >1568 → 等比缩到 1568，
+#   对模型无损（它内部也降到这）。≤1568 的原样不缩（不做任何重编码，零损耗）。
+_MODEL_IMG_MAX_EDGE = 1568
+
+
+def _downsample_image_bytes(raw: bytes, ctype: str) -> tuple[bytes, str]:
+    """🔴 PRD-C-105 A：把喂模型那一份临时拷贝下采样到长边 ≤1568px（对模型无损·提速）。
+
+    入参 = 下载到的原图字节 + content-type；返回 (字节, content-type)。
+    - 长边 ≤1568px → **原样返回原字节**（不重编码，零损耗、零失真）。
+    - 长边 >1568px → 等比缩到长边=1568：照片/JPEG 源 → JPEG q90；PNG/透明 → 保 PNG。
+    - Pillow 任何异常 → 回退原字节（绝不因压缩失败让解题崩；失败打 log）。
+    🔴 只压"喂 LLM 前的临时拷贝"——OSS 原图 / 入库母题图 / FE 展示全不碰（本函数只在喂模型前调）。
+    """
+    try:
+        import io as _io
+
+        from PIL import Image as _Image
+
+        im = _Image.open(_io.BytesIO(raw))
+        im.load()
+        w, h = im.size
+        if max(w, h) <= _MODEL_IMG_MAX_EDGE:
+            return raw, ctype  # 已够小：原样不缩，不重编码（零损耗）
+        scale = _MODEL_IMG_MAX_EDGE / float(max(w, h))
+        new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        im = im.resize(new_size, _Image.LANCZOS)
+        # 透明/PNG 源 → 保 PNG（不丢 alpha）；其余（照片/JPEG）→ JPEG q90。
+        src_png = (im.mode in ("RGBA", "LA", "P")) or ("png" in (ctype or "").lower())
+        buf = _io.BytesIO()
+        if src_png:
+            im.save(buf, format="PNG", optimize=True)
+            out_ctype = "image/png"
+        else:
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            im.save(buf, format="JPEG", quality=90)
+            out_ctype = "image/jpeg"
+        return buf.getvalue(), out_ctype
+    except Exception as e:  # noqa: BLE001 — 压缩失败 → 回退原字节（绝不让下采样阻断解题）
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "C-105 A 图片下采样失败，回退原字节 base64：%s", e
+        )
+        return raw, ctype
+
+
 async def _to_b64_data_url(url: str) -> str:
     """sui-xiang(kiro 逆向站)不抓远程图 URL → 母题图必须 base64 内嵌。下载 OSS 图 → data URL。
-    已是 data: 直接返回；下载失败 → 原样返回 url（aigeek failover 仍可用远程 URL，不破熔断备用）。"""
+    已是 data: 直接返回；下载失败 → 原样返回 url（aigeek failover 仍可用远程 URL，不破熔断备用）。
+
+    🔴 PRD-C-105 A（D3）：下载后、base64 前先经 _downsample_image_bytes 把长边压到 ≤1568px
+    （只压这份喂模型的临时拷贝，OSS/展示/入库原图不碰）。≤1568 原样、>1568 等比缩、失败回退原字节。"""
     if not url or url.startswith("data:"):
         return url
     try:
@@ -538,7 +590,9 @@ async def _to_b64_data_url(url: str) -> str:
             resp = await c.get(url)
             resp.raise_for_status()
         ctype = (resp.headers.get("content-type") or "image/png").split(";")[0].strip() or "image/png"
-        return f"data:{ctype};base64,{_b64.b64encode(resp.content).decode()}"
+        # C-105 A：喂模型前下采样（≤1568 原样不缩；只压这份临时拷贝）。
+        content, ctype = _downsample_image_bytes(resp.content, ctype)
+        return f"data:{ctype};base64,{_b64.b64encode(content).decode()}"
     except Exception:  # noqa: BLE001 — 下载失败 → 原 url（aigeek 兜底能用远程 URL）
         return url
 
