@@ -54,13 +54,42 @@ from agents import (
 from agents.variant_entry import mother_opus_entry
 from agents.qtype_format import format_by_qtype
 from agents.variant_support import (
-    RuoyiClient,
     _is_review_book,
     anchor_subject,
     chapter_name_for_id,
     leaf_pool_for_grade,
-    persist_items,
     record_link_manifest,
+)
+# 🔴 PRD-C-104 B2a：shared/ 抽出的引擎内部 helper（纯搬零改），re-export 回本模块面 →
+#   service.py / variant_entry.py 仍按 variant.X / V.X 解析得到，外部零感。
+from agents.variant.shared.sanitize import (
+    _PAREN_MATH_RE,
+    _BRACKET_MATH_RE,
+    _LITERAL_NL_RE,
+    _MATH_SPLIT_RE,
+    _BARE_SPACING_RE,
+    _GLUED_GEOM_RE,
+    _BARE_DEGREE_RE,
+    _fix_glued_inside_math,
+    _strip_bare_spacing_outside_math,
+    _sanitize_rich_text,
+    _sanitize_item,
+    join_skeleton,
+)
+from agents.variant.shared.budget import (
+    _budget_ctx,
+    _budget_begin,
+    _budget_tick,
+    _budget_exhausted,
+    _budget_bind,
+)
+from agents.variant.shared.ruoyi import (
+    RuoyiClient,
+    persist_items,
+    build_mother_bo,
+    build_create_bo,
+    build_update_bo,
+    build_block_json,
 )
 from core import get_model, relay_pool, settings
 from core import difficulty  # 🔴 PRD-C-103 WS1：确定性难度判档（grade_observed，表反控的代码点）
@@ -83,58 +112,9 @@ DEFAULT_SHAPE = {"normal": 2, "hard": 1}
 # P2 逐题过闸并发上限（PRD-C-012：generate 流内 eager + gene_gate/solve_explain 节点共用口径）
 GATE_CONCURRENCY = 3
 
-# ---------------------------------------------------------------------------
 # P13 预算闸（PRD-C-013）：state 级 LLM 调用计数器（per-round 重置）。
-# 🔴 铁律：是「超限跳过增强类调用」不是「LLM 决定流程」——宏观 DAG 一字不破。
-#   核心链（parse/generate 首稿/grade 难度总评/solve 真解）永不跳；只有**增强类**调用
-#   （闸A rework 回炉 / 闸B heal 回炉 / replenish 补题 / extract 兜底抽载荷）在超限后
-#   跳过，落既有 G5 降级路径（标 ⚠ / 保留原题，绝不卡死）。
-# 实现：contextvar 持一个 {"used":int,"limit":int} 计数器（per graph round 由出题/编辑节点
-#   入口 _budget_begin 重置）。_ainvoke_text 每次成功调用 _budget_tick()+1；增强类调用点
-#   先问 _budget_exhausted() 再决定跳不跳。contextvar 天然随 asyncio task 复制传播 →
-#   eager 并发子 task / gather 并发都共享同一计数器（同一轮预算），单测直调节点（无
-#   begin）时 _budget 为 None → 永不超限（行为回退到老逻辑，零侵入）。
-# ---------------------------------------------------------------------------
-_budget_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
-    "variant_llm_budget", default=None
-)
-
-
-def _budget_begin(limit: int) -> None:
-    """出题/编辑轮入口重置预算（per-round）。limit≤0 视为不设限（关闸）。"""
-    _budget_ctx.set({"used": 0, "limit": int(limit)} if limit and limit > 0 else None)
-
-
-def _budget_tick() -> None:
-    """记一次成功 LLM 调用（_ainvoke_text 内部唯一调用点）。无预算上下文 → no-op。"""
-    b = _budget_ctx.get()
-    if b is not None:
-        b["used"] += 1
-
-
-def _budget_exhausted() -> bool:
-    """增强类调用点的闸：True=预算已耗尽，本次增强调用应跳过走降级。无预算 → 永 False。"""
-    b = _budget_ctx.get()
-    return b is not None and b["used"] >= b["limit"]
-
-
-def _budget_bind(state: VariantState, *, reset_limit: int | None = None) -> dict | None:
-    """节点入口绑定预算到 contextvar，返回 live 计数器 dict（节点须把它放回返回值 state，
-    used 才能跨节点累计——LangGraph 每个 superstep 用新 copy_context，contextvar 不跨节点存活，
-    预算的**事实源是 state.llm_call_budget**，contextvar 只是给无 state 视野的 _ainvoke_text 记账）。
-
-    - reset_limit 非 None（出题/编辑轮**入口**节点）→ 本轮重置 {"used":0,"limit":reset_limit}；
-      limit≤0 视为关闸（返回 None，永不超限）。
-    - reset_limit=None（轮内下游节点 gene_gate/solve_explain/assemble/exec_*）→ 从 state 携带；
-      state 无簿记（单测直调 / 旧线程恢复）→ None（关闸，行为回退老逻辑）。
-    """
-    if reset_limit is not None:
-        b = {"used": 0, "limit": int(reset_limit)} if reset_limit > 0 else None
-    else:
-        carried = state.get("llm_call_budget")
-        b = dict(carried) if isinstance(carried, dict) and "limit" in carried else None
-    _budget_ctx.set(b)
-    return b
+#   🔴 PRD-C-104 B2a：_budget_ctx / _budget_begin / _budget_tick / _budget_exhausted /
+#   _budget_bind 已抽到 agents.variant.shared.budget（纯搬零改），顶部 re-export 回本模块。
 
 # ---------------------------------------------------------------------------
 # 闸B（PRD-C-010）：sympy 程序验算 + 题型分流的标记值
@@ -932,76 +912,9 @@ def _parse_json(text: str) -> Any:
 
 
 # --- 富文本净化（用户反馈 2026-06-11：解析裸字符不渲染的根因） -----------------
-# LLM（gpt-5.4）产 JSON 时两类脏输出：① LaTeX 用 \( \) / \[ \] 定界（前端
-# markdown-it-katex 只认 $/$$，且 markdown 会把 \( 的反斜杠当转义吃掉）；② 把换行
-# 写成双反斜杠 → 解出字面 \n 两个字符。统一在解析边界净化，入库/快照/气泡三处共净。
-_PAREN_MATH_RE = re.compile(r"\\\(\s*(.+?)\s*\\\)", re.DOTALL)
-_BRACKET_MATH_RE = re.compile(r"\\\[\s*(.+?)\s*\\\]", re.DOTALL)
-# 字面 \n 后跟小写字母 = 可能是 LaTeX 命令（\neq \nabla \newline \nu …），不动；其余视为换行
-_LITERAL_NL_RE = re.compile(r"\\n(?![a-z])")
-
-# 🔴 A1（2026-06-18）：opus 把选项写成一行 `A. 37° \quad B. 53° …`，\quad 在 $...$ **外**
-#   → KaTeX 不渲染、裸露。把出现在 $...$ 外的裸 LaTeX 间距命令替成普通空格；$...$ 内的不动
-#   （留给 KaTeX）。FE mathNormalize.ts 同口径，两边一致。
-# 切分 $$...$$ / $...$ 数学段：偶数下标 = 段外文本，奇数下标 = 数学段（含定界符）。
-_MATH_SPLIT_RE = re.compile(r"(\$\$[\s\S]+?\$\$|\$[^\n$]+?\$)")
-# 裸间距命令：\quad \qquad \, \; \! \:（后接非字母边界，防误伤 \quadword 之类）
-_BARE_SPACING_RE = re.compile(r"\\(?:qquad|quad)(?![a-zA-Z])|\\[,;!:]")
-# 🔴 2026-06-21（PRD-A-018 用户终审，DB 挖真值定位）：LLM 产 $...$ 时**闭合 $ 前留空格**，如
-#   `$\angle 1 = 44^\circ $`。markdown-it-katex 要求闭合 $ 前非空白（防误匹配货币）→ 整段不被识别
-#   为公式、裸显示源码。**真根因** = trim 掉 $...$ 内首尾空白。兼带防御：粘连几何命令补空格、裸 °→^\circ。
-#   与 FE mathNormalize.ts fixGluedInsideMath 同口径。
-_GLUED_GEOM_RE = re.compile(r"\\(angle|triangle|parallel|nparallel|perp|cong|simeq|odot)(?=[A-Z])")
-_BARE_DEGREE_RE = re.compile("°")
-
-
-def _fix_glued_inside_math(s: str) -> str:
-    """修 $...$ **内**常见 LLM LaTeX 脏写：trim 首尾空白(真根因)、粘连几何命令补空格、裸 °→^\\circ。段外不碰。"""
-    parts = _MATH_SPLIT_RE.split(s)
-    for i in range(1, len(parts), 2):  # 奇数下标 = 数学段（含定界符）
-        seg = parts[i]
-        dd = seg.startswith("$$")
-        inner = seg[2:-2] if dd else seg[1:-1]
-        fixed = _BARE_DEGREE_RE.sub(r"^\\circ ", _GLUED_GEOM_RE.sub(r"\\\1 ", inner)).strip()
-        if fixed:
-            parts[i] = f"$${fixed}$$" if dd else f"${fixed}$"
-    return "".join(parts)
-
-
-def _strip_bare_spacing_outside_math(s: str) -> str:
-    """把 $...$ 外的裸 LaTeX 间距命令（\\quad \\qquad \\, \\; \\! \\:）替成普通空格；段内原样。"""
-    parts = _MATH_SPLIT_RE.split(s)
-    for i in range(0, len(parts), 2):  # 偶数下标 = 数学段外文本
-        if parts[i]:
-            parts[i] = _BARE_SPACING_RE.sub(" ", parts[i])
-    return "".join(parts)
-
-
-def _sanitize_rich_text(s: Any) -> Any:
-    """LLM 产出的 stem/answer/solution 净化：\\(..\\)→$..$、\\[..\\]→$$..$$、字面 \\n→换行、
-    $...$ 外裸间距命令(\\quad 等)→空格。"""
-    if not isinstance(s, str) or not s:
-        return s
-    s = _BRACKET_MATH_RE.sub(lambda m: f"$${m.group(1)}$$", s)
-    s = _PAREN_MATH_RE.sub(lambda m: f"${m.group(1)}$", s)
-    s = _LITERAL_NL_RE.sub("\n", s)
-    return _fix_glued_inside_math(_strip_bare_spacing_outside_math(s))
-
-
-def _sanitize_item(it: dict[str, Any]) -> dict[str, Any]:
-    """就地净化一道题的富文本字段，返回原 dict（链式用）。"""
-    for k in ("stem", "answer", "solution"):
-        it[k] = _sanitize_rich_text(it.get(k))
-    return it
-
-
-def join_skeleton(lines: Any) -> str:
-    """P8（2026-06-18）：骨架步骤序列逐行净化后换行拼接 → 落 solution_skeleton/analyze。
-    解决图母题入库 analyze = 未净化 skeleton（裸 \\(..\\)/裸间距命令）裸露。"""
-    out = []
-    for s in lines or []:
-        out.append(_sanitize_rich_text(str(s)))
-    return "\n".join(out)
+#   🔴 PRD-C-104 B2a：正则常量 + _fix_glued_inside_math / _strip_bare_spacing_outside_math /
+#   _sanitize_rich_text / _sanitize_item / join_skeleton 已抽到 agents.variant.shared.sanitize
+#   （纯搬零改），顶部 re-export 回本模块。
 
 
 def _latest_human_text(messages: list[BaseMessage]) -> str:
