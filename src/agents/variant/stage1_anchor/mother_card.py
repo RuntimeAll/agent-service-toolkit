@@ -266,13 +266,21 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         if isinstance(m, dict) and (m.get("id") or m.get("name"))
     ]
 
-    # C-105 FIXME：此处 difficulty 直接取 dna/mdna 既存值（源含母题 dim8 LLM 自评档），
-    #   与「难度全线表驱动 mother_md_from_table（grade_observed）、不采信 LLM 自评」的铁律不一致。
-    #   B4 纯搬零改：值/逻辑一字不动，留待 C-105 收口（改为读表驱动档或断言一致）。
-    difficulty = dna.get("difficulty")
+    # 🔴 PRD-C-105 G1（D5）：母题难度改表驱动同源——优先读 mother_md_from_table(state) 算出的
+    #   表驱动档（grade_observed，与变式侧 grade_variant_item 同源），不再显 dna.difficulty（opus dim8
+    #   LLM 自评）。与「难度全线表驱动、不采信 LLM 自评」铁律一致；FE 不动（母题卡本就只读展示难度）。
+    #   降级：表驱动拿不到（库内母题无 DNA → mother_md_from_table 返 None / 任何异常）→ 回退旧
+    #   dna.difficulty / mdna.difficulty（不崩、不留空白）。
+    difficulty = None
+    try:
+        difficulty = mother_md_from_table(state)
+    except Exception:  # noqa: BLE001 — 表驱动判档异常 → 回退旧自评值（绝不因判档崩了组不出母题卡）
+        difficulty = None
     if not isinstance(difficulty, int):
-        md = mdna.get("difficulty")
-        difficulty = md if isinstance(md, int) else None
+        difficulty = dna.get("difficulty")
+        if not isinstance(difficulty, int):
+            md = mdna.get("difficulty")
+            difficulty = md if isinstance(md, int) else None
 
     # 🔴 PRD-C-017 B5 问题3·答案核齐根因修：opus 把标准答案放 richText.answer（→ mdna.answer），
     #   solvedAnswer（→ mdna.solved_answer）是它的"解出值"草稿、常为空或更简略。旧版母题卡只外显
