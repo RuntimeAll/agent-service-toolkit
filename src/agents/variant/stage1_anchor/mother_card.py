@@ -265,6 +265,14 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         for m in (dna.get("models") or [])
         if isinstance(m, dict) and (m.get("id") or m.get("name"))
     ]
+    # 🔴 PRD-C-106 B1③·诚实三态展示态：去 M00 兜底后，无考模型 → models:[] + model_flag="no_model"。
+    #   把 flag 透传给 FE，让母题卡模型行渲染「无考模型」明示态（而非空白/报错）。有模型 → flag=None
+    #   → FE 渲染真模型 summary。model_flag 缺省（旧线程/库内母题无此键）→ None，FE 兼容兜底。
+    model_flag = dna.get("model_flag")
+    if model_flag is None and not models:
+        # 兜底：无 flag 但 models 空（旧线程恢复 / 上游没写 flag）→ 视作无考模型态（不留模糊空白）。
+        model_flag = "no_model"
+    no_model = (model_flag == "no_model") or (not models)
 
     # 🔴 PRD-C-105 G1（D5）：母题难度改表驱动同源——优先读 mother_md_from_table(state) 算出的
     #   表驱动档（grade_observed，与变式侧 grade_variant_item 同源），不再显 dna.difficulty（opus dim8
@@ -339,6 +347,9 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
             "hard_points": [str(h) for h in (dna.get("hard_points") or []) if str(h).strip()],
             "skeleton": skeleton or None,
             "models": models,
+            # 🔴 B1③·诚实三态：model_flag=no_model → FE 母题卡模型行出「无考模型」(非空白/非 M00)。
+            "model_flag": model_flag,
+            "no_model": bool(no_model),
             "tags": [str(t) for t in (dna.get("tags") or []) if str(t).strip()],
         },
         # 锚定（FE anchor.chapter_id → anchorChapterId）

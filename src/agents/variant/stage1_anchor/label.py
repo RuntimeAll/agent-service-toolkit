@@ -83,6 +83,11 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
         for m in (models_raw or [])
         if isinstance(m, dict) and (m.get("id") or m.get("name"))
     ]
+    # 🔴 PRD-C-106 B1③·诚实三态：去 M00 兜底后 models 可空 → 透传 model_flag/no_model 给 FE，
+    #   让变式卡模型行渲染「无考模型」(非空白)。item 级无独立 flag → 继承母题 DNA 的 flag。
+    model_flag = it.get("model_flag") if it.get("model_flag") is not None else dna.get("model_flag")
+    if model_flag is None and not models:
+        model_flag = "no_model"
     return {
         "main_kp": str(main_kp.get("name") or "") or None,
         "main_kp_id": str(main_kp.get("id") or "") or None,
@@ -92,8 +97,10 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
         "scene": str(dna.get("scene") or "") or None,
         "skeleton": skeleton or None,
         "hard_points": hard_points,
-        # 双轴模型维（批2）：models 非空（M00 兜底）；model_overflow/model_warn 给 FE 标 ⚠（批5 渲染）。
+        # 双轴模型维（批2→B1③ 诚实三态）：models 可空；no_model=True → FE 出「无考模型」明示态。
         "models": models,
+        "model_flag": model_flag,
+        "no_model": bool(model_flag == "no_model" or not models),
         "model_overflow": [str(x) for x in (dna.get("model_overflow") or []) if str(x).strip()],
         "model_warn": bool(dna.get("model_warn")),
         "manual_edited": bool(it.get("manual_edited")),
