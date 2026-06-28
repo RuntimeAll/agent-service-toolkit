@@ -88,12 +88,17 @@ def build_mother_prompt(
     chapter_text: str | None,
     leaf_pool: list[tuple[str, str]],
     model_vocab: list[str] | None = None,
+    model_toolbox: str | None = None,
 ) -> str:
     """组母题 opus 合并解题+打标 prompt（PREFIX 三注入 + 逐维规则）。
 
     ① 规则书（10 维逐维 + 难度四档 rubric + 难点克制 + 考察类型闭集10 + 标签禁近义）内联；
     ② 知识点叶子池（确认年级/章范围内，主/副 kp 只能锚池内 id、禁造词、越界 needReview）；
     ③ 模型词库快照（只读命名参考，简单题空数组）；+ 学段锁死红线（解法不超本年级进度）。
+
+    🔴 PRD-C-106 B1①·带料解题：model_toolbox（model_anchor.build_toolbox_clause 产出，年级全量
+       模型「名称 + 触发特征」工具箱）非空 → 注入「可用解题大招工具箱」段，让 opus 带着工具箱解题、
+       在 modelCandidates 里照工具箱名填它真正用到的模型。空/None → 不注入（降级裸解，不卡死）。
 
     leaf_pool 走 toolkit 既有 lazyTree 取数（调用方备好，本函数只渲染），不新写 pymysql。
     """
@@ -107,6 +112,11 @@ def build_mother_prompt(
     vocab_text = "、".join(model_vocab or []) or "（无快照，简单题模型候选留空数组）"
     exam_types = "/".join(dna_extract.EXAM_TYPES)
     chapter_line = f"确认章：{chapter_text}" if chapter_text else "确认章：（未细化到章，按年级册范围）"
+    # 🔴 B1①·带料解题工具箱段（model_anchor.build_toolbox_clause 产出·空则不注入）。
+    toolbox_block = (
+        f"\n================ 可用解题大招工具箱（带料解题） ================\n{model_toolbox}\n"
+        if (model_toolbox and model_toolbox.strip()) else ""
+    )
 
     # 🔴 R2b·U8 输出段两版：哨兵框（richText 三段走 ⟦STEM⟧/⟦ANSWER⟧/⟦ANALYSIS⟧ 原文，绕 JSON 转义）
     #   / 旧式整 JSON。按 settings.MOTHER_RICHTEXT_SENTINEL 选；解析侧 parse_or_repair_entry 通吃两版。
@@ -177,7 +187,7 @@ def build_mother_prompt(
 
 ================ 模型词库快照（只读命名参考） ================
 {vocab_text}
-
+{toolbox_block}
 ================ 10 维逐维规则 ================
 1. primaryKp 主考点：锚池内叶子（id+name 单值）；锚不到留 id 空 + 真实考点名。
 2. secondaryKps 副考点 0~3：与主不同体系才算、锚池内 id；没有就空数组。
@@ -192,7 +202,7 @@ def build_mother_prompt(
    - 3 ★★★：1 难点 或 考察∈{{证明推理·应用建模·探究归纳}} 或 骨架含【最难步】。
    - 4 ★（压轴）：≥2 难点 或 多突破口综合。
 9. tags 标签 3~6：检索标签（求什么/用什么定理/什么方法/什么场景）；**禁近义增生**（同义只留一个）。
-10. modelCandidates 解题模型（克制）：真有可复用套路才给候选名（简单题空数组）；只吐候选名不给 M-id。
+10. modelCandidates 解题模型（克制·带料）：上面给了「可用解题大招工具箱」时，**优先照工具箱里的名称原样填**你解题真正用到的模型（便于系统纯代码对齐 M-id）；工具箱里没有但确有可复用套路 → 也可如实写名（系统会留痕待审）；简单题/纯基础运算 → 空数组，绝不硬凑。只吐名不给 M-id。
 
 ================ 富文本红线（题面/答案/解析） ================
 🔴 数学式用行内 $...$；换行用标准 \\n；禁裸 LaTeX 命令、禁 \\( \\) / \\[ \\] 定界；LaTeX 括号/命令参数必须配对完整（下游有机器闸逐项检，坏 LaTeX 会被打回）。

@@ -279,12 +279,22 @@ _SOLVE_SYSTEM_PREFIX: str = (
 def build_solve_messages(
     *, image_url: str, utterance: str | None = None, teacher_memory: str | None = None,
     preset_grade_book: str | None = None, preset_chapter: str | None = None,
+    model_toolbox: str | None = None,
 ) -> list[Any]:
-    """R1 解题轮消息：稳定 system 前缀（解题纪律）‖ 变量后缀（题图 + 年级/章学段约束 + 背景语境 + 记忆）。"""
+    """R1 解题轮消息：稳定 system 前缀（解题纪律）‖ 变量后缀（题图 + 年级/章学段约束 + 背景语境 + 记忆）。
+
+    🔴 PRD-C-106 B1①·带料解题：model_toolbox（year-level 解题模型工具箱 clause，
+       model_anchor.build_toolbox_clause 产出）非空 → 注入变量后缀当「可用解题大招工具箱」，让 opus
+       带着工具箱解题（认得出该用哪个套路）。空/None → 不注入（裸解降级，不卡死）。
+    """
     from langchain_core.messages import SystemMessage
 
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
+    if model_toolbox and model_toolbox.strip():
+        var_text_segs.append(
+            f"【🔴 可用解题大招工具箱（带料解题·解题时认得出该用哪个套路就用）】\n{model_toolbox}"
+        )
     if preset_grade_book or preset_chapter:
         # 🔴 老师已定年级册 + 章 → 都注入学段约束，解题方法收窄到该章进度（之前漏注章）。
         _scope = "、".join(
@@ -477,17 +487,25 @@ def build_struct_messages(
     *, image_url: str, solved_solution: str, solved_answer: str,
     utterance: str | None = None, teacher_memory: str | None = None,
     preset_grade_book: str | None = None, preset_chapter: str | None = None,
+    model_toolbox: str | None = None,
 ) -> list[Any]:
     """R2 结构化打标消息：稳定 system 前缀 ‖ 变量后缀（题图 + 🔴R1 权威解答 + 年级/章 + 背景 + 记忆）。
 
     solved_solution = R1 解题正文（已去【最终答案】标记）；solved_answer = R1 抠出的最终答案。
     🔴 题面(stem) 忠实誊抄**图中原题**（不是从解答倒推）；答案/解析据 R1 权威解答整理。
+    🔴 PRD-C-106 B1①·带料：model_toolbox 非空 → 注入工具箱，让 opus 在 modelCandidates 里**照工具箱
+       名原样填**它真正用到的模型（下游 anchor_models_from_names 纯代码映射 M-id，消第二次 LLM 解题）。
     """
     from langchain_core.messages import SystemMessage
 
     _preset = bool(preset_grade_book)
     parts: list[dict[str, Any]] = []
     var_text_segs: list[str] = []
+    if model_toolbox and model_toolbox.strip():
+        var_text_segs.append(
+            "【🔴 可用解题大招工具箱（带料打标·modelCandidates 照下面名称原样填你解题真正用到的，"
+            f"没用到留空数组、绝不硬凑）】\n{model_toolbox}"
+        )
     # 🔴 忠于原文头条铁律（用户反馈「忠于原文没做到·原文没配对」）：题面来源 = 图中原题，不是解答倒推。
     # 🔴 R1 权威解答（核心注入）：stem 照图誊抄 / answer·analysis 照此解答整理（忠于原文规则在 system 已给，此处只提一句不重复）。
     _ans_line = f"最终答案 = {solved_answer}\n\n" if solved_answer else ""
@@ -965,6 +983,25 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
     _preset_chapter = (_preset_for_prompt or {}).get("chapter_name")  # 🔴 老师定的章人话名，注入 R1/R2
     opus_model = V.settings.variant_model("mother_solve_label")  # fail-fast 已锁 opus
 
+    # 🔴 PRD-C-106 B1①·带料解题工具箱：解题前备「该年级全量模型名单」注入 R1 解题 + R2 打标 prompt。
+    #   年级前缀来源（解题前能定的）：预设章 id 前 4 位 → 3 位根 / 预设年级名归一。非预设贴图（grade 由
+    #   opus 在 R1 现判）→ 解题前拿不到 grade → 空工具箱裸解（不卡死），但下游 anchor_models_from_names
+    #   仍按 opus 给的名纯代码映射（带料缺位不影响消重复解题 + 诚实三态）。库故障 → 空工具箱（降级）。
+    _toolbox_grade_code: str | None = None
+    _pre = _preset_for_prompt or {}
+    _pre_chap = str(_pre.get("chapter_id") or "").strip()
+    if _pre_chap and len(_pre_chap) >= 4:
+        _toolbox_grade_code = _pre_chap[:4]
+    elif _preset_grade:
+        _toolbox_grade_code = V._grade_to_code(_preset_grade) or None
+    model_toolbox_clause = ""
+    if _toolbox_grade_code:
+        try:
+            _tb = model_anchor.toolbox_for_grade(_toolbox_grade_code)
+            model_toolbox_clause = model_anchor.build_toolbox_clause(_tb)
+        except Exception:  # noqa: BLE001 — 工具箱备料失败 → 裸解降级（绝不卡母题主链）
+            model_toolbox_clause = ""
+
     # =========================================================================
     # 🔴 R6 三步编排（用户 2026-06-22 拍板）：① 富文本化(sui-xiang·只誊抄题面) ∥ ② R1解题(aigeek)
     #   **并发跑**（asyncio.gather，富文本化不阻塞解题）；两者完成后 → ③ R2打标(sui-xiang)。
@@ -1021,6 +1058,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         solve_messages = build_solve_messages(
             image_url=img_for_llm, utterance=user_text or None, teacher_memory=teacher_memory,
             preset_grade_book=_preset_grade, preset_chapter=_preset_chapter,
+            model_toolbox=model_toolbox_clause,  # 🔴 B1①·带料解题工具箱
         )
         _txt = ""
         _exc: Exception | None = None
@@ -1081,6 +1119,7 @@ async def mother_opus_entry(state: dict[str, Any], config: RunnableConfig) -> di
         image_url=img_for_llm, solved_solution=solved_solution, solved_answer=solved_answer,
         utterance=user_text or None, teacher_memory=teacher_memory,
         preset_grade_book=_preset_grade, preset_chapter=_preset_chapter,
+        model_toolbox=model_toolbox_clause,  # 🔴 B1①·带料打标(opus 从工具箱选 modelCandidates)
     )
     entry: Any = None
     opus_exc: Exception | None = None
@@ -1458,23 +1497,29 @@ async def _finalize_high_conf(
 
     await client.aclose()
 
-    # 模型锚（双轴·同 classify）：M00 兜底，故障不空维
+    # 🔴 PRD-C-106 B1②③·模型对齐 = 纯代码（消重复解题 + 诚实三态）：opus 带料解题已在 modelCandidates
+    #   选了模型名 → anchor_models_from_names 纯代码映射 M-id+tier/freq（**不再调 confirm_models 第二次
+    #   LLM 解题**）。真无考模型 → models:[] + model_flag="no_model"（去 M00 兜底，难度走降级）。
     try:
         m_ref = str((main_kp or {}).get("id") or "") or None
-        m_res = await model_anchor.anchor_models(
-            dna, stem=mother_dna.get("stem") or "",
-            answer=mother_dna.get("answer") or mother_dna.get("solution_skeleton") or "",
-            invoke=_ainvoke_text, model=V.settings.variant_model("model_confirm"),
-            record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
-                name, mm, question_ref=m_ref),
-            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回（高置信首解路，同 classify 口径）
+        m_res = model_anchor.anchor_models_from_names(
+            dna.get("model_candidates") or [],
+            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回集对齐
         )
-    except Exception as e:  # noqa: BLE001
+        # 池外名留痕待命名池（软警·不打回；与旧 anchor_models 同副作用）。
+        for _nm in (m_res.get("model_overflow") or []):
+            try:
+                model_anchor.record_overflow_candidate(_nm, [], question_ref=m_ref)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001 — 对齐整体故障 → 诚实留空 + ⚠（绝不 M00 假装有、不卡死）
         analysis.setdefault("_model_anchor_error", str(e))
-        m_res = {"models": [dict(model_anchor.M00)], "model_overflow": [], "model_warn": True,
+        m_res = {"models": [], "model_overflow": [], "model_warn": True,
                  "model_flag": "lookup_unavailable"}
-    dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
+    dna["models"] = m_res.get("models") or []  # 🔴 诚实三态：无模型留空，绝不 M00
     dna["model_overflow"] = m_res.get("model_overflow") or []
+    dna["temp_models"] = m_res.get("temp_models") or []
+    dna["model_flag"] = m_res.get("model_flag")  # no_model/overflow/lookup_unavailable/None
     if m_res.get("model_warn"):
         dna["model_warn"] = True
     mother_dna["dna"] = dna

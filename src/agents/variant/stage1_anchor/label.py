@@ -286,11 +286,19 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
 
     image_url = state.get("image_url")
     opus_model = settings.variant_model("mother_solve_label")  # G3：母题必命中 opus（fail-fast 已锁）
+    # 🔴 PRD-C-106 B1①·带料解题：classify 重锚路 grade_code 已定 → 备年级全量模型工具箱注入解题打标
+    #   prompt，让 opus 带着工具箱解题、在 modelCandidates 照工具箱名填真正用到的（库故障 → 空裸解降级）。
+    _mtb = ""
+    try:
+        _mtb = model_anchor.build_toolbox_clause(model_anchor.toolbox_for_grade(grade_code))
+    except Exception:  # noqa: BLE001 — 工具箱备料失败 → 裸解降级（绝不卡母题主链）
+        _mtb = ""
     prompt = mother_opus.build_mother_prompt(
         grade_text=(analysis.get("grade") or {}).get("value") or grade_code or "",
         chapter_text=chapter_text,
         leaf_pool=leaf_pool,
         model_vocab=None,  # 模型词库快照（只读命名参考）；现阶段缺省，model_anchor 步另锚正式 M-id
+        model_toolbox=_mtb,  # 🔴 B1①·带料解题工具箱
     )
     # 🔴 PRD-C-100 B2·重锚自愈网（复用入口 mother_opus_entry 同口径，根治死循环）：旧实现这里只
     #   做「单次 solve_and_label + 单次 _parse_json」——opus 偶发坏 JSON（markdown fence/截断/未转义
@@ -383,31 +391,30 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
 
     await client.aclose()
 
-    # --- 🔴 PRD-C-015 批2·W1' 模型锚定（双轴「怎么解」轴）：母题 DNA 抽完即锚 models ---
-    #   按主+副 kp 反查候选（纯只读 ETL，≤8 按 sort）→ gpt-5.4-mini「先解题再选」确认 ≤3（池内选/禁造词）；
-    #   无命中→M00 保底（模型维永不为空）；池外名→落待命名池+⚠（不入正式维）；反查库故障→M00+⚠。
-    #   写进 mother_dna.dna.models / model_overflow（契约 v2，批1 已留字段位）。
+    # --- 🔴 PRD-C-106 B1②③·模型对齐 = 纯代码（消重复解题 + 诚实三态）---
+    #   旧路：anchor_models 调 gpt-5.4-mini「先解题再选」= 第二次 LLM 解题。新路：opus 带料解题已在
+    #   modelCandidates 选了模型名（dna.model_candidates）→ anchor_models_from_names 纯代码映射 M-id +
+    #   tier/freq（年级全量召回集对齐），**不再二次 LLM 解题**。真无考模型 → models:[] +
+    #   model_flag="no_model"（去 M00 兜底，难度走 grade_observed 降级）；池外名 → 待命名池 ⚠。
     try:
         m_ref = str((main_kp or {}).get("id") or "") or None
-        m_res = await model_anchor.anchor_models(
-            dna,
-            stem=mother_dna.get("stem") or "",
-            answer=mother_dna.get("answer") or mother_dna.get("solution_skeleton") or "",
-            invoke=_ainvoke_text,
-            model=settings.variant_model("model_confirm"),  # H2：确认档走 gpt-5.4-mini（.env VARIANT_MODEL_MODEL_CONFIRM）
-            record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
-                name, mm, question_ref=m_ref
-            ),
-            grade_code=grade_code,  # 🔴 PRD-C-105 B：默认按年级全量召回（治跨章题模型没绑）
+        m_res = model_anchor.anchor_models_from_names(
+            dna.get("model_candidates") or [],
+            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回集对齐（治跨章题模型没绑）
         )
-    except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底，绝不空维/卡死）
+        for _nm in (m_res.get("model_overflow") or []):
+            try:
+                model_anchor.record_overflow_candidate(_nm, [], question_ref=m_ref)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001 — 对齐整体故障 → 诚实留空 + ⚠（绝不 M00、不卡死）
         analysis.setdefault("_model_anchor_error", str(e))
-        m_res = {"models": [dict(model_anchor.M00)], "temp_models": [], "model_overflow": [],
+        m_res = {"models": [], "temp_models": [], "model_overflow": [],
                  "model_warn": True, "model_flag": "lookup_unavailable"}
-    dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
+    dna["models"] = m_res.get("models") or []  # 🔴 诚实三态：无模型留空，绝不 M00
     dna["model_overflow"] = m_res.get("model_overflow") or []
-    # 🔴 WS2·AC5：临时模型随 DNA 透传（供 WS2 落链/转正脚本消费；参与判档已在 models 内体现）。
     dna["temp_models"] = m_res.get("temp_models") or []
+    dna["model_flag"] = m_res.get("model_flag")
     if m_res.get("model_warn"):
         dna["model_warn"] = True
     mother_dna["dna"] = dna
@@ -554,27 +561,27 @@ async def _reanchor_reuse_first_solve(
     if dna.get("need_anchor_review"):
         mother_dna["need_anchor_review"] = True
 
-    # ④ 模型锚（双轴·与 classify 同口径）：M00 兜底，故障不空维。
+    # ④ 模型对齐（B1②③·纯代码·与 classify 同口径）：复用首解 opus 的 model_candidates（不二次 LLM
+    #    解题）→ anchor_models_from_names 映射 M-id+tier/freq；真无 → no_model（去 M00）。
     try:
         m_ref = str((main_kp or {}).get("id") or "") or None
-        m_res = await model_anchor.anchor_models(
-            dna,
-            stem=mother_dna.get("stem") or "",
-            answer=mother_dna.get("answer") or mother_dna.get("solution_skeleton") or "",
-            invoke=_ainvoke_text,
-            model=settings.variant_model("model_confirm"),
-            record_overflow=lambda name, mm: model_anchor.record_overflow_candidate(
-                name, mm, question_ref=m_ref
-            ),
-            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回（重锚复用首解路，同 classify 口径）
+        m_res = model_anchor.anchor_models_from_names(
+            dna.get("model_candidates") or [],
+            grade_code=grade_code,  # 🔴 PRD-C-105 B：按年级全量召回集对齐
         )
-    except Exception as e:  # noqa: BLE001 — 锚定整体故障也得有 models（M00 兜底）
+        for _nm in (m_res.get("model_overflow") or []):
+            try:
+                model_anchor.record_overflow_candidate(_nm, [], question_ref=m_ref)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001 — 对齐整体故障 → 诚实留空 + ⚠（绝不 M00）
         analysis.setdefault("_model_anchor_error", str(e))
-        m_res = {"models": [dict(model_anchor.M00)], "temp_models": [], "model_overflow": [],
+        m_res = {"models": [], "temp_models": [], "model_overflow": [],
                  "model_warn": True, "model_flag": "lookup_unavailable"}
-    dna["models"] = m_res.get("models") or [dict(model_anchor.M00)]
+    dna["models"] = m_res.get("models") or []  # 🔴 诚实三态：无模型留空，绝不 M00
     dna["model_overflow"] = m_res.get("model_overflow") or []
-    dna["temp_models"] = m_res.get("temp_models") or []  # WS2·AC5 临时模型透传
+    dna["temp_models"] = m_res.get("temp_models") or []
+    dna["model_flag"] = m_res.get("model_flag")
     if m_res.get("model_warn"):
         dna["model_warn"] = True
     mother_dna["dna"] = dna
