@@ -300,10 +300,16 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             ]
         }
 
+    # 🔴 PRD-C-106 B2·隔离接缝：阶段二取 facts 统一走 facts_from_ref —— 优先读 compress 固化的
+    #   frozen MotherCoreRef.facts（AC3/G3：阶段二只读参照、不继承阶段一对话；并发不读脏，B0 坑2），
+    #   缺参照（旧线程/库内母题旁路）回退 _mother_facts(state)（旧行为，向后兼容）。
+    #   🔴 facts_from_ref 在 compress.py（re-export 晚于本模块）→ 体内延迟 import（调用期已就绪）。
+    from agents.variant import facts_from_ref  # noqa: E402
+
     # 🔴 批2·generate 入口防御断言（从机制上绝迹「未解析+未知年级进出题」）：facts 缺年级
     #   或主考点 → 拒绝出题、回确认态。多入口（route_entry 库内母题直进 / patch 重造 / 兜底）
     #   都必过此闸，gate_after_classify 之外的旁路也兜得住。
-    _facts_pre = _mother_facts(state)
+    _facts_pre = facts_from_ref(state)
     _missing_grade = (str(_facts_pre.get("grade") or "").strip() in ("", "未知年级"))
     _missing_kp = (
         str(_facts_pre.get("kp_name") or "").strip() in ("", "未知考点")
@@ -350,7 +356,7 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     if two:
         knobs = {**(knobs or {}), **two}
 
-    facts = _mother_facts(state)
+    facts = facts_from_ref(state)  # 🔴 B2：同上——阶段二吃固化参照，不重算（隔离 + 不读脏）
     # 🔴 W2 守恒守门（T1）：母题 DNA 白名单为空集 → 不放行生成，降级回 clarify 语义（不裸出）。
     blocked = _conservation_blocked(facts.get("dna"))
     if blocked:

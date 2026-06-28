@@ -27,6 +27,7 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     await_mother_review,
     classify,
     clarify,
+    compress,  # 🔴 PRD-C-106 B2·压缩闸（STOP1 后、stage2 前固化 MotherCoreRef）
     editor_entry,
     entry_lowconf_block,
     exec_add,
@@ -59,6 +60,7 @@ graph.add_node("classify", classify)
 graph.add_node("await_review", await_mother_review)  # B5·母题卡硬停闸（置 awaiting_mother_review + END）
 graph.add_node("clarify", clarify)
 graph.add_node("entry_lowconf_block", entry_lowconf_block)  # 🔴 R2a·闸4·读图低置信前置拦截（建议换图，不进 classify）
+graph.add_node("compress", compress)  # 🔴 PRD-C-106 B2·压缩闸（阶段边界：固化母题核心参照）
 graph.add_node("generate", generate)
 graph.add_node("gene_gate", gene_gate)  # 闸A·基因闸（新变式 → 平行度比对 → 闸B）
 graph.add_node("solve_explain", solve_explain)
@@ -85,7 +87,12 @@ graph.set_conditional_entry_point(
         "mother_opus_entry": "mother_opus_entry",
         # 🔴 PRD-A-021 R4·F19：'analyze':'analyze' 死映射已删（route_entry 永不返回 'analyze'，
         #   节点也已退役不再注册 → 留着会 path_map 目标悬空编译报错）。
-        "generate": "generate",
+        # 🔴 PRD-C-106 B2·阶段边界压缩闸：route_entry 仍返回 "generate"（frozen 行为不动），
+        #   但路径映射把它**先经 compress 节点**（固化 MotherCoreRef）再 → generate。
+        #   compress→generate 直连（见下方 add_edge），阶段二只读固化参照（AC3/G3 隔离）。
+        #   所有进 generate 的入口（STOP1 resume / 库内母题直进 / mother_confirmed 直造）统一过 compress；
+        #   facts_from_ref 对无参照旁路有降级，过 compress 只增益不破。
+        "generate": "compress",
         "parse": "parse_instruction",
         # 🔴 B2·母题确认 resume（config 回传确认章 id）→ 直奔 classify（带确认章接闸B）
         "classify": "classify",
@@ -123,6 +130,11 @@ graph.add_edge("await_review", END)
 graph.add_edge("clarify", END)
 graph.add_edge("entry_lowconf_block", END)  # 🔴 R2a·闸4·拦截后 END（等老师换图 / 坚持确认）
 
+
+# 🔴 PRD-C-106 B2·压缩闸 → 阶段二：compress 固化 MotherCoreRef 后直连 generate（阶段边界）。
+#   compress 只写 state.mother_core_ref、不分支（异常路径 incomplete=true 由 generate 入口防御断言收口
+#   回确认态，不在此分流）→ 单一无条件边。
+graph.add_edge("compress", "generate")
 
 # 🔴 PRD-C-104 B5：after_generate（generate 裸奔兜底 → done / 正常 → 闸A）已抽到 entry/route.py
 #   （纯搬零改），顶部 re-export 回本模块。

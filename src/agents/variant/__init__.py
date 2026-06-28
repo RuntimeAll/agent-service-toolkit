@@ -3003,6 +3003,16 @@ from agents.variant.stage2_variant.generate import (  # noqa: E402
     _parse_generated_items,
     generate,
 )
+# 🔴 PRD-C-106 B2：stage1_anchor/compress.py re-export（压缩闸 + MotherCoreRef 契约）。
+#   置于 mother_card / generate re-export 之后 —— compress 体内 from agents.variant import 取
+#   _mother_facts / _build_mother_card / mother_md_from_table / _emit_stage（皆已先 re-export）。
+#   图 wiring（graph.py 顶部 import compress）引本符号 → 须先绑回 facade。
+from agents.variant.stage1_anchor.compress import (  # noqa: E402
+    MOTHER_CORE_REF_VERSION,
+    build_mother_core_ref,
+    compress,
+    facts_from_ref,
+)
 from agents.variant.stage2_variant.gates import (  # noqa: E402
     _anti_degen_gate,
     _conservation_ok,

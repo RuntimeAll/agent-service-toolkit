@@ -147,6 +147,13 @@ class VariantState(MessagesState, total=False):
     #   start_variants=True → route_entry 见信号 + 已有 mother_dna（checkpointer 持久 thread state）
     #   → 直奔 generate（不重跑 classify、不重调 opus，复用 state.mother_dna）。
     awaiting_mother_review: bool
+    # 🔴 PRD-C-106 B2·母题核心参照（MotherCoreRef，契约 §10）：阶段一 → 阶段二的唯一传递物。
+    #   compress 节点（STOP1 后、generate 前）把阶段一锚定产物固化成一个不可变参照对象
+    #   {version, incomplete, dna(结构化), summary(人话), stem/answer/solution, figure, facts}。
+    #   阶段二 generate + B3 fan-out 子任务**只读它**（facts_from_ref），不再各自 _mother_facts(state)
+    #   重算（B0 坑2：并发读脏）。无 reducer：单次写定（compress 一次性 return），无并发写。
+    #   缺省（库内母题直进 / 旧线程 / 未过 compress 的旁路）→ facts_from_ref 回退 _mother_facts(state)。
+    mother_core_ref: dict[str, Any] | None
     # items[{stem, answer, solution, qtype, difficulty, level, injected_kp?,
     #        check:{badge:ok|warn, solved_answer}  ← 闸B(solve_explain)填,
     #        gene:{gate:pass|warn|skipped, reason?} ← 闸A(gene_gate)填}]
