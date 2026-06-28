@@ -3097,6 +3097,7 @@ from agents.variant.stage1_anchor.mother_card import (  # noqa: E402
 # ---------------------------------------------------------------------------
 from agents.variant.stage2_variant.prompts import (  # noqa: E402
     GENERATE_PROMPT,
+    GENERATE_ONE_PROMPT,
     REGEN_PROMPT,
 )
 from agents.variant.stage2_variant.difficulty import (  # noqa: E402

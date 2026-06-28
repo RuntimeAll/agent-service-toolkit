@@ -75,6 +75,65 @@ verify_payload 字段（PRD-C-012 4a·出题自带验算载荷：把**这道题�
 )
 
 
+# 🔴 PRD-C-106 B3·per-variant 单题 prompt（阶段二 fan-out 每道子上下文各调一次）：
+#   与 GENERATE_PROMPT 同契约（figure_spec / 难度 rubric / 题型 / payload / 格式硬规定），
+#   但**只出一道**，且把本道派工(变式系数/算子/难度档)注入指令——让每道按各自 knob 真分级。
+#   占位符：{kp_name}/{grade}/{qtype}/{stem}/{skeleton}（来自 facts，与 GENERATE 同源）
+#   + {seq}/{total}/{coeff}/{operator}/{op_guidance}/{difficulty_line}（来自 PLAN spec）。
+GENERATE_ONE_PROMPT = (
+    """你是浙教版初中数学命题专家。基于母题 DNA，造**恰好 1 道**举一反三变式（这是一组 {total} 道里的第 {seq} 道）。
+
+只输出**单个 JSON 对象**(不要解释、不要数组)：
+{{"stem":"题干(Markdown+LaTeX)","answer":"标准答案","solution":"完整解析(过程+答案)",
+  "qtype":"选择/填空/解答","difficulty":1~4,"level":"normal/hard","injected_kp":"相邻kp名或null",
+  "figure_spec":{{"layout":"...","angle_labels":[...]}} 或 "" （配图决策对象/空串，契约见下；纯代数题给 ""）,
+  "verify_payload":{{...该题的程序验算载荷，契约见下...}}}}
+
+🔴 本道派工（变式系数 + 算子 + 难度，必须严格按此出）：
+- 变式系数 {coeff}（{operator}）：{op_guidance}
+{difficulty_line}
+
+"""
+    + _FIGURE_SPEC_CONTRACT
+    + """
+
+"""
+    + _DIFFICULTY_RUBRIC
+    + """
+
+格式硬规定（stem/answer/solution 三个字段都遵守）：
+- 🔴 题面(stem)与选项里的数学式**一律行内 $...$**，如 $\\sqrt{{2}}$、$x^2-3x+2=0$；
+  **严禁** `$$...$$` / `\\[ \\]` / 任何 display 块级公式（撑满整行、强制换行，破坏阅读）。
+- **仅 solution 里多行分步推导**可用 $$...$$；其余单个等式仍优先行内 $...$。
+- **禁止**裸 LaTeX 命令、禁止 \\( \\) 定界符。
+- 🔴 选项间距禁用 `\\quad`/`\\qquad`/`\\,` 等命令，**选项各自成项**。
+- 换行用 JSON 标准转义 \\n（一个反斜杠）。
+
+"""
+    + _QTYPE_CONTRACT
+    + """
+
+verify_payload 字段（把**这道题自己的题干 + 标准答案**抽成可被 sympy 程序验算的结构化载荷，验算对象 claimed = 该题标准答案）：
+"""
+    + _PAYLOAD_CONTRACT
+    + """
+抽不成（文字应用题难建模/几何图形/证明/答案含区间或单位等）→ verify_payload 填 {{"kind":"none","reason":"原因"}}。
+
+铁律：
+- **主考点 + 年级 硬守恒**：必须仍考「{kp_name}」、仍在该年级范围内。
+- 守{{解题结构（普通题）}}；按上面派工的变式系数/算子改{{数字, 场景, 结构}}。
+- 可综合 1 个相邻知识点(主考点仍守，注入为副点)，填到 injected_kp。
+- **答案可程序验算**：answer 优先给可计算的数值/表达式，数字设计成解恰好整洁可验。
+
+母题 DNA：
+- 主考点(硬守恒，不可改): {kp_name}
+- 年级(硬守恒): {grade}
+- 题型: {qtype}
+- 母题题干: {stem}
+- 母题答案/解法骨架: {skeleton}"""
+)
+
+
 REGEN_PROMPT = (
     """下面这道变式题，独立解出的答案与题面标答不一致，请**重新出一道**等价变式重做。
 

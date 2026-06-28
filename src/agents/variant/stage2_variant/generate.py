@@ -15,13 +15,14 @@ __init__.py 末尾 re-export 4 函数 → 调用方/图 wiring 零感。
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from agents.variant.stage2_variant.prompts import GENERATE_PROMPT  # noqa: E402
+from agents.variant.stage2_variant.prompts import (  # noqa: E402
+    GENERATE_ONE_PROMPT,
+)
 from agents.variant import (  # noqa: E402  运行期解析（本模块在 __init__ 末尾导入）
     DEFAULT_SHAPE,
     DIFFICULTY_CAP,
@@ -31,6 +32,7 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     PLAN_INCREASING,
     STAGE_DONE,
     TIER_PENDING,
+    VARIANT_COEFF_DEFAULT,
     VERIFY_PENDING,
     VariantState,
     _PLAN_INCREASING_WORDS,
@@ -51,17 +53,15 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     _facts_log,
     _figure_type_gate_block,
     _gene_one_item,
-    _iter_complete_items,
     _maybe_diversity_block,
     _maybe_note_card_block,
-    _mother_facts,
-    _norm,
     _normalize_generated_item,
     _parse_json,
     _to_int,
     knobs_desc,
     mother_md_from_table,
     normalize_two_knobs,
+    plan_variant_specs,
     settings,
     shape_check,
 )
@@ -285,6 +285,22 @@ def _parse_generated_items(text: str, facts: dict) -> list[dict[str, Any]]:
     return []
 
 
+def _parse_one_item(text: str, facts: dict) -> dict[str, Any] | None:
+    """🔴 B3·per-variant 单题解析：GENERATE_ONE_PROMPT 出**单个 JSON 对象**（不是数组）。
+
+    宽容：① 顶层是单个含 stem 的对象 → 直接规整；② 模型偶发吐 [obj] / {"items":[obj]}
+    （没完全照单题契约）→ 复用 _parse_generated_items 取第一道。③ 未转义引号 → 复用其引号修复
+    路径。解不出 → None（调用方按单道失败容缺，G5）。
+    """
+    data = _parse_json(text)
+    if isinstance(data, dict) and (data.get("stem") or data.get("answer")):
+        norm = _normalize_generated_item(data, facts)
+        return norm if norm.get("stem") else None
+    # 退路：当数组/包装对象解（含引号修复）→ 取第一道
+    items = _parse_generated_items(text, facts)
+    return items[0] if items else None
+
+
 async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     """③ 造题：配方由首轮旋钮(knobs)驱动，无旋钮走旧默认 3 = 2 普通 + 1 难。
 
@@ -376,273 +392,162 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         mother_d = (state.get("mother_dna") or {}).get("difficulty") \
             or (state.get("mother_dna") or {}).get("dna", {}).get("difficulty")
     recipe = recipe_from_knobs(knobs, mother_d)
-    _emit_stage("generate", "生成题目", "running", f"{recipe['n']} 道")
-    prompt = (
-        GENERATE_PROMPT.format(
-            n=recipe["n"], n_normal=recipe["n_normal"], n_hard=recipe["n_hard"], **facts
-        )
+    total_n = int(recipe["n"])
+    _emit_stage("generate", "生成题目", "running", f"{total_n} 道")
+
+    # ── 🔴 PRD-C-106 B3·共享前缀（每道子上下文共用的母题约束块，组一次） ──
+    #   facts/守恒/上下文/难题注卡/多样性/图型闸——这些是「母题硬约束」组级共享，不随 per-variant
+    #   knob 变。per-variant 子 prompt = GENERATE_ONE_PROMPT(本道派工) + 本共享前缀。
+    _shared_suffix = (
+        "\n\n"
+        + _context_block(facts)  # 整改1：确定上下文硬约束（考点/进度/教材版本）
         + "\n\n"
-        + _context_block(facts)  # 🔴 整改1：确定上下文硬约束（考点/进度/教材版本，压解题不越界）
-        + "\n\n"
-        + _conservation_clause(facts.get("dna"))  # 🔴 W2 守恒硬约束注入（T1，与上块正交并存）
-        + _maybe_note_card_block(facts)  # 🔴 批3·W2' 难题注卡（难度≥3+非M00 才注，含反退化约束）
-        # 🔴 B3·R3a 多样性重组（PRD-A-021）：仅 GENERATE 注入；副考点/标签 per-variant 子集差异，
-        #   场景保持组级，骨架四维仍锁。n<2 → 不注（_maybe_diversity_block 内判）。
-        + _maybe_diversity_block(facts.get("dna"), recipe["n"])
-        + recipe["spec"]
-        # 🔴 PRD-A-021 R3b·章节×图型定型闸（落点①）：约束段拼最末（护 aigeek 前缀缓存）。
-        #   无章节/无映射/表读不到 → 返回 ""（逃生，不约束）。
-        + _figure_type_gate_block(state, facts)
+        + _conservation_clause(facts.get("dna"))  # W2 守恒硬约束（T1）
+        + _maybe_note_card_block(facts)  # 批3·W2' 难题注卡
+        + _maybe_diversity_block(facts.get("dna"), total_n)  # R3a 多样性重组
+        + _figure_type_gate_block(state, facts)  # R3b 章节×图型定型闸
     )
 
-    # 🔴 PRD-A-018 round4·治本P0「出题写 figure_spec 时手里有图」：把母题原图作为多模态 image 一并
-    #   喂给 generate（仿 analyze 的 ANALYZE_PROMPT 多模态写法 variant.py:1756-1761）。出题节点此刻
-    #   **真看着母题图**写 figure_spec（含结构化标注决策），不再凭母题题干文字+骨架脑补几何构型。
-    #   relay/opus 支持 vision（analyze 已用同套 list-content HumanMessage）。
-    #   🔴 向后兼容：image_url 可能缺（无图母题/纯代数母题/旧线程）→ 退回纯文本 HumanMessage，不崩。
-    #   on_delta 流内进度回调对 list-content / str-content 一视同仁（数 acc 里 "stem" 次数），不受影响。
+    # 🔴 母题原图（多模态）：每道子任务都附母题图写 figure_spec（向后兼容缺图退纯文本）。
     _mother_img_url = (facts.get("image_url") or "").strip() if facts.get("image_url") else ""
-    if _mother_img_url:
-        _gen_human = HumanMessage(
-            content=[
-                {"type": "text", "text": prompt
-                    + "\n\n🔴 上方附了**母题原配图**。写每道变式的 figure_spec 时**对照这张母题图**"
-                      "判断几何构型与标注（哪些点/角/线、标哪些已知角=什么文字），别再凭题干文字脑补。"},
-                {"type": "image_url", "image_url": {"url": _mother_img_url}},
-            ]
-        )
-    else:
-        _gen_human = HumanMessage(content=prompt)
 
-    # 🔴 思维外放（用户反馈 2026-06-11）：JSON token 对用户是乱码不外放，但流内数
-    # "stem" 出现次数 → 思路条实时跳「正在写第 n/N 道」+ 当前题干前几个字，等待不再是黑盒。
-    total_n = int(recipe["n"])
-    # 🔴 PRD-A-021 R4·F17：md_i / increasing 原仅供已退役的 from_recipe/expected_difficulty
-    #   印记计算，随死印记一并移除（无其它消费方）。
+    # ── 🔴 子件1·PLAN 派工：为每道分配 变式系数(基准+带内浮动) + 轮换算子 + 难度(md+i 递增) ──
+    _base_coeff = (knobs or {}).get("variant_coeff")
+    if _base_coeff is None:
+        _base_coeff = VARIANT_COEFF_DEFAULT
+    specs = plan_variant_specs(
+        total_n, _base_coeff, recipe.get("expected_difficulties"), mother_d
+    )
 
-    def _stamp_recipe(item: dict[str, Any], idx: int) -> dict[str, Any]:
-        # 🔴 PRD-A-021 R4·F17：from_recipe / expected_difficulty 为只写不读的死印记
-        #   （全仓无任何读方，仅在各处 strip 元组里被 pop 掉）→ 已停写。本 shim 现为 identity，
-        #   保留以不扰动两处调用点（4186 仍承担 _normalize 包装、4308 的幂等回填语义）。
-        #   注意：recipe 级 `expected_difficulties`（复数·喂 prompt）是另一个 LIVE 键，未动。
-        return item
-
-    # ── P2 流内 eager（PRD-C-012）：增量发现完整新题 → 立即 spawn 闸链 task ──
-    # 调用成本不增：闸A/闸B 仍是同一批 per-item helper，只是从「流结束后串行」改成
-    # 「题一完整就并发跑」（同一 Semaphore(GATE_CONCURRENCY) 限流）。宏观 DAG 零改动：
-    # 产物已带 gene+check → 下游 gene_gate/solve_explain 节点天然跳过已判项。
-    # 🔴 BUG-09（2026-06-19）：手动验算（auto_verify=False）下流内 eager **只过闸A（基因/平行度）
-    #   不过闸B（sympy 验算/回炉）** —— 闸B 留给老师手动按需点。闸A 是纯代码三检（零 LLM、秒级），
-    #   保留它让平行度徽章照常上卡；不剔题（pending 题进 solve_explain 挂 pending、绝不被剔）。
     _auto_verify = _auto_verify_on(config)
-    sem = asyncio.Semaphore(GATE_CONCURRENCY)
-    eager_raw: list[dict[str, Any]] = []  # 流内稳收的规整题（生成序；merge/兜底用）
-    eager_tasks: list[asyncio.Task] = []
-    spawned: dict[int, dict[str, Any]] = {}  # idx → 刚解析出的题（无 check/无 tier，partial 上卡）
-    completed: dict[int, dict[str, Any]] = {}  # idx → 已过闸链的题（剔除题带 _dropped 哨兵）
-    # 🔴 stale 标志（对抗审修复）：流重启（中转站中途熔断换站从头重流 / 空返回 retry 二次
-    # 开流）或 shape 整组 retry 采纳后，已派发的 eager 闸链全部作废 —— 置位后：①不再派发
-    # 新 task；②在跑的 task 不再记账/发帧（半发帧误导 FE）；③merge 不消费（use_eager=False）。
-    stale = {"flag": False}
+    sem = asyncio.Semaphore(GATE_CONCURRENCY)  # 🔴 节点内 gather 限流=3（红线：不用 Send）
+    results: dict[int, dict[str, Any]] = {}  # seq(1-based) → 已过闸的题（剔除题带 _dropped）
+    spawned: dict[int, dict[str, Any]] = {}  # seq → 已生成未过闸的题（partial 上卡）
 
-    def _cancel_eager() -> None:
-        stale["flag"] = True
-        for t in eager_tasks:
-            t.cancel()
-
-    def _emit_eager_frame() -> None:
-        """🔴 P2b-BE 逐题上屏（PRD-C-013）：把「出卡」与「过闸」解耦。按生成序拼累计帧——
-        已过闸的题用 completed[idx]（带 tier 定状态），未过闸但已解析的题用 spawned[idx]
-        （无 check → _artifact_payload 自然 tier=None，FE 按「无tier帧」先上卡）。
-
-        🔴 稳定 seq 不重压缩（对抗审①修复）：每个 cell 带 `_seq = 题原始生成序 k+1`，整生命周期
-        不变（剔除题不让后题 index 前移 → FE 按 seq 原位 merge 不嫁接到别的卡）。剔除题
-        （completed[k]._dropped）**显式入帧带 `_dropped:true`**（而非 `continue` 跳过）——
-        让 FE 收到显式退场哨兵驱动退场过渡 + 从 mergedItems 移除，而不是靠压缩 index 隐式挤掉
-        （后者会残留永删不掉的重复卡）。FE 契约：先收该题无 tier 帧 → 带 tier 帧 →（若被判废）_dropped 帧。"""
+    def _emit_fanout_frame() -> None:
+        """🔴 子件3·emit 重写：fan-out 后「数单流 stem 次数」失效 → 改「每道按 seq 归属」。
+        按 seq 拼累计帧：已过闸用 results[seq]，未过闸已生成用 spawned[seq]（tier=None 先上卡）。
+        seq = 道序（PLAN 派工固定），整生命周期不变 → FE 按 _seq 原位 merge 不串台、不嫁接。
+        剔除题（_dropped）显式入帧（退场哨兵）。任何异常静默吞（帧是增强不是关卡）。"""
         shown: list[dict[str, Any]] = []
-        for k in sorted(spawned):
-            cell = dict(completed.get(k, spawned[k]))
-            cell["_seq"] = k + 1  # 稳定 merge 键：题原始生成序（1-based），剔除题不重压缩
-            shown.append(cell)  # 剔除题（_dropped）照样入帧 → _artifact_payload 透传哨兵
+        for seq in sorted(spawned):
+            cell = dict(results.get(seq, spawned[seq]))
+            cell["_seq"] = seq  # 稳定 merge 键 = 道序（1-based）
+            shown.append(cell)
         _emit_artifact(
             dict(state, items=shown, knobs=knobs), partial=True, expected_total=total_n
         )
 
-    async def _eager_chain(idx: int, item: dict[str, Any]) -> None:
-        """单题闸链（闸A → 闸B）+ 完成即**原位重发**该题帧（同 seq，带 tier）。任何异常静默吞
-        （G5：eager 是增强不是关卡，失败的题留给下游节点照旧串行补判）。"""
+    def _build_one_prompt(spec: dict[str, Any]) -> str:
+        seq = spec["seq"]
+        diff = spec.get("difficulty")
+        if isinstance(diff, int):
+            lvl = "hard" if (mother_d is not None and diff > int(mother_d)) else "normal"
+            difficulty_line = (
+                f"- 目标难度档：{diff}（{lvl}）；难度高于母题填 level=\"hard\"，否则 \"normal\"。"
+            )
+        else:
+            difficulty_line = "- 难度：守母题难度（普通题）。"
+        head = GENERATE_ONE_PROMPT.format(
+            seq=seq,
+            total=total_n,
+            coeff=spec["coeff"],
+            operator=spec["operator"],
+            op_guidance=spec["guidance"],
+            difficulty_line=difficulty_line,
+            **facts,
+        )
+        return head + _shared_suffix
+
+    async def _gen_one(spec: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+        """🔴 子件2·per-variant 独立子上下文：吃同一份 frozen facts + 本道 spec，
+        各自一次 LLM 出**一道**变式 → 闸链（闸A，自动模式再闸B）→ 返回 (seq, kept|None)。
+        任何异常静默吞（G5：单道失败不炸整组，返 None 由组级容缺）。"""
+        seq = spec["seq"]
+        idx0 = seq - 1
         try:
+            prompt = _build_one_prompt(spec)
+            if _mother_img_url:
+                human = HumanMessage(content=[
+                    {"type": "text", "text": prompt
+                        + "\n\n🔴 上方附了**母题原配图**。写 figure_spec 时对照这张母题图判断"
+                          "几何构型与标注，别凭题干文字脑补。"},
+                    {"type": "image_url", "image_url": {"url": _mother_img_url}},
+                ])
+            else:
+                human = HumanMessage(content=prompt)
             async with sem:
-                # B2·T2：闸A 内涵换纯代码三检（facts 直传，judge 配方对齐 facts 组装已退役）。
-                judged = await _gene_one_item(item, facts, idx, total_n)
-                # 🔴 BUG-09：手动模式只过闸A，闸B 留给老师手动点 → 挂 pending（不剔题、不回炉）。
+                _emit_stage(
+                    "generate", "生成题目", "running",
+                    f"正在写第 {seq}/{total_n} 道（变式系数 {spec['coeff']}·{spec['operator']}）",
+                )
+                text = await _ainvoke_text(
+                    [human],
+                    model=settings.variant_model("generate"),
+                    timeout=settings.VARIANT_TIMEOUT_GENERATE,
+                )
+                parsed = _parse_one_item(text, facts)
+                if not parsed:
+                    _facts_log.warning("generate fan-out: 第 %d 道解析为 0 道（疑似截断/空返）", seq)
+                    return seq, None
+                item = parsed
+                item["_seq"] = seq  # 稳定道序（PLAN 派工，整生命周期不变）
+                # 派工印记（trace/外显用；与策略定稿一致，不影响判决）
+                item["variant_coeff"] = spec["coeff"]
+                item["variant_operator"] = spec["operator"]
+                spawned[seq] = dict(item)  # 先上卡（无 tier）
+                _emit_fanout_frame()
+                # 闸链：闸A 纯代码三检；自动模式再过闸B（sympy 验算/回炉），手动模式挂 pending
+                judged = await _gene_one_item(item, facts, idx0, total_n)
                 if _auto_verify:
-                    kept, note = await _check_one_item(judged, facts, idx, total_n)
+                    kept, note = await _check_one_item(judged, facts, idx0, total_n)
+                    if kept is None:
+                        kept = dict(judged)
+                        kept["_dropped"] = note or "程序验出标答错误（重生未过），已剔除"
                 else:
-                    kept, note = dict(judged), None
+                    kept = dict(judged)
                     if not kept.get("check"):
                         kept["check"] = {
                             "badge": "ok", "solved_answer": None,
                             "verify": VERIFY_PENDING, "tier": TIER_PENDING,
                         }
-            if stale["flag"]:
-                return  # 本轮 eager 已作废（流重启/整组 retry）→ 不记账、不发作废题的帧
-            if kept is None:
-                # 4d 方案A：剔除题转哨兵（带 gene 不带 check）→ 下游 solve_explain 收口
-                # 进 dropped_notes；不出现在增量帧（本帧起退场）。
-                kept = dict(judged)
-                kept["_dropped"] = note or "1 道题程序验出标答错误（重生一次仍未过），已剔除"
-            completed[idx] = kept
-            # 思路条进度（已过闸计数）+ 原位重发该题帧（同 seq，现带 tier 上定状态）
-            done_n = len([k for k in completed if not completed[k].get("_dropped")])
-            _stage_detail = (
+                kept["_seq"] = seq
+            results[seq] = kept
+            done_n = len([s for s in results if not results[s].get("_dropped")])
+            _detail = (
                 f"第 {done_n}/{total_n} 道完成" if _auto_verify
                 else f"第 {done_n}/{total_n} 道就绪（待手动验算）"
             )
-            _emit_stage("verify", "程序验算", "running", _stage_detail)
-            _emit_eager_frame()
-        except Exception:  # noqa: BLE001 — eager 失败绝不炸 generate；该题留给下游节点补判
-            pass
+            _emit_stage("verify", "程序验算", "running", _detail)
+            _emit_fanout_frame()
+            return seq, kept
+        except (TimeoutError, asyncio.TimeoutError):
+            _emit_stage("generate", "生成题目", "warn", f"第 {seq} 道生成超时，跳过")
+            return seq, None
+        except Exception:  # noqa: BLE001 — 单道失败不炸整组（G5），由组级容缺
+            _facts_log.warning("generate fan-out: 第 %d 道异常，跳过", seq, exc_info=True)
+            return seq, None
 
-    _seen = {"n": 0}
-    _acc_len = {"v": 0}
+    # 🔴 子件0 红线：节点内 asyncio.gather(Semaphore=3) fan-out，绝不用 LangGraph Send。
+    gathered = await asyncio.gather(*(_gen_one(s) for s in specs), return_exceptions=True)
 
-    def _gen_progress(acc: str) -> None:
-        # 🔴 流重启检测（对抗审修复）：中转站首站吐若干 chunk 后熔断换下一站从头重流 /
-        # _ainvoke_text 空返回 retry 二次开流时，acc 从头重积（len 回落）。此时 eager_raw
-        # 里是死流的题、与新流（最终 text 的事实源）下标天然错位 —— 本轮 eager 全作废
-        # （cancel + 静默 + use_eager=False），题目交还下游 gene_gate/solve_explain 节点
-        # 照旧补判（宏观 DAG 不变，只损失 eager 增强）。
-        if len(acc) < _acc_len["v"] and not stale["flag"]:
-            _cancel_eager()
-        _acc_len["v"] = len(acc)
-        n = min(acc.count('"stem"'), total_n)
-        if n > _seen["n"]:
-            _seen["n"] = n
-            m = re.findall(r'"stem"\s*:\s*"([^"]{0,24})', acc)
-            peek = (m[-1].replace("\\n", " ").strip() + "…") if m and m[-1] else ""
-            _emit_stage("generate", "生成题目", "running", f"正在写第 {n}/{total_n} 道 {peek}")
-        if stale["flag"]:
-            return  # eager 已作废 → 只保留进度叙事，不再派发新闸链
-        # P2：增量解析已完整闭合的新题（半截题绝不派发）→ 立即起闸链 task
-        # 🔴 P2b-BE 逐题上屏：一解析出完整题（stem/answer/solution 齐）就立即上卡——记 spawned
-        #   并发**无 tier 的 partial 帧**（出卡与过闸解耦）；闸链 task 跑完再原位重发带 tier 帧。
-        try:
-            found = _iter_complete_items(acc)
-            while len(eager_raw) < len(found):
-                idx = len(eager_raw)
-                item = _stamp_recipe(_normalize_generated_item(found[idx], facts), idx)
-                eager_raw.append(item)
-                spawned[idx] = dict(item)  # 无 check → 帧里该题 tier=None（上卡先行）
-                _emit_eager_frame()
-                eager_tasks.append(
-                    asyncio.get_running_loop().create_task(_eager_chain(idx, dict(item)))
-                )
-        except Exception:  # noqa: BLE001 — 进度/派发是增强不是关卡（G5），绝不打断流
-            pass
-
-    try:
-        text = await _ainvoke_text(
-            [_gen_human],
-            on_delta=_gen_progress,
-            model=settings.variant_model("generate"),
-            # 🔴 PRD-C-100 B3-perf：套总时长墙钟闸（默认 180s，与 §11「opus 带图 ≤180s」对齐）。
-            #   此前不传 → 各站默认 150s × 多站熔断转移 × 空返重试可叠加拖到 ~11min（长尾根因）。
-            #   超时由 relay_pool 的 asyncio.timeout 抛 TimeoutError，下面分两路有界收口。
-            timeout=settings.VARIANT_TIMEOUT_GENERATE,
-        )
-    except (TimeoutError, asyncio.TimeoutError):
-        # 🔴 B3-perf 有界降级（绝不拖到 11min / 绝不无界）：generate 超时——
-        #   ① 已流内稳收完整题（eager_raw 非空）→ 用它有界收尾，「先出的先出」(D14)，
-        #      不让长尾埋掉已产出的变式正文；
-        #   ② 一道都没出 → 标可读「超时降级」文案（建议简化/重试），不裸 error 不卡死。
-        _cancel_eager()
-        if eager_tasks:
-            await asyncio.gather(*eager_tasks, return_exceptions=True)
-        if eager_raw:
-            text = ""  # 走下方 len(items) < len(eager_raw) 兜底 → items=eager_raw
-            _emit_stage("generate", "生成题目", "warn",
-                        f"生成超时（>{int(settings.VARIANT_TIMEOUT_GENERATE)}s），已收已出的 {len(eager_raw)} 道")
-        else:
-            _emit_stage("generate", "生成题目", "warn",
-                        f"生成超时（>{int(settings.VARIANT_TIMEOUT_GENERATE)}s）")
-            return {
-                "items": [],
-                "knobs": knobs,
-                "llm_call_budget": budget,
-                "messages": [
-                    AIMessage(
-                        content="这道题过于复杂，变式生成超时了，建议把母题拆简单些或换一道再试。"
-                    )
-                ],
-            }
-    except BaseException:
-        # 🔴 孤儿收口（对抗审修复）：全中转站熔断耗尽等按设计外抛时，已 spawn 的 eager
-        # task 必须 cancel + 等待退场——否则每条链最多还有 4-5 次 LLM 调用在后台静默烧完，
-        # 并继续向已 error 收尾的流发帧。收口后原样 re-raise，不改失败语义。
-        _cancel_eager()
-        if eager_tasks:
-            await asyncio.gather(*eager_tasks, return_exceptions=True)
-        raise
-    items = _parse_generated_items(text, facts)
-    if len(items) < len(eager_raw):
-        # 整体解析比流内增量还少（尾部 JSON 破损等）→ 用流内稳收的题兜底
-        items = [dict(it) for it in eager_raw]
-
-    # 🔴 代码级配方校验（数量/题型分布/递增档位）：不符 → 带缺陷反馈整组 retry 1 次。
-    #   含首稿解析为空（items=[] 时「要求N道实出0道」也是明确缺陷，值得一次重试）。
-    #   🔴 shape 冲突处理（PRD-C-012）：数量类缺陷只能等流结束才判；整组 retry 产出
-    #   新 items 时丢弃 eager 结果（接受罕见浪费），retry 题不做流内 eager —— 由下游
-    #   gene_gate/solve_explain 节点（同一批 helper + gather 并发）一次性过闸。
-    defects = shape_check(items, knobs, mother_d)
-    retried = False
-    if defects:
-        feedback = (
-            "\n\n[配方校验反馈] 你上一稿不满足老师指定配方："
-            + "；".join(defects)
-            + "。请整组重出，严格满足配方（数量/题型配比/难度计划逐项核对后再输出）。"
-        )
-        try:
-            # 🔴 round4：整组 retry 同样喂母题图（出题二稿仍需看图写 figure_spec）；缺图退纯文本。
-            if _mother_img_url:
-                _retry_human = HumanMessage(content=[
-                    {"type": "text", "text": prompt + feedback},
-                    {"type": "image_url", "image_url": {"url": _mother_img_url}},
-                ])
-            else:
-                _retry_human = HumanMessage(content=prompt + feedback)
-            retry_text = await _ainvoke_text(
-                [_retry_human],
-                model=settings.variant_model("generate"),
-                # 🔴 B3-perf：整组 retry 也套同一墙钟闸（这是第二次全量出题，不套则又是一条长尾）。
-                timeout=settings.VARIANT_TIMEOUT_GENERATE,
-            )
-            retry_items = _parse_generated_items(retry_text, facts)
-        except Exception:  # noqa: BLE001 — 重试失败/超时保留首稿（绝不卡死）
-            retry_items = []
-        if retry_items:
-            items = retry_items
-            defects = shape_check(items, knobs, mother_d)
-            retried = True
-            # 🔴 整组 retry 采纳 = 首稿题全部作废（对抗审修复）：cancel 仍在跑的 eager
-            # 闸链（每条链最多还有 4-5 次 LLM 调用，gather 白等可达数十秒）+ 静默其
-            # 后续发帧（作废题的 partial 帧只会误导 FE）。retry 失败回退首稿的分支
-            # （retried=False）保持现状不取消——首稿仍是最终产物。
-            _cancel_eager()
-
-    # eager task 收口（绝不留孤儿任务；retry 整组重出/流重启时结果弃用）
-    if eager_tasks:
-        await asyncio.gather(*eager_tasks, return_exceptions=True)
-    use_eager = bool(eager_tasks) and not retried and not stale["flag"]
+    # 按道序(seq)装配 → 一次性 return 全组（保 merge_items reducer「new=权威全集」语义）
+    items: list[dict[str, Any]] = []
+    for r in gathered:
+        if isinstance(r, BaseException):
+            continue
+        seq, kept = r
+        if kept is not None:
+            items.append(kept)
+    items.sort(key=lambda it: it.get("_seq") or 0)
 
     if not items:
-        # 两稿皆空/解析失败 → 友好失败收尾（after_generate 走 done→END），绝不静默空轮
+        # 全道失败/解析失败 → 友好失败收尾（after_generate 走 done→END），绝不静默空轮
         _emit_stage("generate", "生成题目", "warn", "0 道（解析失败）")
         return {
             "items": [],
             "knobs": knobs,
-            "shape_defects": defects,
+            "shape_defects": [],
             "llm_call_budget": budget,
             "messages": [
                 AIMessage(
@@ -652,35 +557,17 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             ],
         }
 
-    # 配方印记（_stamp_recipe 同一公式；eager 已在派发时落印，此处对 retry/未派发尾项
-    # 落印 + 对已派发项幂等重写同值）
-    if knobs:
-        for i, it in enumerate(items):
-            _stamp_recipe(it, i)
-
-    if use_eager:
-        # 已过闸链的题按生成序回填 + 🔴 同一性校验（对抗审修复）：completed[i] 派生自
-        # eager_raw[i]（heal/补题换 stem 不影响——比的是派发时的原稿 stem），仅当它与
-        # 全量解析第 i 道是同一道题（stem 一致）才采用。错位场景（模型偶发吐无 stem 的
-        # 杂物对象：全量解析保留为 stem=None 而流内增量跳过，两套下标错一位）→ 保留
-        # 原稿走下游节点补判（宏观 DAG 不变），绝不把验算徽章嫁接到另一道题上。
-        def _same_item(i: int, it: dict[str, Any]) -> bool:
-            if i >= len(eager_raw):
-                return False
-            key = _norm(eager_raw[i].get("stem"))
-            return bool(key) and key == _norm(it.get("stem"))
-
-        items = [
-            completed[i] if (i in completed and _same_item(i, it)) else it
-            for i, it in enumerate(items)
-        ]
+    # 🔴 配方校验（数量/题型分布/递增档位）：fan-out 已按 PLAN 逐道派系数/算子/难度，整组 retry
+    #   不再适用（每道独立子上下文，无「整组重出一个 prompt」概念）；缺额/数量不符只外显缺陷，
+    #   由 assemble 头部 ⚠ 呈现（不卡死，G5）。质量阈值由维护者自测（AC7 口径）。
+    defects = shape_check(items, knobs, mother_d)
 
     _emit_stage("generate", "生成题目", "done", f"{len(items)} 道")
     return {
         "items": items,
         "knobs": knobs,
         "shape_defects": defects,
-        # 🔴 新一组题 → 复位手排标记（对抗审③）：上一组的 manual_order 绝不泄漏到新母题/新出题轮。
+        # 🔴 新一组题 → 复位手排标记：上一组的 manual_order 绝不泄漏到新母题/新出题轮。
         "manual_order": False,
         "llm_call_budget": budget,
         "messages": [],
