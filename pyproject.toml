@@ -18,6 +18,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "docx2txt ~=0.8",
     "duckduckgo-search>=7.3.0",
+    "pillow ~=11.0",
     "fastapi ~=0.115.5",
     "grpcio >=1.68.0",
     "httpx ~=0.28.0",
