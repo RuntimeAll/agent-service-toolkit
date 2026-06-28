@@ -25,12 +25,39 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     _facts_log,
     _format_item_stem,
     _mother_facts,
+    _norm,
     _sort_by_difficulty,
     _status_summary,
     _to_int,
     difficulty_consistency_defects,
     knobs_desc,
 )
+
+
+def _dedup_by_stem_hash(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """🔴 PRD-C-106 B3·子件5：装配去重兜底（纯函数·零 LLM·可单测）。
+
+    阶段二 fan-out N 道独立子上下文彼此不可见（多样性靠 PLAN 派工，编排图设计澄清②）→
+    极小概率两道撞同题面。这里按归一化 stem 去重：保留**首道**（_seq 小者，PLAN 道序在前），
+    撞题者剔除并记一条人话 note（**不静默丢致数量不足**：撞题=系统派工没拉开，须外显让老师知道少了）。
+    空 stem 不参与去重（交下游/无 stem 兜底，不误杀）。返回 (去重后 items, 撞题 notes)。
+    """
+    seen: dict[str, int] = {}  # 归一化 stem → 已保留题的 _seq
+    kept: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for it in items:
+        key = _norm(it.get("stem"))
+        if not key:
+            kept.append(it)  # 无 stem → 不参与去重（不误杀）
+            continue
+        if key in seen:
+            notes.append(
+                f"第 {it.get('_seq') or '?'} 道与第 {seen[key]} 道撞题（题面相同），已去重剔除"
+            )
+            continue
+        seen[key] = it.get("_seq") or (len(kept) + 1)
+        kept.append(it)
+    return kept, notes
 
 
 async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
@@ -49,6 +76,9 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     #   1~4、缺→2，绝不卡死。账单挂 item['difficulty_bill']（AC9 trace 的 actual_level 读它）。
     mother_dna = state.get("mother_dna") or {}
     items = [dict(it) for it in (state.get("items") or [])]
+    # 🔴 PRD-C-106 B3·子件5：装配 stem_hash 去重兜底（fan-out 三道独立生成可能撞题）。
+    #   去重 note 并进 dropped_notes 外显（不静默丢致数量不足）。
+    items, _dup_notes = _dedup_by_stem_hash(items)
     for it in items:
         try:
             bill = grade_variant_item(it, mother_dna)
@@ -111,7 +141,8 @@ async def assemble(state: VariantState, config: RunnableConfig) -> VariantState:
     defects += difficulty_consistency_defects(items)
     defect_s = ("\n\n⚠ 配方未完全满足：" + "；".join(defects)) if defects else ""
     # 4d 方案A：被剔除题的摘要说明（过程已在思路条叙事，这里收口"本组为何少了"）
-    dropped = state.get("dropped_notes") or []
+    #   + B3·子件5：stem_hash 去重 notes 并入外显（不静默丢致数量不足）。
+    dropped = list(state.get("dropped_notes") or []) + _dup_notes
     dropped_s = ("\n\n" + "；".join(dropped)) if dropped else ""
 
     head = (
