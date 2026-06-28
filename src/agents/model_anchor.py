@@ -396,6 +396,154 @@ _TIER_TEXT2INT = {"基础": 1, "高阶": 2}
 _FREQ_TEXT2INT = {"一次性": 1, "通法": 2}
 
 
+# ===========================================================================
+# 🔴 PRD-C-106 B1·阶段一收口：带料解题 + 消重复解题 + 诚实三态（去 M00 兜底）
+#   ① 带料解题：把「该年级全量模型名单（名称 + 触发特征）」做成可注入解题打标 prompt 的工具箱
+#      文本（toolbox_for_grade / build_toolbox_clause），让 opus 带着工具箱解题、从中选真正用到的。
+#   ② 消重复解题：opus 已从工具箱选了模型名（dna.modelCandidates）→ anchor_models_from_names 把名
+#      纯代码映射成 M-id + tier/freq（不再调 confirm_models 第二次 LLM 解题）。
+#   ③ 诚实三态：有考模型 → 返回真模型；真无 → models:[] + model_flag="no_model"（不再 M00 兜底）。
+# ===========================================================================
+# 模型展示无模型时的明示标记（替代旧 M00 兜底，FE/母题卡据此出「无考模型」态）。
+NO_MODEL_FLAG = "no_model"
+
+
+def toolbox_for_grade(grade_code: str | None) -> list[dict[str, Any]]:
+    """🔴 B1①·带料解题工具箱：年级根前缀 → 该年级全量解题模型候选（纯只读 ETL）。
+
+    复用 lookup_candidates_by_grade（同一 SELECT，带 tier_int/freq_int）。grade_code 归一成
+    3 位年级根前缀（_resolve_grade_prefix 同口径：纯数字且前 3 位合法才采信）。取数失败/前缀不可用
+    → 返回 []（上层注入空工具箱 → 降级标记，opus 仍可裸解；铁律④闸门必有降级路径，不卡死）。
+    """
+    pfx = _resolve_grade_prefix([], grade_code)
+    if not pfx:
+        return []
+    try:
+        return lookup_candidates_by_grade(pfx)
+    except Exception:  # noqa: BLE001 — 库故障 → 空工具箱（上层降级裸解，不卡死）
+        return []
+
+
+def build_toolbox_clause(candidates: list[dict[str, Any]]) -> str:
+    """🔴 B1①·把工具箱拼成可注入解题打标 prompt 的「可用解题大招工具箱」段（纯函数·可单测）。
+
+    candidates = toolbox_for_grade 产出（[{id,name,trigger_feature,action_conclusion,...}]）。
+    空 → 返回 ""（上层据此标降级、不注入空块）。文本含名称 + 触发特征 → 让 opus 解题时认得出该用哪个，
+    并在 modelCandidates 里**只填它真正用到的模型名**（名称须与工具箱一致，便于下游纯代码映射 M-id）。
+    """
+    cands = [c for c in (candidates or []) if isinstance(c, dict) and c.get("name")]
+    if not cands:
+        return ""
+    lines: list[str] = [
+        "🔴 可用解题大招工具箱（本年级已沉淀的解题模型；解题时若用到其中某个套路，"
+        "请在 modelCandidates 里**照下面的名称原样填**你真正用到的那几个，没用到就留空数组、绝不硬凑）："
+    ]
+    for c in cands:
+        trig = c.get("trigger_feature") or ""
+        act = c.get("action_conclusion") or ""
+        lines.append(f"- 「{c.get('name')}」：触发特征 = {trig} → {act}")
+    return "\n".join(lines)
+
+
+def _match_name_to_candidate(
+    name: str, by_name: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    """opus 选的模型名 → 候选集里的条目（精确名优先，退包含匹配·最短候选名优先=最具体）。
+    匹配不到 → None（上层按临时模型/丢弃处置，绝不硬塞）。"""
+    name = str(name or "").strip()
+    if not name:
+        return None
+    c = by_name.get(name)
+    if c is not None:
+        return c
+    cands = [
+        (pname, pc) for pname, pc in by_name.items()
+        if pname and (name in pname or pname in name)
+    ]
+    if cands:
+        cands.sort(key=lambda x: len(x[0]))
+        return cands[0][1]
+    return None
+
+
+def anchor_models_from_names(
+    model_names: list[str] | None,
+    *,
+    grade_code: str | None = None,
+    chapter_scope: bool = False,
+    leaf_codes: list[str] | None = None,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """🔴 B1②③·纯代码模型对齐（消重复解题 + 诚实三态）。
+
+    opus 带料解题时已从工具箱选了模型名（dna.modelCandidates）→ 本函数**纯代码 SQL 映射**：
+      模型名 → 在该年级（或章）候选集里匹配成 M-id + tier_int/freq_int。**不再调 confirm_models
+      第二次 LLM 解题**（全流程解题 = 1 次 opus）。
+
+    诚实三态（去 M00 兜底）：
+      - 有考模型（名匹配到候选）→ models=[{id,name,tier_int,freq_int}]，model_flag=None。
+      - opus 给了名但候选集里匹配不到 → 视作池外 overflow 留痕（不硬塞 M00、不入正式维）；
+        若最终一个都没匹配到 → models=[] + model_flag="no_model"（明示「无考模型」，难度降级）。
+      - opus 没给任何模型名（modelCandidates 空）→ models=[] + model_flag="no_model"（真无考模型）。
+
+    candidates 给定 → 直接用（调用方已 toolbox_for_grade 备好，免二次查库，并保证与注入工具箱同集）；
+    否则按 grade_code / leaf_codes 现查（chapter_scope=True 走按章 lookup_candidates）。
+    取数失败 → model_flag="lookup_unavailable" + model_warn（不卡死、不 M00）。
+    """
+    names = [str(n).strip() for n in (model_names or []) if str(n).strip()]
+
+    # 候选集：调用方给定优先（与注入工具箱同集，最稳）；否则现查。
+    if candidates is None:
+        try:
+            if chapter_scope:
+                candidates = lookup_candidates(leaf_codes or [])
+            else:
+                pfx = _resolve_grade_prefix(leaf_codes or [], grade_code)
+                candidates = lookup_candidates_by_grade(pfx) if pfx else lookup_candidates(leaf_codes or [])
+        except Exception:  # noqa: BLE001 — 库故障：无法对齐 → ⚠ 但不 M00、不卡死（诚实留空 + 标记）
+            return {
+                "models": [], "temp_models": [], "model_overflow": [],
+                "model_warn": True, "model_flag": "lookup_unavailable",
+            }
+    candidates = candidates or []
+    by_name = {str(c.get("name")): c for c in candidates if c.get("name")}
+
+    confirmed: list[dict[str, Any]] = []
+    overflow: list[str] = []
+    seen: set[str] = set()
+    for nm in names:
+        c = _match_name_to_candidate(nm, by_name)
+        if c is None:
+            if nm not in overflow:
+                overflow.append(nm)  # 池外名：留痕（不硬塞 M00、不参与判档）
+            continue
+        cid = str(c.get("id") or "").strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        m_out: dict[str, Any] = {"id": cid, "name": str(c.get("name") or "")}
+        if c.get("tier_int") is not None:
+            m_out["tier_int"] = c.get("tier_int")
+        if c.get("freq_int") is not None:
+            m_out["freq_int"] = c.get("freq_int")
+        if c.get("model_kind"):
+            m_out["model_kind"] = c.get("model_kind")
+        confirmed.append(m_out)
+        if len(confirmed) >= MODELS_MAX:
+            break
+
+    if not confirmed:
+        # 🔴 诚实三态：真无考模型（没给名 / 给了名全匹配不到）→ models:[] + no_model（绝不 M00）。
+        return {
+            "models": [], "temp_models": [], "model_overflow": overflow,
+            "model_warn": bool(overflow), "model_flag": NO_MODEL_FLAG,
+        }
+    return {
+        "models": confirmed, "temp_models": [], "model_overflow": overflow,
+        "model_warn": bool(overflow), "model_flag": ("overflow" if overflow else None),
+    }
+
+
 async def confirm_models(
     stem: str,
     answer: str,
