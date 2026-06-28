@@ -1759,6 +1759,113 @@ def operator_band_from_similarity(coeff: Any) -> dict[str, Any] | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-106 B3·阶段二 PLAN 派工（per-variant fan-out 的「派工台」）。
+#   决策表（§3）：变式系数 = **基准值 + 带内浮动 + 轮换算子**；每道分配各自系数/算子/难度，
+#   保证一组变式有梯度、不互撞。纯函数（零 LLM/零 IO，可单测）—— generate 的 PLAN 子件调它。
+#   🔴 算子轮换用「9 算子」全表（策略定稿 §三），不只是 operator_band 的 3 个代表算子；轮换让
+#      每道用不同算子（多样性靠系统派工，不靠互相看见，编排图设计澄清②）。每道系数据其落带回算
+#      similarity/guidance（与显示一致，AC5/G6：prompt 回填真实系数数字）。
+# ---------------------------------------------------------------------------
+# 9 算子全表（策略定稿 §三）：按相似度从高到低排，带「人话指令」。轮换从基准带的代表算子起、
+#   在其相邻带内取不同算子，保证一组里算子各异（不撞车）。带归属与 _OPERATOR_BANDS 一致。
+_OPERATOR_ROTATION: list[tuple[str, str, str]] = [
+    # (算子名, 相似度带名, 出题人话指令)
+    ("数值", "高", "高仿母题：只换数字/数据/表皮，结构与考法尽量贴母题（像不像≈0.85）"),
+    ("情境", "中", "情境迁移：换应用背景/题面场景，解题结构与考法守恒（像不像≈0.6）"),
+    ("结构", "中", "结构微调：调整已知/所求的呈现顺序或形式，核心考法守恒（像不像≈0.55）"),
+    ("条件增删", "中", "条件增删：增/删一个非核心条件（不动主考点），考法守恒（像不像≈0.5）"),
+    ("逆向", "低", "逆向改造：把已知与所求对调（求解题改判定/反推），考点守恒（像不像≈0.4）"),
+    ("分类讨论", "低", "分类讨论化：引入需分情况的参数/位置，考点守恒（像不像≈0.35）"),
+    ("推广一般化", "低", "推广一般化：把具体数推广成参数/一般情形，考点守恒（像不像≈0.3）"),
+    ("升维", "低", "升维迁移：把一维/平面问题升到更高维或更综合情形，考点守恒（像不像≈0.3）"),
+    ("综合", "中", "适度综合：综合一个相邻知识点为副考点，主考点守恒（像不像≈0.55）"),
+]
+# 带名 → 该带在 _OPERATOR_ROTATION 里的算子索引（轮换优先在基准带内取，再溢出到相邻带）。
+_BAND_OP_INDICES: dict[str, list[int]] = {
+    "高": [0],
+    "中": [1, 2, 3, 8],
+    "低": [4, 5, 6, 7],
+}
+# 浮动步长（基准系数上下各浮动到此幅度内，逐道错开；钳到 [0,1]）。
+VARIANT_COEFF_FLOAT_STEP = 0.06
+
+
+def _band_name_for_coeff(coeff: float) -> str:
+    """系数 → 相似度带名（与 _OPERATOR_BANDS 同口径，纯函数）。"""
+    band = operator_band_from_similarity(coeff)
+    return (band or {}).get("band") or "高"
+
+
+def _float_coeff(base: float, idx: int, n: int) -> float:
+    """基准系数 + 带内浮动：第 idx/n 道在 base 上下错开一个步长（钳到 [0,1]，round 2）。
+
+    n<=1 → 不浮动（单道用基准值）。多道时以 base 为中心对称展开，让一组系数有梯度
+    （高→略低 / 略高），但仍落在基准带附近（不跨出语义带太远）。
+    """
+    base = max(0.0, min(1.0, float(base)))
+    if n <= 1:
+        return round(base, 2)
+    # 以 base 为中心、间隔 STEP 对称展开：idx=0 取最高、末道取最低（与 difficulty md+i 递增同向梯度）
+    span = (n - 1) / 2.0
+    offset = (span - idx) * VARIANT_COEFF_FLOAT_STEP
+    return round(max(0.0, min(1.0, base + offset)), 2)
+
+
+def plan_variant_specs(
+    n: int,
+    base_coeff: Any,
+    expected_difficulties: list[int] | None,
+    mother_difficulty: Any = None,
+) -> list[dict[str, Any]]:
+    """🔴 B3 PLAN 派工（纯函数·零 LLM/零 IO，可单测）：为 N 道变式各分配一份 spec。
+
+    每道 spec = {
+      seq:int(1-based 道序),
+      coeff:float(基准+带内浮动后的本道系数),
+      operator:str(轮换算子，每道不同),
+      band:str(本道系数所属相似度带),
+      guidance:str(本道算子的出题人话指令，prompt 注入用),
+      difficulty:int|None(本道目标难度档，沿用 recipe 的 md+i 递增计划),
+    }
+    🔴 系数据「基准 + 带内浮动」逐道错开（AC5/G6 真分级）；算子轮换保证不撞车（多样性靠派工）。
+    base_coeff 缺/非数 → 回落默认系数 VARIANT_COEFF_DEFAULT。
+    """
+    n = max(1, int(n or 1))
+    try:
+        base = float(base_coeff)
+    except (TypeError, ValueError):
+        base = VARIANT_COEFF_DEFAULT
+    base = max(0.0, min(1.0, base))
+    md = _to_int(mother_difficulty) or 3
+
+    specs: list[dict[str, Any]] = []
+    for i in range(n):
+        coeff = _float_coeff(base, i, n)
+        band = _band_name_for_coeff(coeff)
+        # 算子轮换：在本道系数所属带内取算子，按道序在带内循环（带内只有 1 个则溢出到全表轮换，
+        #   仍保证相邻道不同算子）。优先带内 → 让算子与系数语义一致（系数低就用远迁算子）。
+        band_ops = _BAND_OP_INDICES.get(band) or [0]
+        if len(band_ops) > 1:
+            op_idx = band_ops[i % len(band_ops)]
+        else:
+            # 带内单算子：以带内代表算子为主，但用全表轮换错开（防多道同算子撞车）
+            op_idx = band_ops[0] if i == 0 else (i % len(_OPERATOR_ROTATION))
+        op_name, _op_band, op_guidance = _OPERATOR_ROTATION[op_idx % len(_OPERATOR_ROTATION)]
+        diff: int | None = None
+        if expected_difficulties and i < len(expected_difficulties):
+            diff = expected_difficulties[i]
+        specs.append({
+            "seq": i + 1,
+            "coeff": coeff,
+            "operator": op_name,
+            "band": band,
+            "guidance": op_guidance,
+            "difficulty": diff,
+        })
+    return specs
+
+
 def normalize_two_knobs(conf: dict[str, Any] | None) -> dict[str, Any]:
     """🔴 WS3 纯函数：config.configurable 的双旋钮原值 → 受约束 knobs 增量段。
 
