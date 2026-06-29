@@ -1866,6 +1866,49 @@ def plan_variant_specs(
     return specs
 
 
+def build_variant_memo(spec: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """🔴 PRD-C-107 B2 纯函数（零 LLM/零 IO，可单测）：一道变式的「压缩 memo」（progress 修订2）。
+
+    供「调整=接着聊」重建续聊上下文用——不存全量 message 数组、不开 per-variant thread，只压成
+    一个小 dict 入 items[i]._variant_memo（走 merge_items PRESERVE_ALWAYS 跨轮续上）。
+
+    结构（与契约 §10 per-variant spec 同形 + 产物摘要 + 1-2 行理由）：
+      {
+        spec: {seq, coeff, operator, difficulty_target, qtype},  # 本道派工（重建续聊上下文用）
+        product: {stem, answer},   # 本道产物摘要（让续聊看得见自己 v1，stem/answer 截断防膨胀）
+        rationale: str,            # 1-2 行算子/系数理由（人话，组装续聊 prompt 用）
+      }
+    任何字段缺 → 容缺（spec 用 0/默认、product 取已有键），整体不抛。
+    """
+    spec = spec or {}
+    item = item or {}
+    stem = str(item.get("stem") or "")
+    answer = str(item.get("answer") or "")
+    coeff = spec.get("coeff")
+    operator = str(spec.get("operator") or "")
+    band = str(spec.get("band") or "")
+    diff = spec.get("difficulty")
+    rationale = (
+        f"本道按变式系数 {coeff}（{band}相似度带·算子「{operator}」）出，"
+        + (f"目标难度档 {diff}。" if isinstance(diff, int) else "守母题难度。")
+        + (spec.get("guidance") and f" 算子要义：{spec['guidance']}" or "")
+    )
+    return {
+        "spec": {
+            "seq": spec.get("seq"),
+            "coeff": coeff,
+            "operator": operator,
+            "difficulty_target": diff,
+            "qtype": item.get("qtype"),
+        },
+        "product": {
+            "stem": stem[:600],
+            "answer": answer[:200],
+        },
+        "rationale": rationale.strip(),
+    }
+
+
 def normalize_two_knobs(conf: dict[str, Any] | None) -> dict[str, Any]:
     """🔴 WS3 纯函数：config.configurable 的双旋钮原值 → 受约束 knobs 增量段。
 

@@ -58,6 +58,7 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     _normalize_generated_item,
     _parse_json,
     _to_int,
+    build_variant_memo,  # 🔴 PRD-C-107 B2·per-variant 压缩 memo
     knobs_desc,
     mother_md_from_table,
     normalize_two_knobs,
@@ -512,6 +513,10 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
                             "verify": VERIFY_PENDING, "tier": TIER_PENDING,
                         }
                 kept["_seq"] = seq
+                # 🔴 PRD-C-107 B2·写 per-variant 压缩 memo（progress 修订2）：本道 spec + 产物摘要 +
+                #   算子/系数理由，供「调整=接着聊」重建续聊上下文（看得见自己 v1）。memo 入 items[i]、
+                #   不开 per-variant thread；跨轮重组靠 merge_items PRESERVE_ALWAYS 续上。
+                kept["_variant_memo"] = build_variant_memo(spec, kept)
             results[seq] = kept
             done_n = len([s for s in results if not results[s].get("_dropped")])
             _detail = (
