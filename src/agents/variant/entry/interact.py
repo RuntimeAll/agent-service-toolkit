@@ -34,10 +34,12 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     INTENT_REVISE,
     INTENT_SOLUTION_ONLY,
     PARSE_PROMPT,
+    REGEN_CONTINUE_PROMPT,  # 🔴 PRD-C-107 B2·调整=接着聊 续聊 prompt
     REGEN_PROMPT,
     SOLUTION_ONLY_PROMPT,
     VariantState,
     _ainvoke_text,
+    build_variant_memo,  # 🔴 PRD-C-107 B2·v2 memo 刷新（接着聊后记得自己）
     _budget_bind,
     _budget_exhausted,
     _check_one_item,
@@ -211,6 +213,7 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
     pending_extra = "；".join(_pending_extra_bits)
     targets = []
     notes: dict[int, str] = {}
+    modes: dict[int, str] = {}  # 🔴 PRD-C-107 B2·编辑三态：t → "adjust"(接着聊)|"reopen"(丢掉重出)
     for op in ops:
         if isinstance(op, dict) and op.get("action") == "regenerate":
             try:
@@ -221,6 +224,8 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
                 targets.append(t)
                 if op.get("note"):
                     notes[t] = str(op.get("note"))
+                # mode 缺/非法 → 默认 adjust（validate_instruction 已钳，这里再兜一次）
+                modes[t] = "reopen" if str(op.get("mode")) == "reopen" else "adjust"
 
     drafts_to_discard: list[Any] = []  # 🔴 PRD-A-022：被替换掉的旧草稿 id（未发布）→ 末尾软删
     for t in targets:
@@ -230,29 +235,66 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
         # BUG-001 AC1：note 里含「改成X题」→ 抽出目标题型覆盖 REGEN 的 qtype（REGEN_PROMPT 把
         #   qtype 钉死成入参，不覆盖则改题型形同没改）。抽不出 → 沿用原题型（行为不变）。
         target_qtype = _qtype_from_note(notes.get(t)) or old.get("qtype") or facts["qtype"]
-        regen_text = await _ainvoke_text(
-            [
-                HumanMessage(
-                    content=REGEN_PROMPT.format(
-                        kp_name=facts["kp_name"],
-                        grade=facts["grade"],
-                        stem=(old.get("stem") or "")
-                        + (f"\n额外要求：{extra_req}" if extra_req else ""),
-                        level=old.get("level") or "normal",
-                        qtype=target_qtype,
-                        difficulty=old.get("difficulty") or 3,
-                        injected_kp=json.dumps(old.get("injected_kp"), ensure_ascii=False),
+        # 🔴 PRD-C-107 B2·编辑三态：adjust=接着聊（用本道 memo 重建续聊上下文，看得见自己 v1）
+        #   / reopen=丢掉重开（不读 memo，REGEN_PROMPT 从原题面等价重出）。memo 缺（旧线程/库内
+        #   母题旁路）→ adjust 降级用 old 题面/答案当 v1（功能等价，不卡死）。
+        _mode = modes.get(t, "adjust")
+        if _mode == "adjust":
+            _memo = old.get("_variant_memo") if isinstance(old.get("_variant_memo"), dict) else {}
+            _prod = _memo.get("product") or {}
+            _prev_stem = str(_prod.get("stem") or old.get("stem") or "")
+            _prev_answer = str(_prod.get("answer") or old.get("answer") or "")
+            _prev_rationale = str(_memo.get("rationale") or "（无既有派工记录，按老师要求在原题基础上调整）")
+            _instruction = "；".join(s for s in (notes.get(t), pending_extra) if s) or "在原题基础上微调"
+            regen_text = await _ainvoke_text(
+                [
+                    HumanMessage(
+                        content=REGEN_CONTINUE_PROMPT.format(
+                            kp_name=facts["kp_name"],
+                            grade=facts["grade"],
+                            prev_stem=_prev_stem,
+                            prev_answer=_prev_answer,
+                            prev_rationale=_prev_rationale,
+                            instruction=_instruction,
+                            level=old.get("level") or "normal",
+                            qtype=target_qtype,
+                            difficulty=old.get("difficulty") or 3,
+                            injected_kp=json.dumps(old.get("injected_kp"), ensure_ascii=False),
+                        )
+                        # 🔴 整改1：确定上下文硬约束（接着聊也压解题不越界）。
+                        + "\n\n"
+                        + _context_block(facts)
+                        # 🔴 W2 守恒硬约束注入（T1）：接着聊仍守白名单/考察类型/最难步基因。
+                        + "\n\n"
+                        + _conservation_clause(facts.get("dna"))
                     )
-                    # 🔴 整改1：确定上下文硬约束（重出某道也压解题不越界）。
-                    + "\n\n"
-                    + _context_block(facts)
-                    # 🔴 W2 守恒硬约束注入（T1）：重出仍守白名单/考察类型/最难步基因。
-                    + "\n\n"
-                    + _conservation_clause(facts.get("dna"))
-                )
-            ],
-            model=settings.variant_model("generate"),
-        )
+                ],
+                model=settings.variant_model("generate"),
+            )
+        else:  # reopen=丢掉重开（旧 REGEN 行为，不读 memo）
+            regen_text = await _ainvoke_text(
+                [
+                    HumanMessage(
+                        content=REGEN_PROMPT.format(
+                            kp_name=facts["kp_name"],
+                            grade=facts["grade"],
+                            stem=(old.get("stem") or "")
+                            + (f"\n额外要求：{extra_req}" if extra_req else ""),
+                            level=old.get("level") or "normal",
+                            qtype=target_qtype,
+                            difficulty=old.get("difficulty") or 3,
+                            injected_kp=json.dumps(old.get("injected_kp"), ensure_ascii=False),
+                        )
+                        # 🔴 整改1：确定上下文硬约束（重出某道也压解题不越界）。
+                        + "\n\n"
+                        + _context_block(facts)
+                        # 🔴 W2 守恒硬约束注入（T1）：重出仍守白名单/考察类型/最难步基因。
+                        + "\n\n"
+                        + _conservation_clause(facts.get("dna"))
+                    )
+                ],
+                model=settings.variant_model("generate"),
+            )
         regen = _parse_json(regen_text)
         if isinstance(regen, dict) and regen.get("stem"):
             # 🔴 新题清 check → 必过 solve_explain 才能进 assemble（不变量）
@@ -289,6 +331,33 @@ async def exec_regenerate(state: VariantState, config: RunnableConfig) -> Varian
             new_item["from_edit"] = True
             if t in notes:
                 new_item["edit_note"] = notes[t]
+            # 🔴 PRD-C-107 B2·刷新 per-variant memo（接着聊后这道仍记得自己，供下次再调整）：
+            #   adjust 继承老 memo 的 spec（coeff/operator/难度派工不变，只是产物升级到 v2）；
+            #   reopen 丢老 memo、用本道现状重建一份新 spec（系数/算子信息丢失 → 用 old 现状兜底）。
+            _old_memo = old.get("_variant_memo") if isinstance(old.get("_variant_memo"), dict) else {}
+            _old_spec = _old_memo.get("spec") if isinstance(_old_memo.get("spec"), dict) else {}
+            if _mode == "adjust" and _old_spec:
+                # 继承老 memo 派工（coeff/operator 不变=同一道在调整），产物升级到 v2。
+                # build_variant_memo 读 spec.difficulty/coeff/operator/band/guidance：从老 memo 取，
+                # 难度/题型用本次产物现状覆盖。
+                _carry_spec = {
+                    "seq": _old_spec.get("seq") or new_item.get("_seq"),
+                    "coeff": _old_spec.get("coeff"),
+                    "operator": _old_spec.get("operator") or "",
+                    "band": "",
+                    "guidance": "",
+                    "difficulty": new_item.get("difficulty") or _old_spec.get("difficulty_target"),
+                }
+            else:  # reopen / 无老 memo → 用本道现状重建
+                _carry_spec = {
+                    "seq": new_item.get("_seq"),
+                    "coeff": new_item.get("variant_coeff"),
+                    "operator": new_item.get("variant_operator") or "",
+                    "band": "",
+                    "guidance": "",
+                    "difficulty": new_item.get("difficulty"),
+                }
+            new_item["_variant_memo"] = build_variant_memo(_carry_spec, new_item)
             items[t] = new_item
     # 🔴 PRD-A-022·best-effort 软删被替换掉的旧草稿（绝不阻塞，token 缺/失败仅 log）。
     token = (config.get("configurable") or {}).get("ruoyi_token") if config else None

@@ -269,6 +269,7 @@ from agents.variant.prompts import (  # noqa: E402
     _GRADE_DIFFICULTY_PROMPT,
     PARSE_PROMPT,
     ANSWER_PROMPT,
+    REGEN_CONTINUE_PROMPT,  # 🔴 PRD-C-107 B2·调整=接着聊 续聊 prompt
     SOLUTION_ONLY_PROMPT,
     REVISE_FIELD_PROMPT,
     _REWRITE_SOLVE_PROMPT,
@@ -2889,6 +2890,10 @@ def validate_instruction(parsed: Any, current_item_count: int) -> dict[str, Any]
             if idx is None or not (1 <= idx <= current_item_count):
                 return _clarify(base)  # R3：越界/缺号 → 反问，绝不乱删
             clean["index"] = idx
+            # 🔴 PRD-C-107 B2·编辑三态：regenerate 透传 mode（adjust=接着聊/reopen=丢掉重出）。
+            #   只认这两枚举，其余（缺/非法）一律钳为 "adjust"（默认接着聊更安全：保留老师认可脉络）。
+            if action == "regenerate":
+                clean["mode"] = "reopen" if str(op.get("mode")) == "reopen" else "adjust"
         elif action == "reorder":
             # 🔴 R8（P9·PRD-C-013）：order 必须是 1..N 的**全排列**（长度=N、每号恰一次）。
             #   缺序/重复/越界/混类 → 整体降级 clarify（永不默认重排，与 R3 同哲学）。
