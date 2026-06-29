@@ -674,11 +674,22 @@ async def _reanchor_reuse_first_solve(
             grade_node["code"] = grade_code
         grade_node["confidence"] = max(float(grade_node.get("confidence", 0) or 0), CONF_GATE)
         analysis["grade"] = grade_node
-        if dna.get("qtype"):
+        # 🔴 PRD-C-107 BUG-2 修：三锚里的 qtype 也必须抬置信，否则 _conf_ok（要求 grade/kp/qtype 三锚齐）
+        #   永不过 → mother_confirmed=False → gate_after_classify 走 clarify（而非 await_review）→
+        #   awaiting_mother_review 永不置位 → 老师点「开始举一反三」时 route_entry 落 parse 兜底 = 0 变式。
+        #   根因 = degraded（锚到确认章·待人审）场景里 niche 首解 DNA 常**无 qtype**（opus 未给/被剥）→
+        #   旧实现 `if dna.get("qtype")` 守在缺 qtype 时哑火 → 三锚缺一 → 进不了阶段二。
+        #   修法 = 与 _bounded_degrade_to_chapter 同口径：有真 qtype 用真的；degraded 且无 qtype → 安全
+        #   默认「解答题」（待人审）抬置信，补齐第三锚，让降级母题能进阶段二（铁律④·降级路径不卡死）。
+        #   非 degraded（锚到真叶子）路径保持原行为：无 qtype 不强补（真叶子题理应有 qtype，无则按原逻辑走 clarify）。
+        _qt = dna.get("qtype") or ("解答题" if degraded else "")
+        if _qt:
             qn = dict(analysis.get("qtype") or {})
-            qn["value"] = dna["qtype"]
+            qn["value"] = _qt
             qn["confidence"] = max(float(qn.get("confidence", 0) or 0), CONF_GATE)
             analysis["qtype"] = qn
+            if degraded and not dna.get("qtype"):
+                dna["qtype"] = _qt  # 回填 DNA，FE/下游读到一致的题型（与 _bounded 同口径）
 
     kp_name = (analysis.get("kp") or {}).get("value") or main_kp_name or "?"
     grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
