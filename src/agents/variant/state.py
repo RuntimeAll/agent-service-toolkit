@@ -238,6 +238,10 @@ class VariantState(MessagesState, total=False):
     #   主考点真叶子）→ 闸断/强确认（不静默强锚放行）。记录已就该冲突闸断过的章 id；老师**再次确认
     #   同一章**（坚持）→ 接受强锚放行，不再二次闸断（防死循环）；改成别的章 → 重新走锚定。
     _bug03_gated_chapter: str | None
+    # 🔴 PRD-C-107 BUG-1·防御兜底：classify 重 solve 路径（无首解产物可复用时）对某确认章 solve 失败过
+    #   一次即记此 id；老师再确认同章 → 不再重 solve（已证反复坏 JSON），改 graceful 降级（锚确认章 +
+    #   待人审 + confirmed=True 照常出题），杜绝「确认→重 solve→失败→picker→再确认」无限回环。
+    _resolve_failed_chapter: str | None
     # 🔴 PRD-A-021 R2a·闸4（BUG-04）：母题读图置信极低（< 0.40）/ 章未判出 → resume 轮在 classify
     #   **之前**前置拦截，建议换清晰图，不进 classify 烧 opus token。置 True = 已拦过一次；老师坚持
     #   （再回传 confirmed_chapter_id）→ 放行进 classify（防永久卡死）。

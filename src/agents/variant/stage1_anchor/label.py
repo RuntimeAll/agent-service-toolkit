@@ -250,8 +250,22 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
     #   纯代码重跑闸B（anchor_to_chapter）+ 模型锚，不碰 opus。这样 niche 考点首解成功过 → 重锚必成。
     #   复用前置（全满足才走）：① 有确认章（confirmed_chapter_id，= 重锚语境，非首图首解）；
     #   ② 首解来源是 opus（mother_solve_source=="opus"，排除 analyze 抄图骨架）；③ 首解富文本/DNA 还在
-    #   state（stem 非空 + dna 是 dict + dna.main_kp 有 name）。任一不满足 → 落回原 opus 重 solve 路径
-    #   （首解产物已丢/库内母题/异常态——此时重 solve 是唯一选项，仍吃下方自愈网 + graceful 降级）。
+    #   state（stem 非空 + dna 是非空 dict）。任一不满足 → 落回原 opus 重 solve 路径（首解产物已丢/库内
+    #   母题/异常态——此时重 solve 是唯一选项，仍吃下方自愈网 + graceful 降级）。
+    #
+    #   🔴 PRD-C-107 BUG-1 修：去掉旧 ③ 的「dna.main_kp 有 name」硬前置（root cause）。
+    #     旧实现要求 `_prev_main_kp.get("name")` 非空才走复用——但首解**最常见**的「锚不到叶子」场景里，
+    #     opus 的 primaryKp 常是「有 id 无 name」或干脆为空 → anchor_to_chapter 把 main_kp 收成
+    #     {"id":"","name":""}（被 _kp_obj/anchor 归一）甚至 None → _prev_main_kp 为 None / name 空
+    #     → _reuse_ok=False → **绕过 _reanchor_reuse_first_solve 的 graceful 降级**（该降级正是为这个场景
+    #     设计的，见本函数 doc + _reanchor_reuse_first_solve §557-566），回退到下方第 ~317 行重调 opus
+    #     solve_and_label_resilient → sui-xiang 对 niche 题二次读图坏 JSON、自愈耗尽 → _SolveLabelError
+    #     (parse_only)「反复解析失败」→ 退 picker → 老师再确认 → 又重 solve = **死循环、出 0 变式**。
+    #     根因 = 复用判据把「首解是否成功」误等同于「首解是否锚到叶子」——二者正交：首解成功（产了
+    #     stem + opus DNA）但没锚到叶子，恰恰是该走「复用首解 + 只换锚（锚不到则 graceful 降到确认章）」、
+    #     绝不重 solve 的场景。故复用前置只看「首解产物在不在」（stem + opus + 非空 dna），main_kp 名/id
+    #     的缺失下沉到 _reanchor_reuse_first_solve 内部按 graceful 降级处理（锚到确认章节点 + 待人审）。
+    #     正常路径不受影响：首解 main_kp 锚到了真叶子（name+id 齐）→ 同样走复用、_reanchor 内正常重锚成功。
     _prev_dna = (mother_dna.get("dna") if isinstance(mother_dna.get("dna"), dict) else None) or {}
     _prev_main_kp = _prev_dna.get("main_kp") if isinstance(_prev_dna.get("main_kp"), dict) else None
     _reuse_ok = bool(
@@ -259,8 +273,6 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         and mother_dna.get("mother_solve_source") == "opus"
         and str(mother_dna.get("stem") or "").strip()
         and _prev_dna
-        and _prev_main_kp
-        and str(_prev_main_kp.get("name") or "").strip()
     )
     # 🔴 R2a·闸2（B5b）·range-fingerprint：范围错位才重解（窄子集，绝不全量重解撞 B2 死循环）。
     #   _reuse_ok 成立时再过一道「该不该刷新首解」判据——满足其一才**放弃复用、走全量重 solve**：
@@ -322,9 +334,44 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             on_progress=lambda t: _emit_stage("classify", "锚定考点", "running", t),
         )
     except _VE._SolveLabelError as se:  # 自愈网耗尽（超时/全站失败 或 坏 JSON 重读仍解不出）
+        # 🔴 PRD-C-107 BUG-1·防御兜底（次要硬化，防 picker 死循环）：
+        #   (A) 若 state 里**已有**首解产物（stem + opus + 非空 dna）——理论上 _reuse_ok 已先拦走复用、
+        #       不会落到这里，但万一（边角态）落到，**绝不**重弹 picker 让老师再确认→再重 solve→再失败的
+        #       死循环；直接转 _reanchor_reuse_first_solve 复用首解 + graceful 降级（锚确认章 + 待人审），
+        #       照常进阶段二。这把「首解成功过」的题彻底挡在重 solve 失败回环之外。
+        if (
+            confirmed_chapter_id
+            and mother_dna.get("mother_solve_source") == "opus"
+            and str(mother_dna.get("stem") or "").strip()
+            and _prev_dna
+        ):
+            await client.aclose()
+            _emit_stage("classify", "锚定考点", "warn",
+                        "母题重解未成功，已复用首解结果按所选章锚定（待人审）")
+            return await _reanchor_reuse_first_solve(
+                state=state, analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
+                grade_code=grade_code, chapter_id=chapter_id, leaf_pool=leaf_pool,
+                confirmed_chapter_id=confirmed_chapter_id,
+                include_review_books=include_review_books, knobs=state.get("knobs"),
+            )
+        # (B) 无首解产物可复用（首解从未成功/产物已丢）→ 重 solve 是唯一选项，但**有界**：本确认章已重
+        #   solve 失败过一次（state._resolve_failed_chapter 记过同章）→ 老师再确认同章不再重 solve（已证
+        #   反复坏 JSON），改 graceful 降级：锚到确认章节点 + 待人审 + confirmed=True 照常出题，不再回 picker。
+        _resolve_failed_before = bool(
+            confirmed_chapter_id
+            and str(state.get("_resolve_failed_chapter") or "").strip()
+            == str(confirmed_chapter_id).strip()
+        )
+        if _resolve_failed_before:
+            await client.aclose()
+            return _bounded_degrade_to_chapter(
+                state=state, analysis=analysis, mother_dna=mother_dna,
+                grade_code=grade_code, confirmed_chapter_id=confirmed_chapter_id,
+                chapter_text=chapter_text, knobs=state.get("knobs"),
+            )
         await client.aclose()
-        # 🔴 不卡死、不无限回环：导向可前进的 needs_confirm（弹真章树 picker，让老师重定章后再来），
-        #   而非保留 stale unconfirmed 态让「开始举一反三」静默回 parse。清在途 review 态防误路由。
+        # 🔴 首次失败：导向可前进的 needs_confirm（弹真章树 picker，让老师重定章后再来），并**记下本章已
+        #   失败一次**（_resolve_failed_chapter）——老师再确认同章即走上面 (B) 有界降级，不会无限重 solve。
         reason = "opus 超时/异常" if not se.parse_only else "结果反复解析失败"
         analysis["_mother_opus_error"] = (str(se.last_exc)[:120] if se.last_exc else "opus 返回非 JSON（自愈仍失败）")
         _emit_stage("classify", "锚定考点", "warn", f"母题解题打标{reason}，请确认年级章后重试")
@@ -344,6 +391,9 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             "facts_locked": False,
             "awaiting_mother_confirm": True,   # resume 走 route_entry → classify 重锚（新一次 opus）
             "awaiting_mother_review": False,    # 清 stale review，防「开始举一反三」误路由
+            # 🔴 PRD-C-107 BUG-1·有界护栏：记下本确认章已重 solve 失败一次。老师**再确认同章** →
+            #   上面 (B) 分支接管 → graceful 降级出题，绝不再重 solve（杜绝无限回环）。
+            "_resolve_failed_chapter": confirmed_chapter_id,
             "messages": [AIMessage(content=(
                 f"母题解题打标{reason}了。我已读出年级章范围，**请确认年级与章**后我再重试一次解题打标（"
                 "确认无误回复「确认」，需要修改请直接告诉我正确的年级/章）。"
@@ -534,10 +584,23 @@ async def _reanchor_reuse_first_solve(
 
     # 复用首解 DNA（深拷一份再改锚定字段，不污染 state 原对象）。
     dna = dict(prev_dna)
+    # 🔴 PRD-C-107 BUG-1 修：main_kp 名鲁棒回退链。首解锚不到叶子时 opus 的 primaryKp 可能「有 id 无
+    #   name」或为空 → dna.main_kp.name 为空。旧实现下游 _match_kp_in_pool / graceful 降级都 `if
+    #   main_kp_name` 守，名空则两路都不触发 → main_kp 留 None → confirmed=False → 进不了阶段二（仍卡）。
+    #   现按 prev_dna.main_kp.name → analysis.kp.value（老师纠正/analyze 读出的考点名）→ 中性占位
+    #   「本章重点」逐级兜，保证降级路径恒有「锚到确认章 + 待人审」可走，名只用于显示/守恒注入引用。
     main_kp_name = str((dna.get("main_kp") or {}).get("name") or "").strip()
+    if not main_kp_name:
+        main_kp_name = str((analysis.get("kp") or {}).get("value") or "").strip()
+    # _real_kp_name = 真考点名（首解/老师给的），用于池内重锚匹配；占位「本章重点」只用于显示/守恒，
+    #   绝不拿去 _match_kp_in_pool（避免占位词误命中池内同字叶子）。
+    _real_kp_name = main_kp_name
+    if not main_kp_name:
+        main_kp_name = "本章重点"
 
     # ① 名 → 确认章收窄池重锚 id（首解 main_kp.id 可能空/越界，按名在新池重找）。
-    matched = _VE._match_kp_in_pool(main_kp_name, leaf_pool) if main_kp_name else None
+    #    只用真考点名匹配；名空（首解 main_kp 仅 id 或全空）→ 跳过匹配、直接进 ② 闸B → ③ graceful 降级。
+    matched = _VE._match_kp_in_pool(_real_kp_name, leaf_pool) if _real_kp_name else None
     if matched:
         dna["main_kp"] = {"id": matched, "name": main_kp_name}
     # 副 kp 同理按名在新池补 id（锚不到留原样，闸B 会逐项校验丢越界）。
@@ -554,10 +617,12 @@ async def _reanchor_reuse_first_solve(
     )
     main_kp = dna.get("main_kp") if (dna.get("main_kp") or {}).get("id") else None
 
-    # ③ graceful 降级：老师已确认章，仍锚不到叶子（极端 niche）→ 锚到确认章节点本身 + 待人审，
-    #    不退回 picker 卡死（铁律④）。chapter_id 优先用确认章 id（老师亲选范围）。
+    # ③ graceful 降级：老师已确认章，仍锚不到叶子（极端 niche，含首解 main_kp 名/id 全缺的场景）→
+    #    锚到确认章节点本身 + 待人审，不退回 picker 卡死（铁律④）。chapter_id 优先用确认章 id（老师亲选
+    #    范围）。🔴 PRD-C-107 BUG-1 修：main_kp_name 已恒非空（占位兜底），故 main_kp is None 即触发降级
+    #    （旧 `and main_kp_name` 守在名空时哑火 → 进不了阶段二，现移除）。
     degraded = False
-    if main_kp is None and main_kp_name:
+    if main_kp is None:
         fallback_chap = str(confirmed_chapter_id or chapter_id or grade_code or "").strip()
         if fallback_chap:
             dna["main_kp"] = {"id": fallback_chap, "name": main_kp_name}
@@ -693,4 +758,98 @@ async def _reanchor_reuse_first_solve(
     out["mother_confirm"] = build_mother_confirm({**state, **out})
     _emit_mother_card({**state, **out})  # 母题卡仍先出（复用首解的全字段）
     _emit_figure_stage({**state, **out})  # 🔴 BUG-02：「母题切图」节点据 mother_has_figure 发 done
+    return out
+
+
+def _bounded_degrade_to_chapter(
+    *,
+    state: VariantState,
+    analysis: dict[str, Any],
+    mother_dna: dict[str, Any],
+    grade_code: str | None,
+    confirmed_chapter_id: str | None,
+    chapter_text: str | None,
+    knobs: Any,
+) -> VariantState:
+    """🔴 PRD-C-107 BUG-1·有界降级出题（无首解产物可复用 + 同确认章已重 solve 失败过一次）：
+    重 solve 路径对同一确认章已失败过（_resolve_failed_chapter 记过），老师再确认同章 → **不再重 solve**
+    （已证 niche 题反复坏 JSON 会死循环）。改 graceful 降级：把主考点锚到**老师确认的章节点本身**
+    （chapter_id = 确认章 id，老师亲选范围，非凭空造叶子）+ need_anchor_review=True + confirmed=True，
+    照常进阶段二出变式（守恒注入用确认章范围，仍不超纲）。这是「问过老师两次仍解不出，按其选定范围
+    出题待人审」的有界终止，绝不回 picker（铁律④·闸门必有降级路径 + 防 picker 死循环）。
+
+    与 _reanchor_reuse_first_solve 的 graceful 降级同义，但此处**无 prev_dna 可复用**（首解从未成功
+    或产物已丢），故构造**最小 DNA**（只锚定 + 标记，题面/解答缺，FE 渲染容缺）。母题卡仍先出（让老师
+    看到已据其确认章前进），右栏变式照出。
+    """
+    from agents.variant import _emit_figure_stage, _emit_mother_card
+    from agents import model_anchor  # noqa: F401  保留与 classify 同口径导入语境
+
+    analysis = dict(analysis)
+    mother_dna = dict(mother_dna)
+    kp_node = dict(analysis.get("kp") or {})
+
+    fallback_chap = str(confirmed_chapter_id or grade_code or "").strip()
+    kp_name = str((analysis.get("kp") or {}).get("value") or "").strip() or "本章重点"
+
+    # 复用既有 DNA（若有残片）或起一份最小 DNA，把主考点锚到确认章节点 + 标待人审。
+    dna = dict(mother_dna.get("dna") or {}) if isinstance(mother_dna.get("dna"), dict) else {}
+    dna["main_kp"] = {"id": fallback_chap, "name": kp_name}
+    dna["need_anchor_review"] = True
+    dna.setdefault("secondary_kps", [])
+    # 无首解 → 无 model_candidates → 诚实三态：models 空 + no_model（难度走 grade_observed 降级，绝不 M00）。
+    dna.setdefault("models", [])
+    dna.setdefault("model_overflow", [])
+    dna.setdefault("temp_models", [])
+    if not dna.get("models"):
+        dna["model_flag"] = dna.get("model_flag") or "no_model"
+    mother_dna["dna"] = dna
+    mother_dna["need_anchor_review"] = True
+
+    # 锚到确认章节点 → 抬三锚置信（年级/考点/题型，与 classify/重锚同口径），让定死闸（_conf_ok +
+    #   _pin_status）放行进阶段二。🔴 _conf_ok 要求**三锚齐**（grade/kp/qtype）置信达标 → 题型缺则即便
+    #   锚到章也 confirmed=False、进不了阶段二；无首解产物无 qtype → 给个安全默认「解答题」并抬置信
+    #   （待人审，不阻断有界降级出题）。
+    if fallback_chap:
+        kp_node["anchored"] = {"id": fallback_chap, "code": fallback_chap, "name": kp_name}
+        kp_node["value"] = kp_node.get("value") or kp_name
+        kp_node["confidence"] = max(float(kp_node.get("confidence", 0) or 0), CONF_GATE)
+        analysis["kp"] = kp_node
+        grade_node = dict(analysis.get("grade") or {})
+        if grade_code:
+            grade_node["code"] = grade_code
+        grade_node["confidence"] = max(float(grade_node.get("confidence", 0) or 0), CONF_GATE)
+        analysis["grade"] = grade_node
+        qn = dict(analysis.get("qtype") or {})
+        qn["value"] = qn.get("value") or "解答题"  # 无首解题型 → 安全默认（待人审）
+        qn["confidence"] = max(float(qn.get("confidence", 0) or 0), CONF_GATE)
+        analysis["qtype"] = qn
+        if isinstance(dna, dict):
+            dna.setdefault("qtype", qn["value"])
+
+    grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
+    confirmed = _conf_ok(analysis) and bool(kp_node.get("anchored"))
+    _emit_stage("classify", "锚定考点", "done" if confirmed else "warn",
+                f"考点「{kp_name}」·年级「{grade_name}」（重解未成功，按所选章范围锚定·待人审）")
+    recipe = knobs_desc(knobs) or "未指定，走默认配方（3 道 = 2 普通 + 1 难）"
+    _emit_stage("knobs", "解析配方", "done" if confirmed else "warn", recipe)
+
+    out: VariantState = {
+        "analysis": analysis,
+        "mother_dna": mother_dna,
+        "mother_confirmed": bool(confirmed),
+        "facts_locked": bool(confirmed),
+        "awaiting_mother_confirm": False,
+        "awaiting_mother_review": False,
+        "confirmed_chapter_id": confirmed_chapter_id,
+        "_resolve_failed_chapter": None,   # 已按确认章降级出题，清失败标记（下轮别的纠正不带 stale）
+        "_bug03_gated_chapter": None,
+        "messages": [AIMessage(content=(
+            f"这道母题我反复解题打标没能成功，但已按你确认的章范围「{chapter_text or kp_name}」锚定考点"
+            "出变式（已标「锚定待人审」）。若需要更准的解题，建议换一张更清晰的题图重试。"
+        ))],
+    }
+    out["mother_confirm"] = build_mother_confirm({**state, **out})
+    _emit_mother_card({**state, **out})
+    _emit_figure_stage({**state, **out})
     return out
