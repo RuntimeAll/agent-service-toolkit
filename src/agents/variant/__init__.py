@@ -3330,6 +3330,8 @@ from agents.variant.persist import (  # noqa: E402
     _discard_drafts_best_effort,
     _draft_id_to_discard,
     edit_dna_state,
+    edit_mother_dna_meta,  # 🔴 PRD-C-109 fix·无题组 meta 在位写（去 item 化镜像）
+    edit_mother_dna_regen_noitems,  # 🔴 PRD-C-109 fix·无题组重出/重写维在位写（保持就绪）
     edit_item_state,
     mark_item_manual_block_state,
     persist_one_to_bank,

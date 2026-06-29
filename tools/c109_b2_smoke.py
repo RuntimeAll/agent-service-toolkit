@@ -144,10 +144,12 @@ def test_route_effect_branches():
     st = _variants("加个易错标签")
     ok(route_after_triage(_with_tool(st, "加标签"), _cfg()) == "await_review",
        "加标签(即时生效·有题组) → await_review")
-    # 即时生效 + 无题组（纯母题卡）→ parse（落既有 patch 链改母题级 meta，不丢动作）
+    # 🔴 PRD-C-109 fix·即时生效 + 无题组（母题卡就绪态=举一反三主场景）→ await_review
+    #   （节点已用 edit_mother_dna_meta 去 item 化原地改完），**绝不落 parse 母题全量重解**。
+    #   旧实现「无题组→parse」是根因 bug：标签没加上 + parse 把就绪卡当母题重锚打回存疑 + 反复弹确认。
     cst = _card("加个易错标签")
-    ok(route_after_triage(_with_tool(cst, "加标签"), _cfg()) == "parse",
-       "加标签(即时生效·无题组) → parse（既有 patch 链兜）")
+    ok(route_after_triage(_with_tool(cst, "加标签"), _cfg()) == "await_review",
+       "加标签(即时生效·无题组) → await_review（去 item 化原地改、不落 parse 重解·C-109 fix）")
     # 重写解析（换模型）→ parse
     ok(route_after_triage(_with_tool(_variants("换成判别式法模型"), "换模型"), _cfg()) == "parse",
        "换模型(重写解析) → parse")

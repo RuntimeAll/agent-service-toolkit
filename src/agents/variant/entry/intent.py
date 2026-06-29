@@ -46,11 +46,16 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     _pin_status,
     apply_tool,
     conv_trace,
+    edit_mother_dna_regen_noitems,
     resolve_tool,
     route_entry,
     settings,
 )
 from agents.variant.prompts import TOOL_SELECT_PROMPT  # noqa: E402
+
+# 🔴 PRD-C-109 fix·母题卡就绪态（无题组）可原地写 mother_dna.dna 的「重出/重写」维白名单
+#   （与 persist._MOTHER_REGEN_FIELDS 同口径）。grade(hard_anchor)/main_kp/改题面 不在内 → 走重锚链。
+_NOITEM_REGEN_FIELDS: frozenset[str] = frozenset({"qtype", "exam_type", "scene", "skeleton", "models"})
 
 # 意图枚举（C-108·§10 intent spec；仍是 route_after_triage legacy 路径 + parse 链口径）。
 INTENT_CONFIRM_SCOPE = "确认范围"
@@ -349,9 +354,12 @@ async def classify_intent(state: VariantState, config: RunnableConfig) -> dict[s
 #   （复用现成 edit_dna_state/regen_dirty_items，本层零重写）。
 # ---------------------------------------------------------------------------
 def _meta_apply_index(state: VariantState) -> int | None:
-    """meta 工具原地改母题对象时 edit_dna_state 需要 1-based item index（它写守恒维进 mother_dna）。
-    有题组 → 用第 1 道（守恒维改动对整组生效，index 只决定哪道被标 manual）；
-    无题组（纯母题卡阶段）→ None（edit_dna_state 要求 index≥1；此时不在节点改，交 parse 链）。"""
+    """meta 工具原地改母题对象时的 item index（1-based）。
+    有题组 → 第 1 道（守恒维改动对整组生效，index 只决定哪道被标 manual，走 edit_dna_state）；
+    🔴 PRD-C-109 fix·无题组（母题卡就绪态=举一反三主场景）→ None = 「去 item 化」信号：
+       apply_tool(tool, state, None, value) 走 edit_mother_dna_meta 只改 mother_dna.dna，
+       **绝不再落 parse 母题全量重解**（根因：旧实现无题组时跳过 apply + 路由 parse →
+       标签没加上 + 反复弹确认 + 就绪卡被打回存疑）。"""
     items = state.get("items") or []
     return 1 if items else None
 
@@ -379,22 +387,60 @@ async def intent_triage(state: VariantState, config: RunnableConfig) -> VariantS
     except (TypeError, ValueError):
         conf = 0.0
 
-    # 🔴 即时生效（meta）类 + 高置信 + 有题组 → 节点内原地改一字段（不重跑、不清组、不波及变式 stem）。
+    # 🔴 即时生效（meta）类 + 高置信 → 节点内原地改一字段（不重跑、不清组、不波及变式 stem）。
+    #   🔴 PRD-C-109 fix·有题组 idx=1（走 edit_dna_state 标 manual）；无题组 idx=None（母题卡
+    #      就绪态=举一反三主场景）→ apply_tool 走 edit_mother_dna_meta「去 item 化」原地写 mother_dna.dna。
+    #      两态**都**在此原地改、都不落 parse 重解（根因修：旧实现无题组时跳过 apply→route parse 重解）。
     if (
         spec is not None
         and spec.get("effect") == EFFECT_IMMEDIATE
         and conf >= INTENT_CONF_THRESHOLD
     ):
-        idx = _meta_apply_index(state)
-        if idx is not None:
-            mut_update, _edited, err = apply_tool(
-                tool, state, idx, decision.get("tool_value")
+        idx = _meta_apply_index(state)  # 有题组=1 / 无题组=None（None 触发去 item 化 meta 写）
+        mut_update, _edited, err = apply_tool(
+            tool, state, idx, decision.get("tool_value")
+        )
+        if err is None and mut_update:
+            # 原地合并母题对象字段改动（edit_dna_state / edit_mother_dna_meta 返回的 partial state：
+            #   mother_dna/items/analysis/facts_audit 等），绝不整组清空（§11 状态原地改）。
+            update.update(mut_update)
+            update["intent_decision"] = {**decision, "_applied": True}
+            # 🔴 PRD-C-109 fix·刷新母题卡专帧：改后才让老师**看见**新维（标签真加上）。
+            #   下游 await_review 节点不再 _emit_mother_card（只发 review 阶段灯+文案），故 meta
+            #   原地改后必须在此重发母题卡帧——否则改进了 state 但 FE 不刷新 = 老师以为「没加上/假宣称」。
+            #   _emit_mother_card 体内静默吞（无 runtime context / 组卡空 → no-op，单测直调不炸）。
+            from agents.variant import _emit_mother_card  # noqa: E402  调用期解析（破装载循环）
+            _emit_mother_card({**state, **update})
+        # err 非 None（如 value 抽不干净）→ 不改对象、保留 decision，route_after_triage 据
+        #   「无 _applied」走 await_review（仍留就绪态，绝不掉 parse 重解）。
+
+    # 🔴 PRD-C-109 fix·母题卡就绪态（无题组）+ 重出本题/重写解析维 → 也原地写 mother_dna.dna（保持就绪）。
+    #   背景：举一反三主场景=母题卡就绪、还没点开始（无题组）。此态老师「题型改成填空 / 换解法骨架」
+    #   旧路由落 parse→patch（按 grade/kp/solve 设计的纠正链）→ 误判 qtype/骨架为 solve_note → 清
+    #   mother_dna 全量重解 → 锚不到叶子 → 反复弹确认章、就绪卡被打回存疑。改：母题级守恒维（题型/
+    #   考察类型/场景/骨架/模型）在无题组时原地写 mother_dna.dna，**保持就绪、不重锚、不弹确认、不清组**
+    #   （§2.2②）。grade(hard_anchor)/main_kp 仍走 parse 重锚链（学段变/主考点波及 analysis，语义重）。
+    elif (
+        spec is not None
+        and spec.get("effect") in (EFFECT_REGEN, EFFECT_REWRITE)
+        and conf >= INTENT_CONF_THRESHOLD
+        and not (state.get("items") or [])           # 仅无题组就绪态走在位（有题组仍走既有 parse→重生机器）
+        and isinstance(state.get("mother_dna"), dict) and state.get("mother_dna")  # 母题已立住
+    ):
+        field = spec.get("dna_field")
+        if field in _NOITEM_REGEN_FIELDS:
+            mut_update, _edited, err = edit_mother_dna_regen_noitems(
+                state, field, decision.get("tool_value")
             )
             if err is None and mut_update:
-                # 原地合并母题对象字段改动（edit_dna_state 返回的 partial state：
-                #   mother_dna/items/analysis/facts_audit 等），绝不整组清空（§11 状态原地改）。
                 update.update(mut_update)
                 update["intent_decision"] = {**decision, "_applied": True}
+                from agents.variant import _emit_mother_card  # noqa: E402  调用期解析（破装载循环）
+                _emit_mother_card({**state, **update})
+            # err（value 抽不干净/list-op 复杂）→ 不改、保留 decision；route_after_triage 据「无 _applied」
+            #   仍落 await_review（保持就绪态，绝不掉 parse 重锚把就绪卡打回存疑）。
+        # field 不在无题组在位白名单（grade=hard_anchor / main_kp / 改题面 exec）→ 不在此改，
+        #   交 route_after_triage 既有 parse 重锚链（这些维语义上确需重锚/重出，非根因路径）。
     return update
 
 
@@ -473,15 +519,20 @@ def route_after_triage(state: VariantState, config: RunnableConfig) -> _ROUTE_DE
         items = state.get("items") or []
 
         # ① 即时生效（meta）：mutator 已在 intent_triage 节点改完母题对象 → 停母题卡刷新（不重跑）。
+        #   🔴 PRD-C-109 fix·无题组（母题卡就绪态=举一反三主场景）也走 await_review（节点已用
+        #      edit_mother_dna_meta 去 item 化原地改完）——**绝不再落 parse 母题全量重解**。
+        #      旧实现「无题组→parse」是根因：标签没加上 + parse 把就绪卡当母题重锚打回存疑 + 反复弹确认。
         if effect == EFFECT_IMMEDIATE:
-            # 无题组（节点未能原地改）→ 落 parse 让既有 patch 链改母题级 meta（不丢动作）。
-            if not items:
-                return "parse"
             return "await_review"
 
-        # ② 重写解析 / 重出本题 → parse（既有 patch→重锚/重解链，复用现成 edit_dna_state/regen 机器）。
-        #    set_年级章(hard_anchor) 同走 parse（patch 重锚链清 items 重出，与 B1 mutator 语义一致）。
+        # ② 重写解析 / 重出本题：
+        #    🔴 PRD-C-109 fix·无题组就绪态 + 母题级守恒维（题型/考察类型/场景/骨架/模型）已在节点
+        #       原地写完（intent_decision._applied）→ await_review（保持就绪，不重锚、不弹确认、不打回存疑·§2.2②）。
+        #    其余（有题组 / grade=hard_anchor / main_kp / 改题面 / 节点没能原地改）→ parse
+        #       （既有 patch→重锚/重解链，复用现成 edit_dna_state/regen 机器；这些维语义上确需重锚/重出）。
         if effect in (EFFECT_REWRITE, EFFECT_REGEN):
+            if not items and decision.get("_applied"):
+                return "await_review"
             return "parse"
 
         # ③ 执行类：开始出变式 → generate（母题存疑则停母题卡·AC2）；重新解题/改题面 → parse。

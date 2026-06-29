@@ -166,8 +166,15 @@ def gate_after_classify(state: VariantState) -> Literal["await_review", "clarify
 
     mother_confirmed 由 classify 按同口径（_conf_ok + anchored）置位，这里用 _pin_status
     再加「年级册 code + 非复习册」收口（mother_confirmed=True 但年级 code 缺/是复习册的边角
-    路径也会被本闸拦住，不直通）。"""
+    路径也会被本闸拦住，不直通）。
+
+    🔴 PRD-C-109 fix·确认收口（AC4/§2.2①）：母题已 mother_endorsed（老师明确背书）+ 母题已立住
+       （有 mother_dna）→ 即便重锚后未 pin（degraded/锚不到叶子），也走 await_review（保持就绪、
+       待人审），**不再 clarify 重弹年级章确认**——用户确认 > 代码硬锚，多确认闸收口成一个。
+       承 B3 _reanchor/_bounded 的 endorsed 旁路，把它补到 classify 出口闸（fresh-solve 降级也覆盖）。"""
     if state.get("mother_confirmed") and _pin_status(state)["pinned"]:
+        return "await_review"
+    if state.get("mother_endorsed") and isinstance(state.get("mother_dna"), dict) and state.get("mother_dna"):
         return "await_review"
     return "clarify"
 

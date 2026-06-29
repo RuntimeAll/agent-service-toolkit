@@ -921,6 +921,194 @@ def edit_dna_state(
     return update, it, None
 
 
+# 🔴 PRD-C-109 fix·母题卡就绪态（无题组）即时生效（meta）维的「纯母题级」写入白名单。
+#   = 只写 mother_dna.dna、不需要任何 item 的 EFFECT_IMMEDIATE 维（tags/副考点/难点）。
+#   exam_type/scene 虽也住 mother_dna.dna，但它们是 soft_regen（重出本题/重写解析语义）、
+#   不在「即时生效」工具集里，故不进本表（本表只服务 meta 在位编辑，不旁路重生分流）。
+_MOTHER_META_FIELDS: frozenset[str] = frozenset({"tags", "secondary_kps", "hard_points"})
+
+
+def edit_mother_dna_meta(
+    state: VariantState, field: str, value: Any
+) -> tuple[VariantState, dict[str, Any] | None, str | None]:
+    """🔴 PRD-C-109 fix·母题卡就绪态（无题组）下的「即时生效（meta）维」原地写入。
+
+    根因背景：`edit_dna_state` 用 1-based item index 把守恒维写进 `mother_dna`，并把 manual_edited
+    标到第 index 道——**它要求至少一道 item**（index∈1..len(items)）。但举一反三**主场景**是
+    「母题卡已就绪、还没点开始（无题组）」，此时老师随口「加个易错标签」走不进 edit_dna_state →
+    旧路由把它落 `parse`（母题全量重解）→ 标签没加上、反复弹确认、就绪卡被打回存疑（PRD §0 根因）。
+
+    本函数 = `edit_dna_state` 的 meta 子集「去 item 化」镜像：**只改 mother_dna.dna 该字段**
+    （与 edit_dna_state 逐字同源的 coerce + `_dna_fact_edit` 冻结 setter + 留痕），
+    **绝不重解、绝不重锚、绝不弹确认、绝不清整组**（§11 状态原地改）。tags 是纯 meta（不进
+    冻结 setter）；secondary_kps/hard_points 走 `_dna_fact_edit`（老师来源放行 + audit 留痕）。
+
+    返回 (update, None, error)：edited_item 恒为 None（无 item 可标）；非法 field/value → (空, None, 错误串)。
+    """
+    if field not in _MOTHER_META_FIELDS:
+        # 防误用：非 meta 维（重写解析/重出本题/年级硬锚）须走带 item 的 edit_dna_state / 重生流水线。
+        return {}, None, (
+            f"edit_mother_dna_meta 只服务即时生效（meta）维 {sorted(_MOTHER_META_FIELDS)}，"
+            f"收到「{field}」——非 meta 维须有题组、走 edit_dna_state"
+        )
+    mother_dna = dict(state.get("mother_dna") or {})
+    if not mother_dna:
+        return {}, None, "无母题（mother_dna 空），无法原地改母题级 meta"
+    dna = dict(mother_dna.get("dna") or {})
+    audit = list(state.get("facts_audit") or [])
+    _audit_n0 = len(audit)
+    locked = bool(state.get("facts_locked"))
+    update: VariantState = {}
+
+    if field == "tags":
+        if not isinstance(value, list):
+            return {}, None, "tags 必须是字符串数组"
+        tags = [str(t).strip() for t in value if str(t).strip()]
+        dna["tags"] = tags
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "secondary_kps":
+        raw = value if isinstance(value, list) else [value]
+        sec: list[dict[str, Any]] = []
+        for v in raw:
+            kp, err = _coerce_kp(v)
+            if err:
+                return {}, None, f"secondary_kps 含非法项：{err}"
+            if any(s["id"] == kp["id"] for s in sec):
+                continue  # 去重
+            sec.append(kp)
+        if len(sec) > dna_extract.SECONDARY_KP_MAX:
+            return {}, None, f"副知识点最多 {dna_extract.SECONDARY_KP_MAX} 个（收到 {len(sec)}）"
+        # 守恒维 → 走冻结 setter（老师来源放行 + 留痕；缺口6）——与 edit_dna_state 逐字同源。
+        _dna_fact_edit(
+            mother_dna, "secondary_kps", sec,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna(无题组)",
+        )
+        update["mother_dna"] = mother_dna
+
+    elif field == "hard_points":
+        hp = value
+        if isinstance(hp, str):
+            hp = [hp.strip()] if hp.strip() else []
+        elif isinstance(hp, list):
+            hp = [str(h).strip() for h in hp if str(h).strip()]
+        else:
+            return {}, None, "hard_points 必须是字符串或字符串数组"
+        # 纯标注（meta）：走冻结 setter 留痕，不波及下游、不置 mother_dirty（与 edit_dna_state 同档）。
+        _dna_fact_edit(
+            mother_dna, "hard_points", hp,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna(无题组)",
+        )
+        update["mother_dna"] = mother_dna
+
+    # 🔴 meta 在位改绝不触发 dirty / 重锚 / 重解 / 清 items（§11）：不写 items、不动 mother_confirmed。
+    if len(audit) > _audit_n0:
+        update["facts_audit"] = audit
+    return update, None, None
+
+
+# 🔴 PRD-C-109 fix·母题卡就绪态（无题组）下「重出本题/重写解析」维的「纯母题级」原地写白名单。
+#   这些维 edit_dna_state 写进 mother_dna.dna（守恒维），item 部分（it["qtype"]/it["skeleton"] 等）
+#   在无题组时本就无对象可写、moot。无题组 = 还没出变式 → 没有 dirty 项要标，改母题级 dna 即生效，
+#   等老师点「开始」时变式按新维出（无需重锚、无需把就绪卡打回存疑）。
+#   🔴 不含 grade（hard_anchor·改年级 = 学段/进度变 = 整组失效，legitimately 走重锚，不在此旁路）。
+#   🔴 不含 main_kp（改主考点波及 analysis.kp + 母题脏，语义重，留给既有 edit_dna_state/重锚链，
+#      避免在无题组浅写漏掉 analysis 同步）。models 是题级覆盖维（住 item.models），无题组无对象 →
+#      退写母题 dna.models（与 _read_mother_list/_list_mutator 同源，仅作母题基线，点开始时下传）。
+_MOTHER_REGEN_FIELDS: frozenset[str] = frozenset({"qtype", "exam_type", "scene", "skeleton", "models"})
+
+
+def edit_mother_dna_regen_noitems(
+    state: VariantState, field: str, value: Any
+) -> tuple[VariantState, dict[str, Any] | None, str | None]:
+    """🔴 PRD-C-109 fix·母题卡就绪态（无题组）下「重出本题/重写解析」维原地写 mother_dna.dna。
+
+    背景同 edit_mother_dna_meta：举一反三主场景是「母题卡就绪、还没点开始（无题组）」。此态老师
+    「题型改成填空 / 换个解法骨架」等重出/重写维，旧路由落 parse→patch（按 grade/kp/solve 设计的
+    纠正链）→ 误判 qtype 为 solve_note → 清 mother_dna 全量重解 → 锚不到叶子 → 反复弹确认章、就绪卡
+    被打回存疑。本函数把这些**母题级守恒维**原地写进 mother_dna.dna（与 edit_dna_state 逐字同源的
+    coerce/setter），**保持就绪、绝不重锚、绝不弹确认、绝不清组**——等老师点「开始」时变式按新维出
+    （§2.2②「重出后母题保持就绪」）。
+
+    返回 (update, None, error)；非法 field/value → (空, None, 错误串)。grade/main_kp 不走本函数。
+    """
+    if field not in _MOTHER_REGEN_FIELDS:
+        return {}, None, (
+            f"edit_mother_dna_regen_noitems 只服务母题级重出/重写维 {sorted(_MOTHER_REGEN_FIELDS)}，"
+            f"收到「{field}」（grade/main_kp 走重锚链，不在此旁路）"
+        )
+    mother_dna = dict(state.get("mother_dna") or {})
+    if not mother_dna:
+        return {}, None, "无母题（mother_dna 空），无法原地改母题级维"
+    dna = dict(mother_dna.get("dna") or {})
+    audit = list(state.get("facts_audit") or [])
+    _audit_n0 = len(audit)
+    locked = bool(state.get("facts_locked"))
+    update: VariantState = {}
+
+    if field == "qtype":
+        qt = dna_extract._norm_qtype(value)
+        if qt is None:
+            return {}, None, f"非法题型「{value}」（合法：{'/'.join(dna_extract.QTYPES)}）"
+        dna["qtype"] = qt
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "exam_type":
+        et = str(value or "").strip()
+        if et not in dna_extract.EXAM_TYPES:
+            return {}, None, f"非法考察类型「{value}」（合法：{'/'.join(dna_extract.EXAM_TYPES)}）"
+        _dna_fact_edit(
+            mother_dna, "exam_type", et,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna(无题组)",
+        )
+        update["mother_dna"] = mother_dna
+
+    elif field == "scene":
+        dna["scene"] = str(value or "").strip()
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    elif field == "skeleton":
+        sk = value
+        if isinstance(sk, str):
+            sk = [s for s in sk.split("\n") if s.strip()] or ([sk.strip()] if sk.strip() else [])
+        elif isinstance(sk, list):
+            sk = [str(s).strip() for s in sk if str(s).strip()]
+        else:
+            return {}, None, "skeleton 必须是字符串或字符串数组"
+        _dna_fact_edit(
+            mother_dna, "skeleton", sk,
+            source="teacher", locked=locked, audit=audit, instruction="edit-dna(无题组)",
+        )
+        update["mother_dna"] = mother_dna
+
+    elif field == "models":
+        raw = value if isinstance(value, list) else [value]
+        models: list[dict[str, str]] = []
+        for m in raw:
+            if isinstance(m, dict):
+                mid = str(m.get("id") or "").strip()
+                nm = str(m.get("name") or "").strip()
+            else:
+                mid = str(m or "").strip()
+                nm = ""
+            if not mid and not nm:
+                continue
+            if any(x["id"] == mid and x["name"] == nm for x in models):
+                continue
+            models.append({"id": mid, "name": nm})
+        dna["models"] = models  # 无题组 → 写母题 dna.models 基线（点开始时下传每道变式）
+        mother_dna["dna"] = dna
+        update["mother_dna"] = mother_dna
+
+    # 🔴 无题组重出维原地改：保持就绪（不清 items、不动 mother_confirmed、不置 dirty——无变式可脏）。
+    if len(audit) > _audit_n0:
+        update["facts_audit"] = audit
+    return update, None, None
+
+
 # ---------------------------------------------------------------------------
 # T2·有界 LLM 锚定重做（revise_item）：骨架/场景文本维改写（diff 锁 target，不漂移其余维）
 # 或 whole 整题重出（走 REGEN + 闸B sympy 重验）。

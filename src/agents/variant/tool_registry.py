@@ -31,8 +31,13 @@ from collections.abc import Callable
 from typing import Any
 
 from agents import dna_extract
-from agents.variant import edit_dna_state, regen_class_of
+from agents.variant import edit_dna_state, edit_mother_dna_meta, regen_class_of
 from agents.variant.state import VariantState
+
+# 🔴 PRD-C-109 fix·即时生效（meta）维白名单：母题卡就绪态（无题组）可「去 item 化」原地写
+#   （edit_mother_dna_meta 只改 mother_dna.dna、不需 item、不重解/重锚/清组）。
+#   与 persist._MOTHER_META_FIELDS 同口径——这三维是注册表里仅有的 EFFECT_IMMEDIATE 维的 field。
+_NOITEM_META_FIELDS: frozenset[str] = frozenset({"tags", "secondary_kps", "hard_points"})
 
 # ---------------------------------------------------------------------------
 # UI effect 三类（+ 执行/旋钮特例）枚举常量。前端徽章 + 出口路由按 effect 走确定性边。
@@ -74,8 +79,12 @@ Mutator = Callable[[VariantState, int, Any], "tuple[VariantState, dict[str, Any]
 
 
 def _scalar_mutator(field: str) -> Mutator:
-    """标量维 mutator：直接把值写进 edit_dna_state（field 一一对应契约 key）。"""
-    def _fn(state: VariantState, index: int, value: Any):
+    """标量维 mutator：直接把值写进 edit_dna_state（field 一一对应契约 key）。
+    🔴 PRD-C-109 fix·index=None（母题卡就绪、无题组）+ meta 维 → 去 item 化原地写 mother_dna.dna
+       （edit_mother_dna_meta），绝不重解/重锚。非 meta 维无题组无意义（重生须有题组），照旧报错。"""
+    def _fn(state: VariantState, index: Any, value: Any):
+        if index is None and field in _NOITEM_META_FIELDS:
+            return edit_mother_dna_meta(state, field, value)
         return edit_dna_state(state, index, field, value)
     _fn.__name__ = f"mutate_{field}"
     return _fn
@@ -100,7 +109,7 @@ def _list_mutator(field: str, op: str) -> Mutator:
       - del     ：value = 要删的一项（按标签字面 / kp.id / model.id|name 匹配删）
       - replace ：value = {"old":旧项, "new":新项} 或直接 value=新项（整组换成单项）
     """
-    def _fn(state: VariantState, index: int, value: Any):
+    def _fn(state: VariantState, index: Any, value: Any):
         # models 读题级 item（edit_dna_state 把 models 落 item.models），其余读母题 dna
         if field == "models":
             items = list(state.get("items") or [])
@@ -116,6 +125,10 @@ def _list_mutator(field: str, op: str) -> Mutator:
         new_list, err = _apply_list_op(cur, op, value, field)
         if err:
             return {}, None, err
+        # 🔴 PRD-C-109 fix·母题卡就绪态（无题组）+ meta list 维（tags/secondary_kps）→ 去 item 化
+        #    原地写 mother_dna.dna（list 现值已在上面从母题 dna 读出、加/删/换好整列表）。
+        if index is None and field in _NOITEM_META_FIELDS:
+            return edit_mother_dna_meta(state, field, new_list)
         return edit_dna_state(state, index, field, new_list)
 
     _fn.__name__ = f"mutate_{field}_{op}"
@@ -261,7 +274,7 @@ def resolve_tool(tool_name: str) -> dict[str, Any] | None:
 
 
 def apply_tool(
-    tool_name: str, state: VariantState, index: int, value: Any
+    tool_name: str, state: VariantState, index: int | None, value: Any
 ) -> "tuple[VariantState, dict[str, Any] | None, str | None]":
     """便捷执行：查表取 mutator 并执行。
 
@@ -269,6 +282,9 @@ def apply_tool(
     - 未知工具 → (空, None, 错误串)
     - 执行类/旋钮类（fn=None）→ (空, None, 提示串)：调用方应据 effect 路由到流水线/旋钮，
       不该调本函数改单维（防误用）。
+    🔴 PRD-C-109 fix·index=None = 母题卡就绪态（无题组）：meta 维（tags/副考点/难点）走
+       去 item 化原地写（edit_mother_dna_meta），edited_item 恒 None；非 meta 维 index=None
+       会被 edit_dna_state 的 index 范围闸拒（重生本就需要题组），符合语义。
     """
     spec = TOOL_REGISTRY.get(tool_name)
     if spec is None:
