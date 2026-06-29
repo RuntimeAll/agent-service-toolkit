@@ -230,7 +230,10 @@ def test_legal_regenerate_with_note_and_string_index():
         }
     )
     assert out["intent"] == INTENT_EDIT
-    assert out["ops"] == [{"action": "regenerate", "index": 1, "note": "easier numbers"}]
+    # 🔴 PRD-C-107 B2·编辑三态：regenerate op 现带 mode（缺/非法 → 默认 adjust=接着聊）。
+    assert out["ops"] == [
+        {"action": "regenerate", "index": 1, "note": "easier numbers", "mode": "adjust"}
+    ]
 
 
 def test_legal_multi_op_same_action_class_kept():
