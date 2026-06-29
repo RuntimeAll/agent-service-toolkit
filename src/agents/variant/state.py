@@ -51,6 +51,13 @@ _ITEMS_PRESERVE_ALWAYS: tuple[str, ...] = (
     "question_id",      # FE 进 A-015 编辑器用
     "manual_edited",    # 老师手改印记（重生前二次确认 + 闸B 不回炉）
     "manual_block",     # 老师手动排版印记
+    # 🔴 PRD-C-107 B2·per-variant 压缩 memo（progress 修订记录2）：每道变式的「接着聊」续聊载荷
+    #   = {spec(seq/coeff/operator/difficulty_target/qtype) + 产物摘要(stem/answer) + 1-2 行算子/系数
+    #   理由}。**不开 per-variant thread_id**（避 A3 checkpoint 竞态 + 守 langgraph 状态最小）——
+    #   memo 入 items[i]、跨轮重组靠本 reducer 按 _seq PRESERVE_ALWAYS 续上（节点重组漏带也不丢）。
+    #   「调整=接着聊」用 [MotherCoreRef facts + 该道 memo + 新指令] 重建续聊上下文（看得见自己 v1）。
+    #   重出/新增不读旧 memo（重出丢弃重写新 memo；新增 spawn 新 memo）。
+    "_variant_memo",
 )
 _ITEMS_PRESERVE_IF_SAME_STEM: tuple[str, ...] = (
     "figure_url",       # 变式配图 OSS url：仅题面未变才续（题面变=旧图失效，不嫁接）
