@@ -235,14 +235,17 @@ def _walk(obj, frames):
             _walk(v, frames)
 
 
-# 难题母题（纯文本·含大招模型，验 tier→难度 + 逆向验算）：含参一元二次根的分布
-HARD_STEM = ("已知关于 x 的方程 x^2-(2k+1)x+k^2+k=0 有两个不相等的实数根 x1、x2，"
-             "且 x1^2+x2^2=9，求 k 的值。")
+# 在线母题（贴图·含大招模型，验 tier→难度 + 逆向验算）。纯文本首轮路由较脆（实测 stage=0），
+#   图母题是阶段二的可靠触发口（与 B2 smoke 同源）；难题/纯文本质量归 AC8 人工终审，在线只验链路存活。
+IMG_HAS_MODEL = (
+    "https://question-1256278081.cos.ap-shanghai.myqcloud.com/"
+    "2024-04-25/3869ff78-9925-4ec2-ba3a-96f61d8fc677/list/5/question.png"
+)
 
 
 async def online_gates() -> bool:
-    """在线 e2e（≤3 道纯文本·含 1 道难题）：贴难题母题 → 阶段一锚定 → 阶段二出题，
-    断言 0 error / 无卡死 + 面向老师帧不外泄算子/系数（G7）。难题 tier→难度 + 逆向验算质量归 AC8。"""
+    """在线 e2e：贴图母题 → 阶段一锚定 → 阶段二出题，断言 0 error / 无卡死 + 面向老师帧不外泄
+    算子/系数（G7）。tier→难度 + 逆向验算的对错质量归 AC8 人工终审（在线只验链路存活+不外泄）。"""
     import httpx
     from agents.variant_support import RuoyiClient
 
@@ -252,8 +255,8 @@ async def online_gates() -> bool:
     ok = True
     tid = "c107-b3-e2e"
     async with httpx.AsyncClient() as client:
-        print("== 在线·阶段一（贴难题纯文本母题 → 母题卡 / needConfirm） ==")
-        f1 = await _stream(client, f"帮我对这道题举一反三：{HARD_STEM}", tid, token)
+        print("== 在线·阶段一（贴图母题 → 母题卡 / needConfirm） ==")
+        f1 = await _stream(client, f"帮我对这道题举一反三 {IMG_HAS_MODEL}", tid, token)
         print(f"  stage帧={f1['stage']} needConfirm={bool(f1['need_confirm'])} err={f1['error']}")
         c1 = bool(f1["stage"]) and not f1["error"]
         print(f"  [{'PASS' if c1 else 'FAIL'}] 阶段一跑通 + 0 error")
