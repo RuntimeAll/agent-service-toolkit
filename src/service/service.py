@@ -569,6 +569,11 @@ class VariantFigureInput(BaseModel):
     #   此前死锁 str → pydantic v2 在请求校验层拒 int = 422（走不到 handler 内的降级兜底，
     #   配图全挡）。coerce 成 str 落地（compose 仅用作 stem 后缀 + 回显，str 安全）。
     item_id: int | str | None = None
+    # 🔴 PRD-C-110 B2·渲染切：format 选配图产出形态。
+    #   "png"（默认/缺省=向后兼容）→ 旧 GeoGebra 命令 → mathfig 渲染 → PNG base64（批量/兜底路径）。
+    #   "dsl"（compose_variant 专用）→ opus 直出中性几何 JSON DSL（过 schema 闸）→ 客户端 GeoEngine 渲活图。
+    #   仅对 mode=compose_variant 生效；crop_mother 不分流（始终切原图出 PNG）。
+    format: str | None = None
 
     @field_validator("item_id", mode="before")
     @classmethod
@@ -722,14 +727,26 @@ async def variant_compose_figure(input: VariantFigureInput) -> dict[str, Any]:
             # 🔴 PRD-A-021 R3b·章节×图型定型闸：BE 自取母题章节名 + 考点名传 compose（FE 不必传）。
             #   compose 据此查 biz_chapter_figure_map 取允许图型集约束 opus；取不到/无映射 → 逃生（不约束）。
             _chapter, _kp = await _lookup_chapter_kp(input.thread_id)
-            result = await compose.compose_variant_figure(
-                stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
-                parse_json=_parse_json, correction_prompt=input.correction_prompt,
-                prev_commands=input.prev_commands,  # 🔴 PRD-C-100 C：图片重生带上一版命令 → 增量改图
-                item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
-                figure_spec=figure_spec,  # 🔴 PRD-A-018 治本A：出题产的配图自然语言描述（权威画什么）
-                chapter=_chapter, kp=_kp,  # 🔴 PRD-A-021 R3b：章节×图型定型闸入参（add/regen/库内母题主路径）
-            )
+            # 🔴 PRD-C-110 B2·渲染切：format=dsl → opus 直出中性 DSL（过 schema 闸），不渲染、不出 PNG
+            #   （渲染留客户端 GeoEngine 活图）。同样的输入契约（figure_spec 权威 / 章节×图型定型闸 /
+            #   预算护栏 / 退化提示），只是 system 头换成 DSL 生成器。任何失败照样 needs_figure 降级（G11）。
+            if (input.format or "").lower() == "dsl":
+                result = await compose.compose_variant_dsl(
+                    stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
+                    parse_json=_parse_json, correction_prompt=input.correction_prompt,
+                    item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
+                    figure_spec=figure_spec,
+                    chapter=_chapter, kp=_kp,
+                )
+            else:
+                result = await compose.compose_variant_figure(
+                    stem=input.stem, answer=input.answer, invoke=_ainvoke_text,
+                    parse_json=_parse_json, correction_prompt=input.correction_prompt,
+                    prev_commands=input.prev_commands,  # 🔴 PRD-C-100 C：图片重生带上一版命令 → 增量改图
+                    item_id=input.item_id, model=settings.VARIANT_MODEL_FIGURE,
+                    figure_spec=figure_spec,  # 🔴 PRD-A-018 治本A：出题产的配图自然语言描述（权威画什么）
+                    chapter=_chapter, kp=_kp,  # 🔴 PRD-A-021 R3b：章节×图型定型闸入参（add/regen/库内母题主路径）
+                )
             # 🔴 B4 经验层留痕（图修正）：老师发修正提示词 → 每次都写（只累计 D13）。best-effort。
             if input.correction_prompt:
                 await _exp_write(input.ruoyi_token, edit_kind="图修正",
