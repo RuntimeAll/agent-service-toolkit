@@ -1267,6 +1267,15 @@ async def _run_stage1_continuous(
     if _pre_chap and len(_pre_chap) >= 4:
         grade_code_pool = _pre_chap[:4]
 
+    # 🔴 PRD-C-108 B2③·双料按章收窄判据（AC4）：「老师明确背书了章」才收窄，AI 猜的不收窄。
+    #   biz_subject id 编码：根=4 位（年级册 level1）/ 章=7 位（level2）/ 叶子=完整。preset_chapter_id
+    #   **长于年级册前缀（len>4，即定位到具体章而非仅年级册）= 老师在 picker 选定章 / 打字明说**
+    #   → chapter_scope=True：模型工具箱 + 叶子池都收到该章（用章 id 当前缀反查、拿章叶子 codes）。
+    #   仅给年级册（chapter_id 空 / 4 位）或纯 AI 低置信猜章（无 preset，只 turn1 opus 初判）→ 维持
+    #   年级全量（chapter_scope=False，防丢跨章大招——这是 C-105 故意设计，不破）。
+    _chapter_scope = bool(_pre_chap and len(_pre_chap) > 4 and grade_code_pool)
+    _scope_chapter_id = _pre_chap if _chapter_scope else None
+
     # ===== 双料备料（闭集叶子池 + 模型工具箱，只读 ETL；缺位 → 空注入裸解，铁律④不卡死）=====
     include_review = V._wants_review_books(user_text)
     leaf_pool: list[tuple[str, str]] = []
@@ -1275,15 +1284,28 @@ async def _run_stage1_continuous(
     if grade_code_pool:
         _client = RuoyiClient(token=token)
         try:
+            # 🔴 按章收窄：拿「章 id 当前缀」过滤叶子（leaf_pool_for_grade 按 i.startswith(prefix) 圈，
+            #   传章 id 自然只圈本章叶子）；否则年级全量（传年级册 4 位前缀）。
+            _pool_prefix = _scope_chapter_id if _chapter_scope else grade_code_pool
             leaf_pool = await V.leaf_pool_for_grade(
-                grade_code_pool, _client, include_review_books=include_review
+                _pool_prefix, _client, include_review_books=include_review
             )
         except Exception:  # noqa: BLE001 — 池故障 → 空池（裸标降级，后锚仍在）
             leaf_pool = []
         finally:
             await _client.aclose()
         try:
-            _tb = model_anchor.toolbox_for_grade(grade_code_pool)
+            if _chapter_scope:
+                # 🔴 按章收窄模型工具箱：拿本章叶子 codes 反查（lookup_candidates 按
+                #   `leaf LIKE subject_id%` 圈本章绑定模型，复用 C-105 chapter_scope 语义）；
+                #   章叶子空 → 退年级全量（绝不空池卡死，铁律④降级）。
+                _leaf_codes = [str(i).strip() for i, _ in leaf_pool if str(i).strip()]
+                _tb = (
+                    model_anchor.lookup_candidates(_leaf_codes) if _leaf_codes
+                    else model_anchor.toolbox_for_grade(grade_code_pool)
+                )
+            else:
+                _tb = model_anchor.toolbox_for_grade(grade_code_pool)
             model_toolbox_clause = model_anchor.build_toolbox_clause(_tb)
         except Exception:  # noqa: BLE001 — 工具箱故障 → 空（裸解降级）
             model_toolbox_clause = ""
