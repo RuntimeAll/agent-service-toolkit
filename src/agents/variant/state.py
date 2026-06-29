@@ -249,3 +249,8 @@ class VariantState(MessagesState, total=False):
     #   **之前**前置拦截，建议换清晰图，不进 classify 烧 opus token。置 True = 已拦过一次；老师坚持
     #   （再回传 confirmed_chapter_id）→ 放行进 classify（防永久卡死）。
     _lowconf_blocked: bool
+    # 🔴 PRD-C-108 B1·薄意图层：intent_triage 节点写入的意图分诊结果（§10 intent spec 升级）。
+    #   {intent: 确认范围|调整母题|开始出题|编辑变式|答疑|新任务, correction{field,value},
+    #    edit{target_seq,action}, count, confidence}。route_after_triage 据它确定性派发；
+    #   低置信/无意图 → 回退原 route_entry 代码分诊（安全网）。会话态、checkpointer 持久。
+    intent_decision: dict[str, Any]
