@@ -187,6 +187,7 @@ async def _ainvoke_text(
     response_format: dict[str, Any] | None = None,
     timeout: float | None = None,
     prefer_relay: str | None = None,
+    trace_label: str | None = None,
 ) -> str:
     """ainvoke + 取 content；偶发空返回重试一次。max_tokens≥4096 给思考型留头。
 
@@ -205,7 +206,10 @@ async def _ainvoke_text(
     timeout：per-call 超时上限（秒，PRD-C-017 B1·H4）。仅 model 覆盖时生效；None=不设。
       母题 opus 读图慢，B1 传 ≤180s 防挂死（超时抛 → 上层 SSE error，绝不静默退 gpt-5.4）。
     """
-    label = _trace_label(messages)
+    # 🔴 PRD-C-107 可观测性修复：调用点可显式传 trace_label（连续对话三轮的 system 头一样，
+    #   _trace_label 按头 120 字猜会把三轮全归 unknown / 同一桶 → 消费记录分不清誊抄/解题/打标）。
+    #   显式 label 优先；没传才回退「按头猜」（旧行为不变，所有老调用点零感）。
+    label = trace_label or _trace_label(messages)
     tags = None if public_stream else ["skip_stream"]
     # 用户级/会话级归属：从 graph config 取 thread_id + ruoyi_token(→teacher_id)
     conf = (ensure_config() or {}).get("configurable", {}) or {}

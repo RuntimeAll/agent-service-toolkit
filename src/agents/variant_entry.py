@@ -1195,6 +1195,7 @@ async def _run_stage1_continuous(
                 temperature=mother_opus.MOTHER_OPUS_TEMPERATURE,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
                 prefer_relay=None,  # 🔴 全程 sui-xiang
+                trace_label="mother_entry",  # 🔴 turn1=誊抄+判年级章（消费记录分桶）
             )
         except Exception:  # noqa: BLE001 — turn1 调用异常 → 重试一次
             if _attempt == 0:
@@ -1277,6 +1278,7 @@ async def _run_stage1_continuous(
                 public_stream=True,  # 解题正文流式吐前端（看得见思路）
                 on_reasoning=_emit_reasoning,
                 prefer_relay=None,  # 🔴 全程 sui-xiang（赌注：连续上下文压住漂移；退化则 C107_CONTINUOUS=0）
+                trace_label="mother_solve",  # 🔴 turn2=解题（消费记录分桶）
             )
         except Exception as e:  # noqa: BLE001
             solve_exc = e
@@ -1321,6 +1323,7 @@ async def _run_stage1_continuous(
                 response_format=_rf,
                 timeout=mother_opus.MOTHER_OPUS_TIMEOUT_S,
                 prefer_relay=None,  # 🔴 全程 sui-xiang
+                trace_label="mother_label",  # 🔴 turn3=10维打标（消费记录分桶）
             )
         except Exception as e:  # noqa: BLE001
             opus_exc = e
