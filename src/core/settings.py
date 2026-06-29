@@ -257,6 +257,14 @@ class Settings(BaseSettings):
     #   全程 sui-xiang、图只在 turn1、messages 累积）。关 → 回退旧 R6 三独立调用（决策表 fallback：
     #   若实测 sui-xiang 连续对话解题退化，一键 C107_CONTINUOUS=0 回退到「解题留 aigeek」的 R6）。
     C107_CONTINUOUS: bool = True
+    # 🔴 PRD-C-107 B3·变式验算开关（默认开=LLM 逆向带入）：开 → 闸B（solve_explain/_check_one_item）
+    #   的 pass/fail 判决走「LLM 把答案代回题目机械验算」（_reverse_verify），sympy（math_verify）转
+    #   **dormant**（不删、不跑，仅留作难题升级兜底）。关 → 回退旧 sympy 验算（math_verify.verify）。
+    #   🔴 本开关默认 True **显式覆盖 CLAUDE.md §4③「pass/fail 只读工具(sympy)返回值、永不采信 LLM 自评」**
+    #     —— 依据 PRD-C-107 §11（维护者 2026-06-29 拍板）：逆向带入是「代入算一遍再比对」的机械检查，
+    #     覆盖面比 sympy 载荷抽取广（sympy 只吃得下能抽成结构化载荷的题），比自由自评可信。
+    #   config.configurable.reverse_verify 可逐请求覆盖（优先于 settings），便于单测/回归切回 sympy 验旧行为。
+    VARIANT_REVERSE_VERIFY: bool = True
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
     # 用于算 conv_trace.cost_yuan（实际消费）。留空 → cost 记 NULL（不瞎猜价）。
     RELAY_PRICES: str | None = None
