@@ -89,6 +89,7 @@ def build_mother_prompt(
     leaf_pool: list[tuple[str, str]],
     model_vocab: list[str] | None = None,
     model_toolbox: str | None = None,
+    teacher_note: str | None = None,
 ) -> str:
     """组母题 opus 合并解题+打标 prompt（PREFIX 三注入 + 逐维规则）。
 
@@ -116,6 +117,14 @@ def build_mother_prompt(
     toolbox_block = (
         f"\n================ 可用解题大招工具箱（带料解题） ================\n{model_toolbox}\n"
         if (model_toolbox and model_toolbox.strip()) else ""
+    )
+    # 🔴 BUG-A（PRD-C-107 收尾）：老师对解法的明确要求（指定解法 / 要求重解）注入——重解时按它走。
+    #   适用就用、不适用如实换并说明；不超学段红线仍优先于此（teacher_note 不能突破年级进度）。
+    teacher_note_block = (
+        f"\n================ 🔴 老师对本题解法的要求（请优先遵循） ================\n"
+        f"{teacher_note}\n（若该解法适用就按它解；确实不适用再换更合适的，并在解析里简述原因。"
+        f"无论如何不得超出 {grade_text} 的学段进度。）\n"
+        if (teacher_note and teacher_note.strip()) else ""
     )
 
     # 🔴 R2b·U8 输出段两版：哨兵框（richText 三段走 ⟦STEM⟧/⟦ANSWER⟧/⟦ANALYSIS⟧ 原文，绕 JSON 转义）
@@ -187,7 +196,7 @@ def build_mother_prompt(
 
 ================ 模型词库快照（只读命名参考） ================
 {vocab_text}
-{toolbox_block}
+{toolbox_block}{teacher_note_block}
 ================ 10 维逐维规则 ================
 1. primaryKp 主考点：锚池内叶子（id+name 单值）；锚不到留 id 空 + 真实考点名。
 2. secondaryKps 副考点 0~3：与主不同体系才算、锚池内 id；没有就空数组。

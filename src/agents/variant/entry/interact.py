@@ -106,15 +106,19 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
     if not items:
         prompt += (
             "\n\n【当前语境·最高优先级，覆盖上面所有规则】这一轮还没有出任何题（题组为空）——"
-            "我们刚就母题的年级/考点/题型向老师提了澄清问题，老师这句话是**回答澄清**。"
+            "母题卡已出、还没生成变式，老师正在**调整母题本身**（回答年级/考点澄清、纠正解法、或要求重解）。"
             "此语境下上面『母题 DNA 硬守恒，撞它即 clarify 驳回』的规则**不适用**："
-            "年级/考点正是待老师确认/纠正的项，不存在『改守恒』一说。\n"
-            "判定规则（按此覆盖执行）：\n"
+            "年级/考点/解法正是待老师确认/纠正的项，不存在『改守恒』一说。\n"
+            "判定规则（按此覆盖执行，全部归 intent=修正，统一回到母题阶段重锚/重解，不要判 clarify 把老师的话丢掉）：\n"
             "- 给出年级（如「这个是9年级上的题目」「八下的」）→ intent=修正，"
             "mother_correction.grade=规范化年级（如「九年级上学期」）。\n"
-            "- 给出考点（如「考的是二次函数」）→ intent=修正，mother_correction.kp=该考点。\n"
+            "- 给出考点（如「考的是二次函数」「主考点应该是韦达定理」）→ intent=修正，mother_correction.kp=该考点。\n"
             "- 同时给年级和考点 → 修正，两项都填。\n"
-            "- 真说不清（与年级/考点/题型无关的闲聊）→ clarify。\n"
+            "- 🔴 指定/纠正解法（如「按判别式法解」「用配方法」「这步换成韦达定理」「别用因式分解」）→ "
+            "intent=修正，mother_correction.solve_note=老师对解法的要求（原话归纳），grade/kp 不填（除非也提了）。\n"
+            "- 🔴 要求重新解题/重做母题（如「重新解一下」「再解一遍」「重新做」「这道重解」）→ "
+            "intent=修正，mother_correction.solve_note=「按老师要求重新解题」（grade/kp/其它不填）。\n"
+            "- 真说不清（与年级/考点/解法/重解都无关的闲聊）→ clarify。\n"
             "- 禁止输出任何编辑类 ops（无题可编），禁止判「确认/答疑」。"
         )
     # 🔴 P12.4（PRD-C-013）：parse 是受约束分类器（5 意图闭集 + 物理护栏兜底），nano 足够 →
@@ -755,11 +759,24 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
             audit=audit, instruction=instruction, confidence=0.9, clear_keys=("anchored",),
         )
 
+    # 🔴 BUG-A（PRD-C-107 收尾）：母题卡态（await_review·无 items）下老师【指定/纠正解法】或【要求重解】
+    #   = 母题级调整，过去落不到 grade/kp → changed=False → 被「我没听准你要修正什么」clarify 吞掉
+    #   （症状=老师的话被忽略，母题不变、再点开始仍是旧解）。现把 solve_note 也当母题修正：清确认章
+    #   + 清 mother_dna 首解（迫使 classify _reuse_ok=False 走全量重 solve）+ 把解法要求注入下一次重解
+    #   prompt（_resolve_method_hint）。年级/考点没变也照样触发重解（这正是老师要的「重新解一下」）。
+    solve_note = str(corr.get("solve_note") or "").strip()
+    if solve_note:
+        audit.append(
+            {"field": "solve_note", "value": solve_note, "source": "teacher",
+             "instruction": instruction}
+        )
+        changed = True
+
     if not changed:
         # 没拿到可 patch 的字段 → 退化为 clarify 回问（不空转）
         return {
             "messages": [
-                AIMessage(content="我没听准你要修正什么（年级还是考点？），可以再说一次吗？")
+                AIMessage(content="我没听准你要修正什么（年级、考点，还是解法？），可以再说一次吗？")
             ],
             "pending": None,
         }
@@ -784,6 +801,16 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
     if corr.get("grade"):
         _patch_clear["confirmed_chapter_id"] = None
         _patch_clear["_bug03_gated_chapter"] = None  # 章语境作废，连带清闸3 标记
+    # 🔴 BUG-A：解法修正/重解 → 必须真重解（不是只换锚复用旧首解）。清 confirmed_chapter_id +
+    #   mother_dna 首解 → classify _reuse_ok=False → 全量重 solve（与改年级同口径，走 solve_and_label
+    #   _resilient 自愈网，回炉有界、不引死循环）；解法要求经 _resolve_method_hint 注入重解 prompt。
+    _ack = "已按新的年级/考点重锚，母题卡已更新"
+    if solve_note:
+        _patch_clear["confirmed_chapter_id"] = None
+        _patch_clear["mother_dna"] = None  # 丢弃旧首解 → 迫使重解（而非 _reanchor 复用）
+        _patch_clear["_resolve_method_hint"] = solve_note  # 注入下次 classify 重解 prompt
+        _ack = "已按你的要求重新解题、更新母题卡" if not (corr.get("grade") or corr.get("kp")) \
+            else "已按新的年级/考点重锚并按你的解法要求重解，母题卡已更新"
     return {
         "analysis": analysis,
         "items": [],
@@ -798,7 +825,7 @@ async def patch(state: VariantState, config: RunnableConfig) -> VariantState:
         #   重出须老师确认无误后显式点「开始举一反三」。
         "messages": [
             AIMessage(
-                content="已按新的年级/考点重锚，母题卡已更新；确认无误后点「开始举一反三」重新生成变式。"
+                content=f"{_ack}；确认无误后点「开始举一反三」重新生成变式。"
             )
         ],
     }

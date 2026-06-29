@@ -312,12 +312,16 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         _mtb = model_anchor.build_toolbox_clause(model_anchor.toolbox_for_grade(grade_code))
     except Exception:  # noqa: BLE001 — 工具箱备料失败 → 裸解降级（绝不卡母题主链）
         _mtb = ""
+    # 🔴 BUG-A（PRD-C-107 收尾）：母题卡态老师指定/纠正解法或要求重解 → patch 写 _resolve_method_hint，
+    #   此处全量重 solve 时注入母题 prompt（让重解按老师要求走）。注入后随本节点 return 清空（一次性）。
+    _method_hint = str(state.get("_resolve_method_hint") or "").strip() or None
     prompt = mother_opus.build_mother_prompt(
         grade_text=(analysis.get("grade") or {}).get("value") or grade_code or "",
         chapter_text=chapter_text,
         leaf_pool=leaf_pool,
         model_vocab=None,  # 模型词库快照（只读命名参考）；现阶段缺省，model_anchor 步另锚正式 M-id
         model_toolbox=_mtb,  # 🔴 B1①·带料解题工具箱
+        teacher_note=_method_hint,  # 🔴 BUG-A·老师解法要求（无则 None，行为不变）
     )
     # 🔴 PRD-C-100 B2·重锚自愈网（复用入口 mother_opus_entry 同口径，根治死循环）：旧实现这里只
     #   做「单次 solve_and_label + 单次 _parse_json」——opus 偶发坏 JSON（markdown fence/截断/未转义
@@ -532,6 +536,8 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         #   留痕本次确认章 id（接闸B 用），防下一轮再被 route 当成在途确认。
         "awaiting_mother_confirm": False,
         "confirmed_chapter_id": confirmed_chapter_id,
+        # 🔴 BUG-A：解法要求是一次性的——本轮重解已注入 prompt，消费完即清，不漏到后续轮。
+        "_resolve_method_hint": None,
         "messages": [],
     }
     # 🔴 PRD-C-015 批1·classify 注入点（缺口5 合并确认闸 + D-merge7 确定性异常门控）：

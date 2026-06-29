@@ -154,6 +154,9 @@ class VariantState(MessagesState, total=False):
     #   start_variants=True → route_entry 见信号 + 已有 mother_dna（checkpointer 持久 thread state）
     #   → 直奔 generate（不重跑 classify、不重调 opus，复用 state.mother_dna）。
     awaiting_mother_review: bool
+    # 🔴 BUG-A（PRD-C-107 收尾）：母题卡态老师【指定/纠正解法】或【要求重解】时，patch 写入解法要求，
+    #   classify 全量重 solve 时把它注入母题 opus prompt（让重解按老师指定的解法走）。重解后 classify 清空。
+    _resolve_method_hint: str | None
     # 🔴 PRD-C-106 B2·母题核心参照（MotherCoreRef，契约 §10）：阶段一 → 阶段二的唯一传递物。
     #   compress 节点（STOP1 后、generate 前）把阶段一锚定产物固化成一个不可变参照对象
     #   {version, incomplete, dna(结构化), summary(人话), stem/answer/solution, figure, facts}。
