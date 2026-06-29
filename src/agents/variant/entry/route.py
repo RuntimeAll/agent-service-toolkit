@@ -91,9 +91,23 @@ def route_entry(
     if _editor_op(config) is not None and (state.get("items") or state.get("mother_dna")):
         return "editor_entry"
     url = _extract_image_url(_latest_human_text(state.get("messages", [])))
+    # 🔴 PRD-C-108 B2②·题面已在手 → 同图重发不重读 turn1（AC5，承 BUG-1「复用首解、别重读图」精神）。
+    #   场景：老师纠正母题（改解法/重解/换考点）时 FE 仍把原 OSS 图 URL 带在消息里 → 旧逻辑认作
+    #   「跨轮新图」→ mother_opus_entry 重跑 turn1 读图 + base_out 清 items（既浪费 ~18k token 重读
+    #   同一张已誊抄的题，又把已出的题组清掉）。判据 = 本轮图 URL **等于**已解出母题的 image_url
+    #   且首解产物在手（mother_dna 有 opus 首解 stem）→ 这不是新母题，是同图 + 纠正话 → **不进重读
+    #   入口**，落下面既有 awaiting_*/parse 纠正路径（classify 的 _reanchor_reuse_first_solve 复用首解、
+    #   不重 solve）。仅「同图」才跳过；老师真贴**新图** → url ≠ state.image_url → 照常进 mother_opus_entry
+    #   重读（首次见图必读，边界诚实不破）。无 mother_dna（还没解出过）→ 不是「题面在手」→ 照常进。
+    _same_img_in_hand = bool(
+        url
+        and str(state.get("image_url") or "").strip() == str(url).strip()
+        and isinstance(state.get("mother_dna"), dict)
+        and str((state.get("mother_dna") or {}).get("stem") or "").strip()
+    )
     # 🔴 PRD-C-100 B1a：跨轮新图 = 新母题 → 走塌缩入口 mother_opus_entry（opus 一把判章+解题+打标），
     #   替代旧 analyze→mother_precheck→classify 三节点链（控制流重写）。
-    if url:
+    if url and not _same_img_in_hand:
         return "mother_opus_entry"
     # 🔴 PRD-C-017 B2·母题确认 resume（复用 chat-resume，不引 interrupt）：上一轮 mother_precheck
     #   发了 needConfirm 停在等确认（awaiting_mother_confirm），本轮老师**经 config 回传确认章 id**
