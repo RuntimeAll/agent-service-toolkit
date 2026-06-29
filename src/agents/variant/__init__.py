@@ -3461,6 +3461,19 @@ from agents.variant.entry.interact import (  # noqa: E402
     route_after_parse,
     route_dispatch,
 )
+# 🔴 PRD-C-108 B1：entry/intent.py re-export（薄意图层，wrap-not-rewrite）。intent_triage 节点 +
+#   route_after_triage/route_entry_v2 路由 + classify_intent/mother_in_doubt helper。**必须置于 route +
+#   interact re-export 之后** —— intent.py 顶部从 facade import route_entry/_editor_op/_pin_status/
+#   conv_trace/_ainvoke_text 等（均已上面绑回 facade）。图 wiring 用 route_entry_v2 当新 entry point +
+#   intent_triage 节点 + route_after_triage 条件边（拓扑 +1 节点 +1 条件路由，route_entry 仍当兜底）。
+from agents.variant.entry.intent import (  # noqa: E402
+    INTENT_CONF_THRESHOLD,
+    classify_intent,
+    intent_triage,
+    mother_in_doubt,
+    route_after_triage,
+    route_entry_v2,
+)
 
 # ---------------------------------------------------------------------------
 # 图（StateGraph）wiring + compile

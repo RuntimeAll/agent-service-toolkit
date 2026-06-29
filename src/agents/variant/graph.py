@@ -38,16 +38,21 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     gate_after_classify,
     gene_gate,
     generate,
+    intent_triage,  # 🔴 PRD-C-108 B1·薄意图层节点（route_entry_v2 对话型歧义态进它跑 LLM 分诊）
     mother_opus_entry,
     parse_instruction,
     patch,
     persist_to_bank,
     require_login,
     route_after_parse,
+    route_after_triage,  # 🔴 PRD-C-108 B1·意图 → 现有节点映射 + 低置信回退 route_entry
     route_dispatch,
-    route_entry,
+    route_entry_v2,  # 🔴 PRD-C-108 B1·新 conditional entry point（罩在 route_entry 之上）
     solve_explain,
 )
+
+# 🔴 PRD-C-108 B1：route_entry 不再被 graph.py 直接引用（route_entry_v2 内部包它当兜底）；
+#   conditional entry point 改用 route_entry_v2，route_entry 函数体零改、仍当低置信回退兜底。
 
 graph = StateGraph(VariantState)
 # 🔴 PRD-C-100 B1a 塌缩入口：mother_opus_entry 替代 analyze+mother_precheck（新图入口）。
@@ -56,6 +61,9 @@ graph = StateGraph(VariantState)
 #   但不再注册进图。注意：`analyze` 字符串在 variant_model("analyze") 模型槽 + conv_trace marker
 #   处仍 LIVE，未动。classify 保留 = 低置信确认 resume 的「+1 次 opus 池注入重锚」路径（D3）。
 graph.add_node("mother_opus_entry", mother_opus_entry)
+# 🔴 PRD-C-108 B1·薄意图层节点：route_entry_v2 把「对话型纯文本歧义态」分到这里跑 LLM 分诊，
+#   写 state.intent_decision 后由 route_after_triage 确定性派到现有节点（节点零改）。
+graph.add_node("intent_triage", intent_triage)
 graph.add_node("classify", classify)
 graph.add_node("await_review", await_mother_review)  # B5·母题卡硬停闸（置 awaiting_mother_review + END）
 graph.add_node("clarify", clarify)
@@ -81,8 +89,13 @@ graph.add_node("ask_for_image", ask_for_image)
 graph.add_node("require_login", require_login)
 
 graph.set_conditional_entry_point(
-    route_entry,
+    # 🔴 PRD-C-108 B1·意图层入口（wrap-not-rewrite）：对话型歧义态 → intent_triage（LLM 听懂意图），
+    #   其余一切（auth/编辑 op/新图/按钮 resume/确认章 resume/低置信闸4/库内母题直造）→ 原 route_entry
+    #   确定性分诊（函数体零改）。route_entry_v2 内部直接调 route_entry，返回值集合 = route_entry ∪ {intent_triage}。
+    route_entry_v2,
     {
+        # 🔴 PRD-C-108 B1·意图层节点（对话型歧义态落点）
+        "intent_triage": "intent_triage",
         # 🔴 PRD-C-100 B1a：新图入口 → 塌缩节点（替 analyze）
         "mother_opus_entry": "mother_opus_entry",
         # 🔴 PRD-A-021 R4·F19：'analyze':'analyze' 死映射已删（route_entry 永不返回 'analyze'，
@@ -108,6 +121,27 @@ graph.set_conditional_entry_point(
 )
 graph.add_edge("ask_for_image", END)
 graph.add_edge("require_login", END)
+
+# 🔴 PRD-C-108 B1·意图层出口：route_after_triage 把意图分诊（state.intent_decision）确定性映射到现有
+#   节点。高置信 → 按意图派（开始→generate / 调整母题·编辑·答疑·新任务→parse / 确认范围→await_review）；
+#   母题存疑 → await_review（即便"开始"也先停母题卡解决疑点·AC2）；低置信/无意图 → route_after_triage
+#   内部直接回退 route_entry（返回值落同一组 path_map），故映射目标 = route_entry ∪ {await_review}。
+#   "generate" 同入口口径先经 compress 固化 MotherCoreRef（阶段边界一致，不旁路 C-106 压缩闸）。
+graph.add_conditional_edges(
+    "intent_triage",
+    route_after_triage,
+    {
+        "generate": "compress",          # 开始出题（母题立住）→ 经 compress → generate
+        "await_review": "await_review",  # 确认范围 / 母题存疑停等 → 母题卡硬停（AC2）
+        "parse": "parse_instruction",    # 调整母题 / 编辑变式 / 答疑 / 新任务 → 既有 parse 分诊
+        "classify": "classify",          # 回退·结构化确认章 resume
+        "mother_opus_entry": "mother_opus_entry",  # 回退·新图（理论不可达，意图层不接图轮）
+        "editor_entry": "editor_entry",  # 回退·结构化编辑 op
+        "ask": "ask_for_image",          # 回退·催图
+        "auth": "require_login",         # 回退·登录硬闸
+        "entry_lowconf_block": "entry_lowconf_block",  # 回退·低置信闸4
+    },
+)
 
 # 🔴 PRD-C-104 B5：after_mother_entry（塌缩入口出口路由）已抽到 entry/route.py（纯搬零改），
 #   顶部 re-export 回本模块；图 wiring 引用零感。
