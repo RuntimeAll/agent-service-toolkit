@@ -548,9 +548,18 @@ def route_after_triage(state: VariantState, config: RunnableConfig) -> _ROUTE_DE
             # 重新解题 / 改题面 → parse（既有重解/重排版链；intent_decision 带 correction）。
             return "parse"
 
-        # ④ 旋钮（难度只读·表驱动）→ parse（变式难度旋钮 stage-2，不碰母题、不重解·AC3）。
+        # ④ 旋钮（难度只读·表驱动）→ 变式难度旋钮 stage-2，不碰母题、不重解·AC3。
+        #   🔴 PRD-C-109 收敛修·G3 难度回归：难度旋钮**仅在有题组（stage-2）时落 parse**——
+        #      那条 parse 链是「双旋钮编辑变式」语义（route_after_parse 编辑/答疑分支，不重解母题）。
+        #      🔴 无题组（母题卡就绪态=举一反三主场景）落 parse 会撞 parse_instruction「无题组→intent=修正」
+        #      覆盖块（intent.py 注入 §106-123）→ 难度话被判 REVISE → patch BUG-A 清 mother_dna 全量重解
+        #      （ack「已按你的要求重新解题」= interact.py:812）→ 旋钮没动、刚在位编辑的维被冲、主考点打回未锚定。
+        #      收窄：KNOB + 无题组 → await_review（保持就绪、母题零重解；难度目标由 FE 经
+        #      agent_config.difficulty_target 透传到点「开始」后的 generate 双旋钮，不需此刻动母题·§3 难度只读）。
         if effect == EFFECT_KNOB:
-            return "parse"
+            if items:
+                return "parse"
+            return "await_review"
 
         # 兜底（理论不可达 effect）→ 回退原 route_entry。
         return route_entry(state, config)

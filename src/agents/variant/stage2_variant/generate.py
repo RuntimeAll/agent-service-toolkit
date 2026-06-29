@@ -310,8 +310,16 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     🔴 代码级配方校验 shape_check：不符带缺陷反馈整组 retry 1 次，仍不符 → 接受 +
        shape_defects 外显到题组头部（不卡死，G5）。
     """
-    if not (state.get("mother_confirmed") or _conf_ok(state.get("analysis") or {})):
-        # DNA 闸未过却走到 generate（多入口兜底）→ 拒造，回 clarify 语义
+    # 🔴 PRD-C-109 收敛修·生成门禁认 endorsed（治回归2 = 反复出现的「endorsed+占位主考点点开始出 0 道」硬伤）：
+    #   老师已明确背书母题（mother_endorsed=点「开始举一反三」/确认章/背书按钮）+ 母题已立住（有 mother_dna）→
+    #   即便主考点只到占位「本章重点」/未锚到真叶子，也**照常生成变式**（降级·待人审，不挡路）。
+    #   用户确认 > 代码硬锚，贯穿到生成门禁（承 gate_after_classify / mother_in_doubt 的 endorsed override，
+    #   补到这条 generate 内部三道软闸——它们原只读锚定硬指标、不认背书，是 0 道的真因）。
+    #   待人审仍留痕（_emit_stage warn 注记），只是不阻断 generate。
+    _mdna = state.get("mother_dna")
+    _endorsed_gen = bool(state.get("mother_endorsed")) and isinstance(_mdna, dict) and bool(_mdna)
+    if not _endorsed_gen and not (state.get("mother_confirmed") or _conf_ok(state.get("analysis") or {})):
+        # DNA 闸未过却走到 generate（多入口兜底）→ 拒造，回 clarify 语义（endorsed 旁路上面已放行）
         return {
             "messages": [
                 AIMessage(content="母题 DNA 还没确认，我先不造题。请确认年级/考点/题型。")
@@ -337,14 +345,21 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
         lack = "、".join(
             x for x, m in (("年级", _missing_grade), ("主考点（知识点未锚定）", _missing_kp)) if m
         )
-        _emit_stage("generate", "生成题目", "warn", f"母题未定死（缺{lack}）")
-        return {
-            "messages": [
-                AIMessage(
-                    content=f"母题还没定死（缺{lack}），我不能出题。请先确认年级 + 主考点知识点，我再造变式。"
-                )
-            ]
-        }
+        # 🔴 PRD-C-109 收敛修·endorsed 旁路：老师已背书 + 母题立住 → 缺主考点（占位/未锚叶子）也
+        #   照常生成（降级·待人审），只发 warn 留痕、不阻断。仅缺年级（连册都没有）= 真无法定难度/召回
+        #   → 仍拦（年级是 generate 必需的硬骨架，背书也兜不了）。
+        if _endorsed_gen and not _missing_grade:
+            _emit_stage("generate", "生成题目", "warn",
+                        f"母题{lack}（老师已确认，降级·待人审照常生成）")
+        else:
+            _emit_stage("generate", "生成题目", "warn", f"母题未定死（缺{lack}）")
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"母题还没定死（缺{lack}），我不能出题。请先确认年级 + 主考点知识点，我再造变式。"
+                    )
+                ]
+            }
 
     # 🔴 C3/A-24（PRD-A-018）：进入出题（generate 起跑 / resume 经 route_entry 直奔 generate）时补发一帧
     #   review=STAGE_DONE，让「确认母题」节点善终（之前停在 review=await 等老师点「开始」；老师点了进 generate
@@ -376,8 +391,11 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
 
     facts = facts_from_ref(state)  # 🔴 B2：同上——阶段二吃固化参照，不重算（隔离 + 不读脏）
     # 🔴 W2 守恒守门（T1）：母题 DNA 白名单为空集 → 不放行生成，降级回 clarify 语义（不裸出）。
+    #   🔴 PRD-C-109 收敛修·endorsed 旁路：老师已背书 + 母题立住 → 白名单空（未锚叶子）也照常生成
+    #   （降级·待人审，守恒约束段 _conservation_clause 对空白名单优雅降级=不注入守恒条，变式不受白名单约束），
+    #   只发 warn 留痕、不阻断（用户确认 > 代码硬锚，治回归2 第二道软闸）。
     blocked = _conservation_blocked(facts.get("dna"))
-    if blocked:
+    if blocked and not _endorsed_gen:
         _emit_stage("generate", "生成题目", "warn", "母题知识点未锚定")
         return {
             "messages": [
@@ -386,6 +404,9 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
                 )
             ]
         }
+    if blocked and _endorsed_gen:
+        _emit_stage("generate", "生成题目", "warn",
+                    "母题知识点未锚定（老师已确认，降级·待人审照常生成）")
     # 🔴 PRD-C-103 WS1·AC2：母题起步档 md = 锚定模型查表 经 grade_observed 确定算
     #   （替代 mother_opus dim8 的 LLM 自评 difficulty）。md+i 递增逻辑（recipe_from_knobs L3695）
     #   保留不动，只换 md 来源。降级：无 DNA（库内母题旧线程）→ 回退原 dim8/difficulty 值，不卡死。
