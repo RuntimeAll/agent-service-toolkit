@@ -252,6 +252,11 @@ class Settings(BaseSettings):
     #   打标(R2)/出题/读图/其余一律走默认 sui-xiang（不传 prefer_relay）。prefer_relay 把同名站提候选首位、
     #   其余仍按序 failover（站挂不卡死）。空串/None → 走 RELAY_POOL 默认序（sui-xiang 主），可一键回退。
     MOTHER_SOLVE_RELAY: str | None = "aigeek"
+    # 🔴 PRD-C-107 B1·阶段一连续对话开关（默认开）：开 → mother_opus_entry 走「一条连续对话」
+    #   （SYSTEM 发一次 → turn1 誊抄+初判 ‖ richtext → turn2 双料闭集注入+解题 → turn3 打标，
+    #   全程 sui-xiang、图只在 turn1、messages 累积）。关 → 回退旧 R6 三独立调用（决策表 fallback：
+    #   若实测 sui-xiang 连续对话解题退化，一键 C107_CONTINUOUS=0 回退到「解题留 aigeek」的 R6）。
+    C107_CONTINUOUS: bool = True
     # RELAY_PRICES = JSON：{"<model>": {"in": ¥/1k_prompt_tokens, "out": ¥/1k_completion_tokens}}
     # 用于算 conv_trace.cost_yuan（实际消费）。留空 → cost 记 NULL（不瞎猜价）。
     RELAY_PRICES: str | None = None
