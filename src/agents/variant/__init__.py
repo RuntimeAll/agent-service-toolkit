@@ -3497,6 +3497,7 @@ from agents.variant.tool_registry import (  # noqa: E402
 #   route_entry/_editor_op/_pin_status/conv_trace/_ainvoke_text + EFFECT_*/apply_tool/resolve_tool（均已绑回）。
 from agents.variant.entry.intent import (  # noqa: E402
     INTENT_CONF_THRESHOLD,
+    _endorsed_from_config,  # 🔴 PRD-C-109 B3·确认收口：config endorse 信号判读（classify lift 用）
     classify_intent,
     intent_triage,
     mother_in_doubt,

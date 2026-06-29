@@ -105,6 +105,23 @@ _TOOL_TO_INTENT: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# 🔴 PRD-C-109 B3·确认收口（A3）：老师明确背书母题的 config 信号判读（确定性、无 LLM）。
+#   复用既有「老师确认」语义——FE 经 agent_config 回传：① 显式 mother_endorsed=true（背书按钮）；
+#   ② start_variants=true（点「开始举一反三」= 对母题卡的隐式背书：老师看过母题、决定就用它出变式）；
+#   ③ confirmed_chapter_id（老师亲选章确认 = 对锚定范围的背书）。任一为真即视为「老师确认一次」。
+#   置位后由 intent_triage / classify 节点 lift 进 state（终态、checkpointer 持久）→ mother_in_doubt
+#   恒 False、多确认闸收口成一个（确认即终、不反复弹·AC4）。
+# ---------------------------------------------------------------------------
+def _endorsed_from_config(config: RunnableConfig | None) -> bool:
+    cfg = ((config or {}).get("configurable") or {}) if config else {}
+    return bool(
+        cfg.get("mother_endorsed")
+        or cfg.get("start_variants")
+        or cfg.get("confirmed_chapter_id")
+    )
+
+
+# ---------------------------------------------------------------------------
 # 母题存疑（确定性读 state，无 LLM）：解法骨架未出 / 题型 AI 自己存疑 / 锚定未定死（待人审）
 # → 即便老师点了「开始」也先停在母题卡解决疑点，绝不抢跑 generate（AC2）。
 # 🔴 PRD-C-109 A3：mother_endorsed（老师明确背书）override —— B3 接确认收口（本卡先留闸）。
@@ -343,9 +360,17 @@ async def intent_triage(state: VariantState, config: RunnableConfig) -> VariantS
     """🔴 PRD-C-109 B2·意图层节点：跑工具选择器写 state['intent_decision']；
     即时生效（meta）类工具 + 有题组 → 节点内原地改母题对象一字段（apply_tool 薄包 edit_dna_state）。
     其余工具不在此改业务态（路由到 parse/generate 既有重生机器）。本节点是图里唯一「意图层」节点（拓扑不变）。
+
+    🔴 PRD-C-109 B3·确认收口（A3）：本节点是对话型歧义态的统一入口，把 FE/端点经 config 回传的
+       `mother_endorsed`（老师明确背书）lift 进 state（落 checkpoint 持久）→ 此后 mother_in_doubt
+       恒返回 False、多确认闸收口成一个（用户确认 > 代码硬锚，§11）。一旦置位绝不撤（终态），
+       后续轮即便 config 不再带也由 state 持有。
     """
     decision = await classify_intent(state, config)
     update: VariantState = {"intent_decision": decision, "messages": []}
+    # 🔴 B3·确认收口 lift：endorse 一旦从 config / 既有 state 任一为真 → 终态置位（override mother_in_doubt）。
+    if _endorsed_from_config(config) or state.get("mother_endorsed"):
+        update["mother_endorsed"] = True
 
     tool = decision.get("tool")
     spec = resolve_tool(tool) if isinstance(tool, str) else None

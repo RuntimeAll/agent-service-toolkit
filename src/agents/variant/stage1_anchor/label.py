@@ -47,6 +47,54 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
 )
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-109 B3·降级态打标补全（AC6 标签/解法骨架不空）：母题走降级/待人审路径时 opus 完整
+#   10 维打标没跑完（或 minimal DNA），tags + skeleton 常空 → 母题卡空白。PRD §1⑤⑦「母题降级
+#   也照常打完标」。本函数**确定性**地从已锚定的考点名 / 章 / 题型 / 已有解题文本里派生
+#   兜底 tags（检索标签，真实可用，非编造答案）+ skeleton（用任意已有解法文本），让降级态母题卡
+#   也有标签/骨架。绝不伪造数学答案——只补「检索/结构」性元数据（铁律：禁假数据只禁编造事实，
+#   考点名/章名/题型是已锚定的真值）。已有非空 tags/skeleton 一律保留不动（幂等、不覆盖真打标）。
+# ---------------------------------------------------------------------------
+def _fill_degraded_label(
+    dna: dict[str, Any],
+    mother_dna: dict[str, Any],
+    *,
+    kp_name: str | None,
+    chapter_text: str | None,
+) -> None:
+    """就地给 dna 补 tags + skeleton（仅当空时）。纯确定性、无 LLM。"""
+    # ① tags 兜底：考点名 + 章名 + 题型/考察类型（去重、非空、≤6）。这些都是已锚定真值，可作检索标签。
+    cur_tags = [str(t).strip() for t in (dna.get("tags") or []) if str(t).strip()]
+    if not cur_tags:
+        cand = [
+            str(kp_name or "").strip(),
+            str(chapter_text or "").strip(),
+            str(dna.get("qtype") or "").strip(),
+            str(dna.get("exam_type") or "").strip(),
+        ]
+        seen: set[str] = set()
+        fallback_tags: list[str] = []
+        for c in cand:
+            if c and c not in seen and c not in ("?", "本章重点"):
+                seen.add(c)
+                fallback_tags.append(c)
+        if fallback_tags:
+            dna["tags"] = fallback_tags[:6]
+    # ② skeleton 兜底：用任意已有解题文本（mother_dna.solution_skeleton / answer / dna.skeleton）。
+    cur_sk = dna.get("skeleton")
+    has_sk = bool(cur_sk) if isinstance(cur_sk, list) else bool(str(cur_sk or "").strip())
+    if not has_sk:
+        src = (
+            mother_dna.get("solution_skeleton")
+            or mother_dna.get("solved_answer")
+            or mother_dna.get("answer")
+            or ""
+        )
+        if isinstance(src, str) and src.strip():
+            # 按行切成步骤序列（与 opus_to_dna 的 skeleton:list[str] 同形态）。
+            dna["skeleton"] = [s.strip() for s in str(src).split("\n") if s.strip()] or [src.strip()]
+
+
 def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """🔴 PRD-C-014 B4·FE DNA 面板数据源：每个 artifact item 的嵌套 `dna` 对象（键名钉死，
     FE pickDna 按此解析）。组级维度（main_kp/secondary_kps/exam_type/tags/scene/skeleton）来自
@@ -144,6 +192,13 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         or state.get("confirmed_chapter_id")
     )
     confirmed_chapter_id = str(confirmed_chapter_id).strip() if confirmed_chapter_id else None
+
+    # 🔴 PRD-C-109 B3·确认收口（A3/AC4）：把老师背书信号 lift 进本节点（confirmed_chapter_id /
+    #   start_variants / 显式 mother_endorsed 任一即背书；进 classify 本就是「老师确认那一轮」语境）。
+    #   置位后随各 return 落 state（终态、checkpointer 持久）→ 下游 _reanchor/_bounded 的闸3 一律放行、
+    #   mother_in_doubt 恒 False，多确认闸收口成一个。一旦 True 绝不撤（已 endorse 的母题不再反复弹）。
+    from agents.variant import _endorsed_from_config  # noqa: E402  运行期解析（避免装载循环）
+    _endorsed = bool(state.get("mother_endorsed")) or _endorsed_from_config(config)
 
     # --- 两步锚定第一步：定年级 code（确认章前缀优先，老师背书压过 analyze 图读） ---
     if confirmed_chapter_id and len(confirmed_chapter_id) >= 4:
@@ -297,7 +352,9 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         _resolve_needed = bool(_fp) and bool(_new_book) and _new_book != _fp
     if _reuse_ok and not _resolve_needed:
         return await _reanchor_reuse_first_solve(
-            state=state, analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
+            # 🔴 B3·确认收口：把 endorse 终态注入 state，让闸3 一律放行（_reanchor 读 state.mother_endorsed）。
+            state={**state, "mother_endorsed": _endorsed} if _endorsed else state,
+            analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
             grade_code=grade_code, chapter_id=chapter_id, leaf_pool=leaf_pool,
             confirmed_chapter_id=confirmed_chapter_id, include_review_books=include_review_books,
             knobs=state.get("knobs"),
@@ -353,7 +410,8 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
             _emit_stage("classify", "锚定考点", "warn",
                         "母题重解未成功，已复用首解结果按所选章锚定（待人审）")
             return await _reanchor_reuse_first_solve(
-                state=state, analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
+                state={**state, "mother_endorsed": _endorsed} if _endorsed else state,
+                analysis=analysis, mother_dna=mother_dna, prev_dna=_prev_dna,
                 grade_code=grade_code, chapter_id=chapter_id, leaf_pool=leaf_pool,
                 confirmed_chapter_id=confirmed_chapter_id,
                 include_review_books=include_review_books, knobs=state.get("knobs"),
@@ -369,7 +427,8 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         if _resolve_failed_before:
             await client.aclose()
             return _bounded_degrade_to_chapter(
-                state=state, analysis=analysis, mother_dna=mother_dna,
+                state={**state, "mother_endorsed": _endorsed} if _endorsed else state,
+                analysis=analysis, mother_dna=mother_dna,
                 grade_code=grade_code, confirmed_chapter_id=confirmed_chapter_id,
                 chapter_text=chapter_text, knobs=state.get("knobs"),
             )
@@ -538,6 +597,8 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         "confirmed_chapter_id": confirmed_chapter_id,
         # 🔴 BUG-A：解法要求是一次性的——本轮重解已注入 prompt，消费完即清，不漏到后续轮。
         "_resolve_method_hint": None,
+        # 🔴 B3·确认收口：endorse 终态落 state（confirmed_chapter_id 那一轮即背书），持久到下游。
+        "mother_endorsed": _endorsed,
         "messages": [],
     }
     # 🔴 PRD-C-015 批1·classify 注入点（缺口5 合并确认闸 + D-merge7 确定性异常门控）：
@@ -707,10 +768,17 @@ async def _reanchor_reuse_first_solve(
     #   fresh classify 路锚不到本就走 confirmed=False→clarify（安全），不在此被误伤。
     #   防死循环：老师**第二次确认同一章**（FE 再回传同一 confirmed_chapter_id）→ 视为坚持 → 接受强锚
     #   放行（_bug03_gated_chapter 记过该章，本轮等于）。换别的章 → 重新锚定（_should_resolve/复用再判）。
+    # 🔴 PRD-C-109 B3·确认收口（AC4）：老师明确背书母题（mother_endorsed）= 用户确认 > 代码硬锚 →
+    #   闸3 冲突一律放行（不再「再确认一次」），多确认闸收口成一个、确认即终。endorse 已由 classify
+    #   入口经 config lift 进 state（本函数无 config 入参，只读 state.mother_endorsed 即终态）。
+    _endorsed = bool(state.get("mother_endorsed"))
     _bug03_insisted = bool(
-        degraded
-        and confirmed_chapter_id
-        and str(state.get("_bug03_gated_chapter") or "").strip() == str(confirmed_chapter_id).strip()
+        _endorsed
+        or (
+            degraded
+            and confirmed_chapter_id
+            and str(state.get("_bug03_gated_chapter") or "").strip() == str(confirmed_chapter_id).strip()
+        )
     )
     if degraded and not _bug03_insisted:
         _emit_stage("classify", "锚定考点", "warn",
@@ -761,6 +829,13 @@ async def _reanchor_reuse_first_solve(
         ))]
         if degraded else []
     )
+    # 🔴 PRD-C-109 B3·AC6：降级/复用态母题也「照常打完标」——补兜底 tags + skeleton（仅当空时），
+    #   防母题卡标签/解法骨架空白。复用首解 prev_dna 通常已带 tags（首解打过标）；niche degraded 兜底。
+    _chap_for_tag = str((analysis.get("chapter") or {}).get("value") or "").strip() if isinstance(
+        analysis.get("chapter"), dict
+    ) else None
+    _fill_degraded_label(dna, mother_dna, kp_name=_real_kp_name or kp_name, chapter_text=_chap_for_tag)
+    mother_dna["dna"] = dna
     out: VariantState = {
         "analysis": analysis,
         "mother_dna": mother_dna,
@@ -770,6 +845,8 @@ async def _reanchor_reuse_first_solve(
         "confirmed_chapter_id": confirmed_chapter_id,
         # 闸3 放行后清闸断标记（下次别的纠正不带 stale）。
         "_bug03_gated_chapter": None,
+        # 🔴 B3·确认收口：endorse 终态随复用/降级态落 state（已 endorse 的母题不再反复弹）。
+        "mother_endorsed": bool(state.get("mother_endorsed")),
         "messages": _conflict_msgs,
     }
     out["mother_confirm"] = build_mother_confirm({**state, **out})
@@ -844,6 +921,11 @@ def _bounded_degrade_to_chapter(
         if isinstance(dna, dict):
             dna.setdefault("qtype", qn["value"])
 
+    # 🔴 PRD-C-109 B3·AC6：有界降级态母题也「照常打完标」——补兜底 tags + skeleton（仅当空时），
+    #   防母题卡标签/解法骨架空白（minimal DNA 本就没 tags/skeleton）。考点名/章/题型是已锚定真值。
+    _fill_degraded_label(dna, mother_dna, kp_name=kp_name, chapter_text=chapter_text)
+    mother_dna["dna"] = dna
+
     grade_name = (analysis.get("grade") or {}).get("value") or grade_code or "?"
     confirmed = _conf_ok(analysis) and bool(kp_node.get("anchored"))
     _emit_stage("classify", "锚定考点", "done" if confirmed else "warn",
@@ -861,6 +943,8 @@ def _bounded_degrade_to_chapter(
         "confirmed_chapter_id": confirmed_chapter_id,
         "_resolve_failed_chapter": None,   # 已按确认章降级出题，清失败标记（下轮别的纠正不带 stale）
         "_bug03_gated_chapter": None,
+        # 🔴 B3·确认收口：endorse 终态随有界降级态落 state（老师已确认章前进，不再反复弹）。
+        "mother_endorsed": bool(state.get("mother_endorsed")),
         "messages": [AIMessage(content=(
             f"这道母题我反复解题打标没能成功，但已按你确认的章范围「{chapter_text or kp_name}」锚定考点"
             "出变式（已标「锚定待人审」）。若需要更准的解题，建议换一张更清晰的题图重试。"
