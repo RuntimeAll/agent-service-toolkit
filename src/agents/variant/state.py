@@ -249,8 +249,15 @@ class VariantState(MessagesState, total=False):
     #   **之前**前置拦截，建议换清晰图，不进 classify 烧 opus token。置 True = 已拦过一次；老师坚持
     #   （再回传 confirmed_chapter_id）→ 放行进 classify（防永久卡死）。
     _lowconf_blocked: bool
-    # 🔴 PRD-C-108 B1·薄意图层：intent_triage 节点写入的意图分诊结果（§10 intent spec 升级）。
-    #   {intent: 确认范围|调整母题|开始出题|编辑变式|答疑|新任务, correction{field,value},
-    #    edit{target_seq,action}, count, confidence}。route_after_triage 据它确定性派发；
-    #   低置信/无意图 → 回退原 route_entry 代码分诊（安全网）。会话态、checkpointer 持久。
+    # 🔴 PRD-C-108 B1·薄意图层 → C-109 B2·工具选择器：intent_triage 节点写入的分诊结果。
+    #   C-109 B2 升级后：{tool: 15工具名|_难度旋钮|null, tool_value, confidence,
+    #    intent: 确认范围|调整母题|开始出题|编辑变式|答疑|新任务(由工具派生·向后兼容),
+    #    correction{field,value}, edit{target_seq,action}, count}。
+    #   🔴 LLM 只产 {tool, value}；effect 由 route_after_triage 查 resolve_tool(tool).effect 得出（不存 effect）。
+    #   route_after_triage 据 tool 的 effect 走 3 分支（即时/重解析/重出）+ 执行/旋钮特例；
+    #   无 tool（纯 legacy intent）→ 旧 6-意图 if 链；低置信/未知工具 → 回退 route_entry（安全网）。
+    #   会话态、checkpointer 持久。
     intent_decision: dict[str, Any]
+    # 🔴 PRD-C-109 A3·确认收口：老师明确背书母题（用户确认 > 代码硬锚）→ mother_in_doubt override=终态，
+    #   不再被锚定/骨架细节反复拦（防多确认闸死循环·AC4）。B3 接 FE/端点置位，本卡 mother_in_doubt 先生效。
+    mother_endorsed: bool

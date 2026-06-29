@@ -3473,18 +3473,12 @@ from agents.variant.entry.interact import (  # noqa: E402
 #   interact re-export 之后** —— intent.py 顶部从 facade import route_entry/_editor_op/_pin_status/
 #   conv_trace/_ainvoke_text 等（均已上面绑回 facade）。图 wiring 用 route_entry_v2 当新 entry point +
 #   intent_triage 节点 + route_after_triage 条件边（拓扑 +1 节点 +1 条件路由，route_entry 仍当兜底）。
-from agents.variant.entry.intent import (  # noqa: E402
-    INTENT_CONF_THRESHOLD,
-    classify_intent,
-    intent_triage,
-    mother_in_doubt,
-    route_after_triage,
-    route_entry_v2,
-)
 # 🔴 PRD-C-109 B1：tool_registry re-export（母题编辑工具注册表 + effect 路由）。
 #   tool_registry.py 顶部 from agents.variant import edit_dna_state/regen_class_of —— 二者已在上面
 #   （persist re-export + 本模块 regen_class_of 定义）绑回 facade，故置于此处无循环。B2 意图层 /
 #   端点 / smoke 走 `from agents.variant import TOOL_REGISTRY, resolve_tool, apply_tool, TOOL_NAMES`。
+# 🔴 PRD-C-109 B2：必须置于 intent.py import **之前** —— intent.py 顶部从 facade import
+#   EFFECT_*/apply_tool/resolve_tool（工具选择器 effect 三分支路由依赖），故先绑回 facade。
 from agents.variant.tool_registry import (  # noqa: E402
     EFFECT_EXEC,
     EFFECT_IMMEDIATE,
@@ -3496,6 +3490,18 @@ from agents.variant.tool_registry import (  # noqa: E402
     TOOL_REGISTRY,
     apply_tool,
     resolve_tool,
+)
+# 🔴 PRD-C-108 B1 / C-109 B2：entry/intent.py re-export（意图层 → 工具选择器，wrap-not-rewrite）。
+#   intent_triage 节点 + route_after_triage/route_entry_v2 路由 + classify_intent/mother_in_doubt。
+#   置于 route + interact + tool_registry re-export **之后** —— intent.py 顶部从 facade import
+#   route_entry/_editor_op/_pin_status/conv_trace/_ainvoke_text + EFFECT_*/apply_tool/resolve_tool（均已绑回）。
+from agents.variant.entry.intent import (  # noqa: E402
+    INTENT_CONF_THRESHOLD,
+    classify_intent,
+    intent_triage,
+    mother_in_doubt,
+    route_after_triage,
+    route_entry_v2,
 )
 
 # ---------------------------------------------------------------------------
