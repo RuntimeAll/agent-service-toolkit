@@ -177,6 +177,10 @@ class VariantState(MessagesState, total=False):
     knobs: dict[str, Any] | None
     # generate 的代码级配方校验缺陷清单（整组 retry 1 次后仍不符 → assemble 头部外显 ⚠）
     shape_defects: list[str]
+    # 🔴 PRD-C-107 B2·统一意图层（契约 §10 intent spec 读模型）：按钮路径=default_intent_spec
+    #   (generate 写)、打字/后续命令=build_intent_spec(parse_instruction 写进 pending.intent_spec)。
+    #   单次写定、纯视图（不参与路由），供 trace/FE/单测断言「这次是按钮默认还是打字哪种意图」。
+    intent_spec: dict[str, Any] | None
     # 🔴 BUG-01（2026-06-19）·改主考点可回退：edit-dna 改 main_kp 前的旧考点快照
     #   {"main_kp": {id,name}|None, "kp": analysis.kp 旧值|None}，FE 据它给「撤销改考点」入口。
     #   不破坏 items（改主考点不再清 items）→ 撤销 = 把主考点改回旧值即可，变式都还在。

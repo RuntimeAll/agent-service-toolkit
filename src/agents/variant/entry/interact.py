@@ -39,6 +39,7 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     SOLUTION_ONLY_PROMPT,
     VariantState,
     _ainvoke_text,
+    build_intent_spec,  # 🔴 PRD-C-107 B2·统一意图层（§10 intent spec 读模型）
     build_variant_memo,  # 🔴 PRD-C-107 B2·v2 memo 刷新（接着聊后记得自己）
     _budget_bind,
     _budget_exhausted,
@@ -125,6 +126,11 @@ async def parse_instruction(state: VariantState, config: RunnableConfig) -> Vari
     # 🔴 物理护栏（G4/FP4）：白名单 + 越界钳制 + 解析失败整体降级 clarify（永不默认成 remove）
     pending = validate_instruction(parsed, len(items))
     pending["utterance"] = utterance
+    # 🔴 PRD-C-107 B2·统一意图层：把 pending 投影成 §10 intent spec（含编辑命令 target_seq+action
+    #   调整/重出/新增/删除）。纯视图、不改路由（route_after_parse/route_dispatch 仍吃 pending），
+    #   供 trace/FE/单测断言「打字解析出了哪种意图」。conf 透传双旋钮（系数/难度）。
+    conf = (config or {}).get("configurable") or {}
+    pending["intent_spec"] = build_intent_spec(pending, knobs=None, conf=conf)
     return {"pending": pending, "llm_call_budget": budget, "messages": []}
 
 

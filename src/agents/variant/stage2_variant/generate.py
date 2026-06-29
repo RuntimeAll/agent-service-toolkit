@@ -59,6 +59,7 @@ from agents.variant import (  # noqa: E402  运行期解析（本模块在 __ini
     _parse_json,
     _to_int,
     build_variant_memo,  # 🔴 PRD-C-107 B2·per-variant 压缩 memo
+    default_intent_spec,  # 🔴 PRD-C-107 B2·按钮=默认 spec（统一意图层）
     knobs_desc,
     mother_md_from_table,
     normalize_two_knobs,
@@ -568,10 +569,17 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
     defects = shape_check(items, knobs, mother_d)
 
     _emit_stage("generate", "生成题目", "done", f"{len(items)} 道")
+    # 🔴 PRD-C-107 B2·统一意图层：generate（按钮/出题入口）= 老师用默认值发起的一次请求 →
+    #   记 default_intent_spec（旋钮值 + 默认道数，纯结构化、不耗 LLM）。打字后续命令的 intent spec
+    #   走 parse_instruction（pending.intent_spec）；二者同一 §10 shape，不分岔。
+    _intent_spec = default_intent_spec((config or {}).get("configurable") or {})
+    if isinstance(knobs, dict) and knobs.get("count"):
+        _intent_spec["count"] = knobs.get("count")  # 老师道数（可调，非固定）覆盖默认 3
     return {
         "items": items,
         "knobs": knobs,
         "shape_defects": defects,
+        "intent_spec": _intent_spec,
         # 🔴 新一组题 → 复位手排标记：上一组的 manual_order 绝不泄漏到新母题/新出题轮。
         "manual_order": False,
         "llm_call_budget": budget,

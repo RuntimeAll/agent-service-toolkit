@@ -1910,6 +1910,117 @@ def build_variant_memo(spec: dict[str, Any], item: dict[str, Any]) -> dict[str, 
     }
 
 
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-107 B2·统一意图层（intent spec）：契约 §10 的读模型（pure projection）。
+#   按钮 = 默认 spec（旋钮值 + 默认道数 3，纯结构化、不耗 LLM）；打字 = parse_instruction 的
+#   pending（LLM 解析）→ 投影到同一 §10 shape。**不改路由**——route_after_parse/route_dispatch 仍
+#   吃 pending；本层是「把按钮/打字/后续命令统一成一份结构化 spec」的视图，供 trace/FE/单测断言。
+#   编辑命令 action 枚举：删除/新增/调整(regenerate+adjust)/重出(regenerate+reopen)。
+# ---------------------------------------------------------------------------
+DEFAULT_VARIANT_COUNT = 3  # 道数默认（老师可调，非固定；决策表 §3）
+_EDIT_ACTION_CN: dict[str, str] = {"remove": "删除", "add": "新增"}
+
+
+def default_intent_spec(conf: dict[str, Any] | None) -> dict[str, Any]:
+    """🔴 按钮路径 = 老师用默认值发起的一次请求（设计 §入口）：旋钮值(系数+难度) + 默认道数(3)
+    直接构成默认 spec，纯结构化、不耗 LLM 解析。conf = config.configurable（FE 透传旋钮）。
+
+    系数/难度缺 → 留 None（下游回落默认：相似度 0.7 / 难度=母题档 md+i）。
+    """
+    two = normalize_two_knobs(conf or {})
+    return {
+        "count": DEFAULT_VARIANT_COUNT,
+        "coeff": two.get("variant_coeff"),
+        "difficulty": two.get("difficulty_target"),
+        "qtype_pref": None,
+        "extra": [],
+        "edit": None,  # 按钮=初始请求，无编辑命令
+        "source": "button",
+    }
+
+
+def build_intent_spec(
+    pending: dict[str, Any] | None,
+    knobs: dict[str, Any] | None = None,
+    conf: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """🔴 打字/后续命令路径 → 统一 intent spec（契约 §10）。pure projection，零 LLM/零 IO。
+
+    投影规则：
+    - 道数：knobs.count → count（缺=None，下游默认 3/默认配方）。
+    - 系数/难度：conf 双旋钮（normalize_two_knobs）优先，回落 knobs.variant_coeff/difficulty_target。
+    - 题型偏好：knobs.qtype_dist（题型配比）→ qtype_pref。
+    - 特殊要求：knobs.note + pending.extra_constraints + pending.comp 汇总成 extra[]。
+    - 编辑命令：pending.ops 首条 → edit{target_seq, action}（action 用中文枚举；regenerate 看 mode
+      分 调整/重出）。多 op（点名多题/全组）→ targets[] 全列，action 取首条类。
+    解析失败/pending 空 → 退默认 spec（不卡死，G6/异常路径）。
+    """
+    pending = pending if isinstance(pending, dict) else {}
+    knobs = knobs if isinstance(knobs, dict) else {}
+    two = normalize_two_knobs(conf or {})
+
+    coeff = two.get("variant_coeff")
+    if coeff is None:
+        coeff = knobs.get("variant_coeff")
+    difficulty = two.get("difficulty_target")
+    if difficulty is None:
+        difficulty = knobs.get("difficulty_target")
+
+    extra: list[str] = []
+    if knobs.get("note"):
+        extra.append(str(knobs["note"]))
+    for s in (pending.get("extra_constraints") or []):
+        if s:
+            extra.append(str(s))
+    if pending.get("comp"):
+        extra.append(str(pending["comp"]))
+
+    edit: dict[str, Any] | None = None
+    ops = pending.get("ops") or []
+    if ops:
+        targets: list[int] = []
+        action_cn: str | None = None
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            act = op.get("action")
+            if act == "regenerate":
+                cn = "重出" if str(op.get("mode")) == "reopen" else "调整"
+            elif act in ("remove", "add"):
+                cn = _EDIT_ACTION_CN[act]
+            else:
+                cn = None  # reorder 等不投影成编辑三态（另有 reorder 语义）
+            if cn and action_cn is None:
+                action_cn = cn
+            idx = _to_int(op.get("index"))
+            if idx is not None:
+                targets.append(idx)
+        if action_cn:
+            edit = {
+                "action": action_cn,
+                "target_seq": targets[0] if targets else None,
+                "targets": targets,
+            }
+            # add：道数走 count（新增 N 道），target_seq 无意义
+            if action_cn == "新增":
+                edit["target_seq"] = None
+                add_n = 0
+                for op in ops:
+                    if isinstance(op, dict) and op.get("action") == "add":
+                        add_n += _to_int(op.get("count")) or 1
+                edit["count"] = add_n or 1
+
+    return {
+        "count": knobs.get("count"),
+        "coeff": coeff,
+        "difficulty": difficulty,
+        "qtype_pref": knobs.get("qtype_dist") or None,
+        "extra": extra,
+        "edit": edit,
+        "source": "utterance",
+    }
+
+
 def normalize_two_knobs(conf: dict[str, Any] | None) -> dict[str, Any]:
     """🔴 WS3 纯函数：config.configurable 的双旋钮原值 → 受约束 knobs 增量段。
 
