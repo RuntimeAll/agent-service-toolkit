@@ -24,6 +24,7 @@ import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.figure import chapter_figure, geogebra_samples, mathfig_render, numline
+from agents.figure import dsl_schema, dsl_system
 
 # 🔴 单元2 标定（2026-06-18 实测）：配图默认 fig_scale=0.7（缩画布让标签相对放大；无头渲染下
 #   fontSize 参数无效，figScale 是唯一杠杆——见本地引擎 geogebra/render.js:81-92 注释）。
@@ -452,6 +453,114 @@ async def compose_variant_figure(
     if _hit_direction(stem, answer, data.get("commands"), data.get("hide")):
         out["direction_review"] = True
         out["reason"] = _DIRECTION_HINT
+    return out
+
+
+# ---------------------------------------------------------------------------
+# PRD-C-110 B1·路 A：AI 直出中性几何 JSON DSL（替代 GeoGebra 命令）+ schema 闸
+# ---------------------------------------------------------------------------
+# 🔴 B1 边界：本函数只产「DSL + 校验」，**不渲染、不出 PNG、不碰 mathfig_render / OSS**（那是 B2）。
+#   现网举一反三带图链仍走上面的 compose_variant_figure（opus→GeoGebra→mathfig→PNG base64），
+#   B1 字节不动它（不破 C-107~109 回归）；本函数是**新增并行路径**，供 B2 接渲染端时切过来。
+# 🔴 与 compose_variant_figure 同样的输入契约（stem/figure_spec/correction_prompt/chapter/kp），
+#   只是 system 头换成 dsl_system.DSL_SYSTEM（中性 DSL 生成器），产出过 dsl_schema.validate_dsl 闸：
+#   不合 schema（type 越白名单/缺必填/引用悬空/expr 非数学白名单）→ needs_figure 降级（不抛、不卡流程）。
+DSL_USER_TMPL = (
+    "【题目】\n{stem}\n\n【配图需求】\n{spec}\n\n"
+    "按上面的 schema 直出中性 JSON DSL（只输出 JSON，不要解释、不要 markdown fence）。"
+)
+
+
+async def compose_variant_dsl(
+    *,
+    stem: str,
+    answer: str | None = None,
+    invoke: Any,
+    parse_json: Any,
+    correction_prompt: str | None = None,
+    item_id: str | None = None,
+    model: str | None = None,
+    figure_spec: Any = None,
+    chapter: str | None = None,
+    kp: str | None = None,
+) -> dict[str, Any]:
+    """🔴 PRD-C-110 B1·路 A：opus 直出中性几何 JSON DSL（过 schema 闸），**不渲染**。
+
+    返回 {item_id, ok, dsl?, needs_figure, schema_errs?, figure_spec_used,
+          figure_type_constrained, allowed_figure_types, reason?}。
+
+    与 compose_variant_figure 同输入契约（figure_spec 权威、章节×图型定型闸、预算护栏、退化提示），
+    差别只在：① system 头 = dsl_system.DSL_SYSTEM（中性 DSL 生成器，非 GeoGebra 翻译器）；
+    ② 产出过 dsl_schema.validate_dsl 白名单/必填/引用/expr 校验；③ **不调 mathfig_render、不出 PNG**
+    （渲染留 B2：DSL → 客户端 GeoEngine 活图 / 批量无头）。任何失败 → needs_figure 降级（不抛、G11）。
+    """
+    from agents import cost_guard
+
+    # 预算护栏（G7，与 compose_variant_figure 同口径）。
+    if await cost_guard.is_budget_exceeded_async():
+        return {"item_id": item_id, "ok": False, "needs_figure": True,
+                "reason": "今日 AI 额度已用尽，配图暂缓（可明日重试或手动配图）", "dsl": None}
+
+    spec_layout, spec_angle_hints = _fmt_figure_spec(figure_spec)
+    used_spec = bool(spec_layout or spec_angle_hints)
+
+    # 章节×图型定型闸（与 compose_variant_figure 同逃生口径：取不到/无映射 → 不约束）。
+    try:
+        _allowed = chapter_figure.allowed_figure_types(chapter, kp)
+    except Exception:  # noqa: BLE001
+        _allowed = set()
+    fig_type_clause = chapter_figure.constraint_clause(_allowed)
+
+    # 组 user 段：题面（轻量消歧）+ 配图决策（权威画什么）/退化兜底 + 定型约束 + 修正要求。
+    spec_text = spec_layout or "（上游未给结构化配图决策，请据题面判断要画的必要构型，守不泄题铁律）"
+    user_segs = [DSL_USER_TMPL.format(stem=str(stem or ""), spec=spec_text)]
+    if fig_type_clause:
+        user_segs.append(fig_type_clause)
+    if correction_prompt:
+        user_segs.append(f"【老师修正要求（按此调整配图 DSL）】\n{correction_prompt}")
+
+    messages = [
+        SystemMessage(content=dsl_system.DSL_SYSTEM),
+        HumanMessage(content="\n\n".join(user_segs)),
+    ]
+    try:
+        text = await invoke(messages, model=model, max_tokens=2048, temperature=0.2)
+    except Exception as e:  # noqa: BLE001 — opus 产 DSL 失败 → needs_figure 降级
+        return {"item_id": item_id, "ok": False, "needs_figure": True,
+                "reason": f"opus 产 DSL 失败: {str(e)[:80]}", "dsl": None}
+
+    data = parse_json(text)
+    if not isinstance(data, dict) or not data.get("objects"):
+        # 没产出有效 DSL → 仅当本题「本应有图」（含几何关键词）才标 needs_figure（纯代数不催）。
+        want_fig = _has_keyword(stem, _FIGURE_KEYWORDS) or _has_keyword(answer, _FIGURE_KEYWORDS)
+        return {"item_id": item_id, "ok": False, "needs_figure": bool(want_fig),
+                "reason": "opus 未给有效 DSL（objects 缺失）", "dsl": None,
+                "figure_spec_used": used_spec}
+
+    # 🔴 schema 闸：type 白名单 + 必填 + 引用 id 可解析 + functiongraph.expr 数学白名单。
+    ok, errs = dsl_schema.validate_dsl(data)
+    if not ok:
+        return {"item_id": item_id, "ok": False, "needs_figure": True,
+                "reason": "DSL 不合 schema（降级）", "schema_errs": errs[:8], "dsl": None,
+                "figure_spec_used": used_spec,
+                "figure_type_constrained": bool(_allowed),
+                "allowed_figure_types": sorted(_allowed)}
+
+    out: dict[str, Any] = {
+        "item_id": item_id, "ok": True, "needs_figure": False, "dsl": data,
+        "figure_spec_used": used_spec,
+        "figure_type_constrained": bool(_allowed),
+        "allowed_figure_types": sorted(_allowed),
+    }
+    try:
+        import logging
+        logging.getLogger(__name__).info(
+            "compose_variant_dsl item=%s figure_spec_used=%s n_objects=%d "
+            "fig_type_constrained=%s allowed=%s",
+            item_id, used_spec, len(data.get("objects") or []), bool(_allowed), sorted(_allowed),
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
