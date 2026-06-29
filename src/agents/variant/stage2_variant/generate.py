@@ -479,9 +479,12 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             else:
                 human = HumanMessage(content=prompt)
             async with sem:
+                # 🔴 PRD-C-107 B3·算子/系数对老师隐藏（决策表 §3「不对老师暴露」）：面向老师的 stage
+                #   帧只报道序进度，绝不带 coeff/operator 数字（这些是内部派工，落 item.variant_*
+                #   trace + 续聊 memo 即可，FE 隐藏归 B4）。
                 _emit_stage(
                     "generate", "生成题目", "running",
-                    f"正在写第 {seq}/{total_n} 道（变式系数 {spec['coeff']}·{spec['operator']}）",
+                    f"正在写第 {seq}/{total_n} 道",
                 )
                 text = await _ainvoke_text(
                     [human],
