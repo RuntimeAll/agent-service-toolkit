@@ -1866,6 +1866,16 @@ def plan_variant_specs(
     base = max(0.0, min(1.0, base))
     md = _to_int(mother_difficulty) or 3
 
+    # 🔴 PRD-C-107 B3·默认难度分布（决策表 §3「前两道母题档、第三道 +1 级」，道数非 3 时推广为
+    #   「除末道外同母题档，末道 +1」）。expected_difficulties 给了（老师要求递增/指定 target，由
+    #   recipe_from_knobs 算）→ 原样沿用；缺（按钮/纯默认）→ 用本默认分布（多样性，像选商品）。
+    #   🔴 仍是表驱动「之上」的 PLAN 级代码分布决策：母题档 md 走 grade_observed 表（mother_difficulty
+    #     来源 = mother_md_from_table），本函数只在 md 上移末道一档，不让 LLM 自评难度（守铁律②）。
+    #   「难一点」旋钮 = 整体抬：recipe_from_knobs 把 md 起步档移到 difficulty_target → 整组水位上移。
+    if expected_difficulties is None and n >= 1:
+        last = min(md + 1, DIFFICULTY_CAP)
+        expected_difficulties = [md] * (n - 1) + [last] if n >= 2 else [md]
+
     specs: list[dict[str, Any]] = []
     for i in range(n):
         coeff = _float_coeff(base, i, n)
