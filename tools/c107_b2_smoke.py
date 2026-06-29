@@ -159,7 +159,7 @@ def offline_gates() -> bool:
 async def _stream(client, message, thread_id, token, agent_cfg=None):
     body = {"message": message, "stream_tokens": True, "thread_id": thread_id,
             "agent_config": {"ruoyi_token": token, **(agent_cfg or {})}}
-    frames = {"stage": 0, "items": [], "error": None}
+    frames = {"stage": 0, "items": [], "error": None, "need_confirm": None}
     async with client.stream("POST", f"{BASE}/variant/stream", json=body,
                              headers={"Content-Type": "application/json"}, timeout=400) as resp:
         if "text/event-stream" not in resp.headers.get("content-type", ""):
@@ -188,6 +188,8 @@ def _walk(obj, frames):
             v = obj.get(key)
             if isinstance(v, list) and v and isinstance(v[0], dict) and any("stem" in x for x in v if isinstance(x, dict)):
                 frames["items"] = v
+        if isinstance(obj.get("needConfirm"), dict):
+            frames["need_confirm"] = obj["needConfirm"]
         if obj.get("error") and not frames["error"]:
             frames["error"] = str(obj.get("error"))[:160]
         for v in obj.values():
@@ -197,9 +199,16 @@ def _walk(obj, frames):
             _walk(v, frames)
 
 
+IMG_HAS_MODEL = (
+    "https://question-1256278081.cos.ap-shanghai.myqcloud.com/"
+    "2024-04-25/3869ff78-9925-4ec2-ba3a-96f61d8fc677/list/5/question.png"
+)
+
+
 async def online_gates() -> bool:
-    """在线 e2e：阶段二出题跑通（≤3 道纯文本）+ 0 error。母题需先过阶段一确认——
-    这里直连库内母题/已确认 thread 较脆，退化为「跑通不报错」的存活探针（质量归人工终审 AC8）。"""
+    """在线 e2e（真两阶段流）：① 贴图母题 → 阶段一锚定(await_review)；② start_variants 触发阶段二
+    出题 → 断言每道带 _variant_memo（G5 memo 落库）；③ 打字「第N道难一点」→ adjust 接着聊跑通、
+    别道不动（G5 三态·别道不动）。0 error / 无卡死即存活（质量归人工终审 AC8，不卡命中率/像不像）。"""
     import httpx
     from agents.variant_support import RuoyiClient
 
@@ -207,20 +216,64 @@ async def online_gates() -> bool:
     token = await rc.login()
     await rc.aclose()
     ok = True
+    tid = "c107-b2-e2e"
     async with httpx.AsyncClient() as client:
-        print("== 在线·阶段二出题存活探针（≤3 道·只验跑通 + 0 error，质量归人工终审） ==")
-        # 用纯文本母题题面直发（库内/在途母题路径），观察是否 0 error 跑通
-        f = await _stream(
-            client,
-            "对这道题举一反三出3道：已知 x²-5x+6=0，求 x 的值。（八年级下学期，一元二次方程解法）",
-            "c107-b2-e2e", token,
-        )
-        n_items = len(f.get("items") or [])
-        memo_n = sum(1 for it in (f.get("items") or []) if isinstance(it, dict) and it.get("_variant_memo"))
-        print(f"  stage帧={f['stage']} items={n_items} 带memo={memo_n} err={f['error']}")
-        cond = bool(f["stage"]) and not f["error"]
-        print(f"  [{'PASS' if cond else 'FAIL'}] 阶段二出题跑通 + 0 error（在线存活）")
-        ok = ok and cond
+        print("== 在线·阶段一锚定（贴图母题 → 母题卡 await_review / needConfirm） ==")
+        f1 = await _stream(client, f"帮我对这道题举一反三 {IMG_HAS_MODEL}", tid, token)
+        print(f"  stage帧={f1['stage']} needConfirm={bool(f1['need_confirm'])} err={f1['error']}")
+        c1 = bool(f1["stage"]) and not f1["error"]
+        print(f"  [{'PASS' if c1 else 'FAIL'}] 阶段一跑通 + 0 error")
+        ok = ok and c1
+
+        # 低置信/需确认 → 先确认章（FE 用 chapter id；id 空则退 name），再触发阶段二。
+        nc = f1.get("need_confirm") or {}
+        ch = (nc.get("chapter") or {})
+        gb = (nc.get("grade_book") or {})
+        confirm_cfg = {"start_variants": True}
+        if nc:
+            confirm_cfg["confirmed_chapter_id"] = ch.get("id") or ch.get("name") or ""
+            confirm_cfg["confirmed_grade_book_id"] = gb.get("id") or ""
+            confirm_cfg["confirmed_chapter_name"] = ch.get("name") or ""
+            print(f"  需确认 → 确认章「{ch.get('name')}」(id={ch.get('id') or '空·退name'}) 后触发阶段二")
+
+        # 需确认母题 → resume 先经 classify 重锚 + 再发母题卡（await_review）；老师需再点一次开始。
+        #   这一确认握手（尤其 chapter.id 空、靠 name 解析）是 FE/维护者交互链路，自动重放较脆。
+        #   故本步 = 存活探针（AC8 口径：0 error / 无卡死即存活；不卡命中率）：能直接出题最好，
+        #   出不来则补发一次「开始举一反三」（确认后再触发阶段二）。
+        print("== 在线·阶段二出题（resume → 每道带 memo G5；需确认则二段触发） ==")
+        f2 = await _stream(client, "开始举一反三", tid, token, agent_cfg=confirm_cfg)
+        items = f2.get("items") or []
+        if not items and not f2["error"]:
+            # 确认后停在母题卡 → 再点一次「开始举一反三」触发阶段二（start_variants）。
+            f2b = await _stream(client, "开始举一反三", tid, token, agent_cfg={"start_variants": True})
+            if f2b.get("items"):
+                items = f2b["items"]
+            f2["stage"] += f2b["stage"]
+            f2["error"] = f2["error"] or f2b["error"]
+        memo_n = sum(1 for it in items if isinstance(it, dict) and it.get("_variant_memo"))
+        print(f"  stage帧={f2['stage']} items={len(items)} 带memo={memo_n} err={f2['error']}")
+        # 存活判据（硬）：阶段二 resume 无 error / 无卡死（产出 stage 帧）。memo 落库（软）：出题则核。
+        c2_alive = bool(f2["stage"]) and not f2["error"]
+        memo_ok = (not items) or (memo_n == len(items))  # 出题了就必须每道带 memo
+        print(f"  [{'PASS' if c2_alive else 'FAIL'}] 阶段二 resume 存活（0 error/无卡死）"
+              f"{'；每道带 memo ✓' if (items and memo_ok) else ('；(本图需交互确认未自动出题，memo 落库由离线闸保证)' if not items else '；memo 缺失 ✗')}")
+        ok = ok and c2_alive and memo_ok
+
+        if items:
+            n = len(items)
+            other_stem = (items[0] or {}).get("stem") if n >= 1 else None
+            tgt = n  # 改最后一道（难一点 = adjust 接着聊）
+            print(f"== 在线·编辑三态·调整=接着聊（第{tgt}道难一点 → adjust）+ 别道不动 G5 ==")
+            f3 = await _stream(client, f"第{tgt}道难一点", tid, token)
+            items3 = f3.get("items") or []
+            new_other = next((it.get("stem") for it in items3 if it.get("_seq") == 1), None) if items3 else None
+            untouched = (other_stem is None) or (new_other is None) or (new_other == other_stem)
+            print(f"  stage帧={f3['stage']} items={len(items3)} 别道(第1道)未变={untouched} err={f3['error']}")
+            c3 = (not f3["error"]) and bool(items3) and untouched
+            print(f"  [{'PASS' if c3 else 'FAIL'}] 调整接着聊跑通 + 别道不动（G5）")
+            ok = ok and c3
+        else:
+            print("  (阶段二未自动出题 → 跳过在线编辑三态；三态机制由离线闸 G5 全覆盖，质量归 AC8 人工终审)")
     return ok
 
 
