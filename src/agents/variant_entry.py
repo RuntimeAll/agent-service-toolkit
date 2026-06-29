@@ -593,11 +593,19 @@ def build_stage1_turn1_messages(
 
     产出（让 opus 一次给齐，下游解析）：① 富文本题面 ② 年级初判(置信+候选) ③ reason(拿不准的人话)。
     🔴 图只在本轮发；后续 solve/label 轮纯文本、靠对话历史。SYSTEM = _STAGE1_SYSTEM_PREFIX（发一次）。
+
+    🔴 PRD-C-108 B2①·范围已定不重判（AC5）：preset 年级/章给定时，turn1 prompt **只要誊抄题面 +
+       has_figure**，不再让 opus 判 gradeBook/chapter/gradeCandidates/chapterCandidates/confidence/
+       reason（已确定的事实别花 opus 注意力/token 重判，实测判出 confidence:1.0=纯浪费）。年级/章/
+       confidence=1.0 由代码直接填 preset（见 _run_stage1_continuous 解析兜底）。
+       🔴 边界诚实：这砍的只是「判年级」那部分；**读图+誊抄的视觉调用本身砍不掉**（首次见图必须读）。
+       无 preset → 维持原全套判定（首次见图正常誊抄 + 判年级，行为不变）。
     """
     from langchain_core.messages import SystemMessage
 
+    _scope_known = bool(preset_grade_book or preset_chapter)
     var_text_segs: list[str] = []
-    if preset_grade_book or preset_chapter:
+    if _scope_known:
         _scope = "、".join(
             x for x in (
                 f"年级册 = 「{preset_grade_book}」" if preset_grade_book else "",
@@ -605,22 +613,33 @@ def build_stage1_turn1_messages(
             ) if x
         )
         var_text_segs.append(
-            f"【🔴 老师已确定的范围】本题{_scope}。年级/章直接采用、confidence=1.0、候选留空，不必再判。"
+            f"【🔴 老师已确定的范围】本题{_scope}。年级/章**已定死、由系统直接采用**，"
+            "你不必判、也不要输出年级/章/置信度（系统会自动填），本轮只管把题面誊抄干净。"
         )
     if utterance:
         var_text_segs.append(f"【老师附带的话（请从中接住年级/章/指定解法等信息，只接明说的、不脑补）】{utterance}")
     if teacher_memory:
         var_text_segs.append(f"【该老师的偏好/纠正记忆（参考，不强制）】\n{teacher_memory}")
-    var_text_segs.append(
-        "【本轮（turn1）只做三件事，先别解题、先别打标】\n"
-        "1. 把题面一字不差誊抄成富文本（行内 $...$，真实换行，禁裸 LaTeX 命令/定界符）。\n"
-        "2. 判这道题的年级册 + 章 + 置信度 0~1，拿不准给 gradeCandidates / chapterCandidates。\n"
-        "3. 若置信不高，用一句人话写明为什么拿不准（reason）。\n"
-        "只输出一个 JSON（不要 markdown fence）："
-        '{"stem":"题面富文本","gradeBook":"六册之一或空串","chapter":"章名或空串",'
-        '"gradeCandidates":[],"chapterCandidates":[],"confidence":0.0,'
-        '"reason":"拿不准就写人话原因，高置信留空","has_figure":true/false}'
-    )
+    if _scope_known:
+        # 范围已定：只誊抄 + has_figure（年级/章/confidence 代码填 preset，opus 不重判）。
+        var_text_segs.append(
+            "【本轮（turn1）只做一件事，先别解题、先别打标，也别判年级章（已定）】\n"
+            "把题面一字不差誊抄成富文本（行内 $...$，真实换行，禁裸 LaTeX 命令/定界符）。\n"
+            "只输出一个 JSON（不要 markdown fence）："
+            '{"stem":"题面富文本","has_figure":true/false}'
+        )
+    else:
+        # 无 preset：维持原全套判定（首次见图正常誊抄 + 判年级）。
+        var_text_segs.append(
+            "【本轮（turn1）只做三件事，先别解题、先别打标】\n"
+            "1. 把题面一字不差誊抄成富文本（行内 $...$，真实换行，禁裸 LaTeX 命令/定界符）。\n"
+            "2. 判这道题的年级册 + 章 + 置信度 0~1，拿不准给 gradeCandidates / chapterCandidates。\n"
+            "3. 若置信不高，用一句人话写明为什么拿不准（reason）。\n"
+            "只输出一个 JSON（不要 markdown fence）："
+            '{"stem":"题面富文本","gradeBook":"六册之一或空串","chapter":"章名或空串",'
+            '"gradeCandidates":[],"chapterCandidates":[],"confidence":0.0,'
+            '"reason":"拿不准就写人话原因，高置信留空","has_figure":true/false}'
+        )
     parts: list[dict[str, Any]] = [
         {"type": "text", "text": "\n\n".join(var_text_segs)},
         {"type": "image_url", "image_url": {"url": image_url}},
@@ -1216,6 +1235,19 @@ async def _run_stage1_continuous(
             "image_url": url, "_entry_finalized": False,
             "messages": [AIMessage(content="母题读题失败了（opus 超时或返回异常），请重试或换一张更清晰的题目图。")],
         }, *_empty)
+
+    # 🔴 PRD-C-108 B2①·范围已定不重判（AC5）代码兜底：preset 年级/章给定时 turn1 prompt 已不要 opus
+    #   判年级（只誊抄），故 t1_json 不会回 gradeBook/chapter/confidence —— 由代码直接填 preset，
+    #   confidence=1.0（已确定的事实，不让 LLM 重判）。若 opus 仍多嘴吐了这些字段也强制以 preset 覆盖。
+    if preset_grade or preset_chapter:
+        if preset_grade:
+            t1_json["gradeBook"] = preset_grade
+        if preset_chapter:
+            t1_json["chapter"] = preset_chapter
+        t1_json["confidence"] = 1.0
+        t1_json["gradeCandidates"] = []
+        t1_json["chapterCandidates"] = []
+        t1_json.setdefault("reason", "")
 
     richtext_stem = _sanitize_rich_text(str(t1_json.get("stem") or "").strip())
     if richtext_stem:
