@@ -242,6 +242,32 @@ def _sympy_gate_on(config: RunnableConfig | None = None) -> bool:
     return bool(getattr(settings, "VARIANT_SYMPY_GATE_ON", False))
 
 
+# 🔴 PRD-C-107 B3·变式验算方式总闸（默认开=LLM 逆向带入）。
+#   开 → _machine_verify 的 pass/fail 判决走 _reverse_verify（LLM 把答案代回题目机械验算），
+#       sympy（math_verify.verify）转 **dormant**（不跑、不删，仅难题升级兜底）。
+#   关 → 回退旧 sympy 验算（math_verify.verify 抽载荷判 verdict）。
+#   🔴 默认 True **显式覆盖 §4③「pass/fail 只读工具(sympy)、永不采信 LLM 自评」**——依据
+#     PRD-C-107 §11（维护者 2026-06-29 拍板）：逆向带入 = 代入算一遍再比对的机械检查，
+#     覆盖面比 sympy 载荷抽取广，比自由自评可信。config.configurable.reverse_verify 逐请求覆盖。
+#   判分边界仍守：① 反退化闸/退化构型仍走纯代数 sympy（check_endpoint_degeneracy，不放宽）；
+#     ② 覆盖仅限「变式答案 pass/fail」这一判决，其余闸门判据不动。
+def _reverse_verify_on(config: RunnableConfig | None = None) -> bool:
+    """验算是否走 LLM 逆向带入（默认开）。config.configurable.reverse_verify 优先，缺省回退
+    settings.VARIANT_REVERSE_VERIFY（默认 True）。关 → sympy 验算（dormant 路径被激活）。"""
+    try:
+        conf = ((config or {}).get("configurable") or {}) if config else {}
+    except Exception:  # noqa: BLE001
+        conf = {}
+    if "reverse_verify" not in conf:
+        try:
+            conf = (ensure_config() or {}).get("configurable", {}) or {}
+        except Exception:  # noqa: BLE001
+            conf = {}
+    if "reverse_verify" in conf:
+        return bool(conf.get("reverse_verify"))
+    return bool(getattr(settings, "VARIANT_REVERSE_VERIFY", True))
+
+
 # ---------------------------------------------------------------------------
 # 🔴 PRD-C-104 B1：state 契约（merge reducer + VariantState）已抽到 variant/state.py，
 #    本处 re-export 保 service.py / variant_entry.py / 本模块内其余引用零感（纯搬零改）。
@@ -2577,15 +2603,97 @@ def _payload_claim_consistent(payload: dict, answer: Any) -> bool:
     return True  # expr_equiv 等无 claimed 的 kind → 豁免
 
 
-async def _machine_verify(item: dict, solved_answer: Any) -> dict:
-    """程序验算一道题：载荷优先 → 事后抽取兜底 → math_verify.verify（纯 sympy）。永不抛异常。
+# ---------------------------------------------------------------------------
+# 🔴 PRD-C-107 B3·LLM 逆向带入验算（替 sympy 当默认 pass/fail 判决源；sympy 转 dormant）。
+#   方式 = 把变式的「标答」逐一**代回题目原方程/原条件**，机械算一遍、与右端/约束比对，得 pass/fail。
+#   🔴 这是「代入计算 + 比对」的机械检查，**不是问 LLM「这题对吗」自评**：prompt 强制 LLM 写出
+#     每个代入步骤的算术（如 3²-7·3+12=0 ✓），verdict 只由「代入后是否成立」决定。
+#   显式覆盖 §4③（PRD-C-107 §11 授权，见 _reverse_verify_on）。覆盖面比 sympy 广（不依赖能抽成
+#     结构化载荷）；代价 = 难题 LLM 自身算术可能滑 → sympy 留 dormant，一句话（开关）可升级回工具验。
+# ---------------------------------------------------------------------------
+REVERSE_VERIFY_PROMPT = """你是严谨的数学阅卷老师。下面给你一道题和它的「待验标答」。
+你的任务**不是重新解题、也不是凭感觉判断对错**，而是做一次**逆向代入的机械验算**：
+把标答里的每个解/取值**代回题目原本的方程、不等式或约束条件**，**逐步把算术算出来**，
+看代入后等式/条件是否真的成立。
 
-    🔴 4a 载荷优先（PRD-C-012）：item.verify_payload（出题 LLM 同步产出）是 dict 且
-    kind 合法且 claimed 与题面标答一致（_payload_claim_consistent 廉价闸）→ 直接验，
-    省一次抽取往返；kind=="none"/缺失/非法/claimed 不一致 → 退回既有
-    _extract_payload 事后抽取兜底。判决语义零变化（仍只读 verify() 的 verdict）。
-    返回 {"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}。
+题目：{stem}
+待验标答：{answer}
+
+请严格按下面 JSON 输出（不要任何多余文字）：
+{{
+  "steps": "逐个解代回原式的算术过程（写出每一步代入与计算结果，如 3^2-7*3+12=9-21+12=0 ✓）",
+  "all_satisfied": true 或 false,   // 所有解代回后是否都成立（任一不成立=false）
+  "computed": "你代入算得的关键结果（如各解代回左端的值），便于复核",
+  "reason": "若 false，指出哪个解代回不成立、差在哪；若 true 留空"
+}}
+🔴 判定只看「代回是否成立」，不看标答看起来合不合理。代入算不出/题目缺信息无法代入 → all_satisfied 置 null。"""
+
+
+async def _reverse_verify(item: dict, solved_answer: Any) -> dict:
+    """🔴 PRD-C-107 B3：LLM 逆向带入验算 → {verdict, detail, computed}（与 _machine_verify 同形）。
+
+    把题面标答（优先 item.answer；空则用独立解出的 solved_answer）代回题目原式机械验算：
+      - all_satisfied=true  → PASS（代回全成立）。
+      - all_satisfied=false → FAIL（代回有不成立 → 下游回炉 ≤2，与 sympy FAIL 同通道）。
+      - all_satisfied=null / 解析失败 / LLM 异常 / 预算耗尽 → DEGRADE（退回既有 LLM 自检 fallback，
+        与 sympy 吃不下载荷同语义，不卡死）。
+    🔴 verdict 只由「代回成立与否」定，不采信 LLM 对「这题好不好」的自评（机械检查 ≠ 自评）。
+    永不抛（G5）：任何异常一律 DEGRADE 降级。
     """
+    stem = str(item.get("stem") or "").strip()
+    answer = str(item.get("answer") or "").strip() or str(solved_answer or "").strip()
+    if not stem or not answer:
+        return {"verdict": math_verify.DEGRADE, "detail": "题面/标答为空，无从代入验算", "computed": None}
+    if _budget_exhausted():
+        return {"verdict": math_verify.DEGRADE, "detail": "预算耗尽，跳过逆向验算", "computed": None}
+    try:
+        text = await asyncio.wait_for(
+            _ainvoke_text(
+                [HumanMessage(content=REVERSE_VERIFY_PROMPT.format(stem=stem, answer=answer))],
+                # 验算档：低温稳输出，走 solve 档模型（解题/验算同档，不降档）。
+                model=settings.variant_model("solve"),
+                temperature=0.1,
+                max_tokens=_regen_max_tokens(),
+            ),
+            timeout=VERIFY_TIMEOUT_S * 6,  # LLM 比 sympy 慢，给宽墙钟（超时 → degrade，不挂死）
+        )
+    except TimeoutError:
+        return {"verdict": math_verify.DEGRADE, "detail": "逆向验算超时，按未验算降级", "computed": None}
+    except Exception as e:  # noqa: BLE001 — 验算是增强不是关卡，网关抖动 → degrade（G5）
+        return {"verdict": math_verify.DEGRADE, "detail": f"逆向验算异常: {e}", "computed": None}
+    parsed = _parse_json(text)
+    if not isinstance(parsed, dict):
+        return {"verdict": math_verify.DEGRADE, "detail": "逆向验算返回不可解析", "computed": None}
+    sat = parsed.get("all_satisfied")
+    computed = parsed.get("computed") or parsed.get("steps")
+    if sat is True:
+        return {"verdict": math_verify.PASS, "detail": f"逆向代入全成立：{parsed.get('steps') or ''}"[:300],
+                "computed": str(computed)[:200] if computed else None}
+    if sat is False:
+        return {"verdict": math_verify.FAIL,
+                "detail": f"逆向代入有不成立：{parsed.get('reason') or parsed.get('steps') or ''}"[:300],
+                "computed": str(computed)[:200] if computed else None}
+    # null / 缺 / 非布尔 → 代不进（缺信息/不可代入）→ degrade（退 LLM 自检 fallback，不冤判 FAIL）
+    return {"verdict": math_verify.DEGRADE,
+            "detail": f"逆向代入无法判定（{parsed.get('reason') or '缺信息/不可代入'}）", "computed": None}
+
+
+async def _machine_verify(item: dict, solved_answer: Any) -> dict:
+    """程序验算一道题。🔴 PRD-C-107 B3：默认走 **LLM 逆向带入**（_reverse_verify，代回题目机械验算）；
+    sympy（math_verify.verify）转 **dormant**，仅 reverse_verify 开关关时激活（难题升级兜底）。永不抛。
+
+    🔴 _reverse_verify_on（默认 True）显式覆盖 §4③——依据 PRD-C-107 §11（维护者拍板）。
+       逆向带入是机械检查（代入算一遍+比对），覆盖面比 sympy 载荷抽取广；sympy 留作难题升级路径。
+    关（reverse_verify=False）→ 旧 sympy 路径：4a 载荷优先（PRD-C-012）：item.verify_payload
+    （出题 LLM 同步产出）合法且 claimed 与题面标答一致 → 直接验，省一次抽取往返；否则退回既有
+    _extract_payload 事后抽取兜底。判决语义零变化（sympy 路仍只读 verify() 的 verdict）。
+    两路均返回 {"verdict": "pass"|"fail"|"degrade", "detail": str, "computed": str|None}。
+    """
+    # 🔴 默认路径：LLM 逆向带入验算（覆盖 §4③，sympy dormant）。
+    if _reverse_verify_on():
+        return await _reverse_verify(item, solved_answer)
+
+    # ── 以下为 dormant 的 sympy 验算路径（reverse_verify 开关关时激活，难题升级兜底）──
     payload: Any = item.get("verify_payload")
     if not (
         isinstance(payload, dict)
