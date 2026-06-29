@@ -383,6 +383,13 @@ REGEN_CLASS: dict[str, str] = {
     "models": "rewrite_solve",
     "tags": "meta",
     "secondary_kps": "meta",
+    # 🔴 PRD-C-109 B1·补登（修 REGEN_CLASS 早期缺登，非行为改）：hard_points（难点）是
+    #   edit_dna_state 早已按「纯标注·meta」路由的维（批4/C-017 加入 _EDIT_DNA_FIELDS 时
+    #   inline 当 meta：不进 dirty、不在 _MOTHER_DIRTY_PROP_FIELDS），但当时漏登进 REGEN_CLASS，
+    #   致 regen_class_of("hard_points")=None。补 meta 登记 = 与既有路由逐字一致（meta 不入
+    #   _SOFT_REGEN_FIELDS / _REWRITE_SOLVE_FIELDS 两过滤器，零行为改），让 regen_class_of 对此维
+    #   返回真值（meta）而非 None——C-109 工具注册表据此确定性派生 hard_points 的 regen_class。
+    "hard_points": "meta",
 }
 
 # 守恒基准维确定性异常 flag（D-merge7；与 dna_extract 同源常量，避免循环 import 各持一份引用）。
@@ -3473,6 +3480,22 @@ from agents.variant.entry.intent import (  # noqa: E402
     mother_in_doubt,
     route_after_triage,
     route_entry_v2,
+)
+# 🔴 PRD-C-109 B1：tool_registry re-export（母题编辑工具注册表 + effect 路由）。
+#   tool_registry.py 顶部 from agents.variant import edit_dna_state/regen_class_of —— 二者已在上面
+#   （persist re-export + 本模块 regen_class_of 定义）绑回 facade，故置于此处无循环。B2 意图层 /
+#   端点 / smoke 走 `from agents.variant import TOOL_REGISTRY, resolve_tool, apply_tool, TOOL_NAMES`。
+from agents.variant.tool_registry import (  # noqa: E402
+    EFFECT_EXEC,
+    EFFECT_IMMEDIATE,
+    EFFECT_KNOB,
+    EFFECT_REGEN,
+    EFFECT_REWRITE,
+    EFFECT_TO_REGEN_CLASSES,
+    TOOL_NAMES,
+    TOOL_REGISTRY,
+    apply_tool,
+    resolve_tool,
 )
 
 # ---------------------------------------------------------------------------
