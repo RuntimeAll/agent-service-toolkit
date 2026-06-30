@@ -530,11 +530,27 @@ async def compose_variant_dsl(
                 "reason": f"opus 产 DSL 失败: {str(e)[:80]}", "dsl": None}
 
     data = parse_json(text)
+    # 🔴 PRD-C-110 B4①·objects 缺失加一次 retry（≤1 次，控成本/延迟）：opus 偶发不给 objects 数组
+    #   （漏字段/产了别的结构）。重调一次并带纠偏提示「上次没给 objects，请严格输出 objects 数组」，
+    #   仍失败才降级 needs_figure（FE 据此回退 PNG）。绝不多次 retry。
     if not isinstance(data, dict) or not data.get("objects"):
-        # 没产出有效 DSL → 仅当本题「本应有图」（含几何关键词）才标 needs_figure（纯代数不催）。
+        _retry_msgs = messages + [
+            HumanMessage(content=(
+                "⚠ 你上一次的输出**没有给出 `objects` 数组**（DSL 顶层必须含非空 `objects`，"
+                "每个对象带 type + 必填字段）。请**严格按 schema 重新只输出 JSON**：顶层是一个对象，"
+                "含非空的 `objects` 数组，不要解释、不要 markdown fence。"
+            )),
+        ]
+        try:
+            text = await invoke(_retry_msgs, model=model, max_tokens=2048, temperature=0.2)
+            data = parse_json(text)
+        except Exception:  # noqa: BLE001 — retry 调用失败 → 沿用原降级判定（下方 needs_figure）
+            pass
+    if not isinstance(data, dict) or not data.get("objects"):
+        # 没产出有效 DSL（含 retry 后仍缺）→ 仅当本题「本应有图」（含几何关键词）才标 needs_figure（纯代数不催）。
         want_fig = _has_keyword(stem, _FIGURE_KEYWORDS) or _has_keyword(answer, _FIGURE_KEYWORDS)
         return {"item_id": item_id, "ok": False, "needs_figure": bool(want_fig),
-                "reason": "opus 未给有效 DSL（objects 缺失）", "dsl": None,
+                "reason": "opus 未给有效 DSL（objects 缺失·重试仍失败）", "dsl": None,
                 "figure_spec_used": used_spec}
 
     # 🔴 schema 闸：type 白名单 + 必填 + 引用 id 可解析 + functiongraph.expr 数学白名单。
