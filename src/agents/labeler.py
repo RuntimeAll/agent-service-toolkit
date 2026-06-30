@@ -26,18 +26,13 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from core import difficulty
+from core.contracts import EXAM_TYPES  # 收口到契约模块；re-export，与 dna_extract 同源，labeler 侧机器归一用
 
 # ---------------------------------------------------------------------------
 # 调用参数（仿 mother_opus：低温稳 JSON、读图慢留超时头）
 # ---------------------------------------------------------------------------
 LABEL_TEMPERATURE = 0.1
 LABEL_TIMEOUT_S = 180.0
-
-# 闭集（与 SKILL / dna_extract 同口径，labeler 侧机器归一用）
-EXAM_TYPES: list[str] = [
-    "概念辨析", "直接计算", "公式套用", "性质判定", "证明推理",
-    "应用建模", "作图", "探究归纳", "阅读理解迁移", "纠错",
-]
 # 🔴 题型 = 系统字典 sys_dict_data[dict_type='biz_question_type'] 闭集（录入步17 seed 的 8 类）。
 #   labeler **不自由生成题型**，只能从注入的字典 label 里选（与 EXAM_TYPES/leaf_pool 同注入模式）。
 #   调用方（批量/在线）从库查出 [(value,label)] 传 build_label_prompt(qtype_dict=...) + parse_label(qtype_dict=)。

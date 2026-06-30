@@ -30,14 +30,11 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from core import relay_pool, settings
+from core.contracts import EXAM_TYPES  # 收口到契约模块；re-export，存量 dna_extract.EXAM_TYPES 引用不变
 
 # ---------------------------------------------------------------------------
 # 闭集 / 常量（22-SSOT §1）
 # ---------------------------------------------------------------------------
-EXAM_TYPES: list[str] = [
-    "概念辨析", "直接计算", "公式套用", "性质判定", "证明推理",
-    "应用建模", "作图", "探究归纳", "阅读理解迁移", "纠错",
-]
 QTYPES: list[str] = ["选择", "填空", "解答"]
 SECONDARY_KP_MAX = 3  # 副 kp ≤3（22-SSOT §1 #3）
 TAGS_MIN, TAGS_MAX = 3, 6  # 标签 3~6（22-SSOT §1 #9）
