@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage
 
 from agents import dna_extract
 from agents.recognize import parse_json_lax, _normalize_image_ref
+from core.settings import settings
 
 GRADE_TIMEOUT_S = 180.0
 GRADE_TEMPERATURE = 0.1
@@ -78,7 +79,7 @@ async def grade_one(
     ])
     raw = await invoke(
         [msg],
-        model="claude-opus-4-8",
+        model=settings.LLM_MODEL_HEAVY,
         temperature=GRADE_TEMPERATURE,
         max_tokens=GRADE_MAX_TOKENS,
         timeout=GRADE_TIMEOUT_S,

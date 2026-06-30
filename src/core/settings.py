@@ -63,6 +63,12 @@ def check_str_is_http(x: str) -> str:
     return str(http_url_adapter.validate_python(x))
 
 
+# 🔴 LLM 默认模型「单一切换点」（2026-06-30 收口）：全线 opus 4.8 的代码级默认值在此一处定。
+#   换模型/换中转只改这一行（或对应 .env 项）。下面各 settings 字段默认 + variant_model 回退 +
+#   6 个 agent(solve/recognize/grade/label/split_doc/ingest_stream) 全引它，杜绝散落 16+ 处硬编码。
+DEFAULT_OPUS_MODEL = "claude-opus-4-8"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=find_dotenv(),
@@ -174,7 +180,7 @@ class Settings(BaseSettings):
     # 🔴 PRD-C-100 B3·造图翻命令模型（§10 契约「opus 翻 GeoGebra 命令」）：默认 opus（命令质量稳，
     #   且当前促销价 opus 0.007/0.035 比 gpt-5.4 0.0108/0.0648 还便宜）。成本敏感期可经 .env 切
     #   VARIANT_MODEL_FIGURE=gpt-5.4-mini。造图翻命令走 relay_pool 落 conv_trace(label=figure_geogebra)。
-    VARIANT_MODEL_FIGURE: str = "claude-opus-4-8"
+    VARIANT_MODEL_FIGURE: str = DEFAULT_OPUS_MODEL
     # 🔴 PRD-C-100 B5·单一全局日预算护栏（D6/§10）：当日 conv_trace 累计花费 ≥ 此阈值（¥）→
     #   母题 opus 一把**拦截**（不调，提示老师稍后/明日再试）、造图**降级**（needs_figure，不调翻命令）。
     #   None/≤0 = 关（不限，默认）。三级预算（会话/老师/日）推多用户期，本轮只做单一全局日。
@@ -214,7 +220,11 @@ class Settings(BaseSettings):
     # 留空 → 各调用点退回默认（relay 配置 model），行为不变。
     # 🔴 2026-06-20 用户拍板「全面 opus 4.8、停用 gpt-5.4/nano/mini」：代码默认也硬化成 opus
     #   （.env 早已全档 opus；此默认是无 .env 时的兜底，确保任何情况都不回退 gpt-5.4/nano）。
-    LLM_MODEL_LIGHT: str = "claude-opus-4-8"
+    LLM_MODEL_LIGHT: str = DEFAULT_OPUS_MODEL
+    # 重活档（S1.1 同级）：solve/recognize/grade/label/split_doc/ingest_stream 六个 opus 锁定调用点用它，
+    #   原各自硬编码 "claude-opus-4-8" 绕过 settings → 收口到此（默认即 opus，非 None，杜绝静默退 gpt-5.4）。
+    #   换模型只改 DEFAULT_OPUS_MODEL 或 .env 此项。
+    LLM_MODEL_HEAVY: str = DEFAULT_OPUS_MODEL
 
     # === 按环节分档模型路由（PRD-C-009 变式·2026-06-12）===
     # 举一反三管线按「环节」分档配模型：前置抽取环节降本（nano），深度思考档（gpt-5.4）只留
@@ -234,7 +244,7 @@ class Settings(BaseSettings):
     #   variant_model("mother_solve_label") 必须命中此档（默认即 claude-opus-4-8），否则
     #   死键返 None → _ainvoke_text(model=None) → relay 退站配 gpt-5.4，opus 静默不被调用，
     #   整卡核心价值蒸发。本档**默认值就是 opus**（不靠 .env 才生效），.env 可覆盖核中转真名。
-    VARIANT_MODEL_MOTHER_SOLVE_LABEL: str = "claude-opus-4-8"
+    VARIANT_MODEL_MOTHER_SOLVE_LABEL: str = DEFAULT_OPUS_MODEL
     # 🔴 PRD-C-100 B3-perf：变式 generate 出题调用的【总时长墙钟闸】（秒，传 _ainvoke_text(timeout=)）。
     #   relay_pool.ainvoke_failover 的 asyncio.timeout 按此 cap 包每次站点调用（不传 → _DEFAULT_TOTAL_S=150s）。
     #   B3-perf 根因：generate 此前不传 timeout，多站熔断转移 × 空返重试 × shape 整组 retry 叠加可拖到 ~11min。
@@ -420,15 +430,15 @@ class Settings(BaseSettings):
         # 🔴 2026-06-20 用户拍板「全面 opus 4.8」：缺省回退也全 opus（原 None=退 relay 站默认 gpt-5.4、
         #   nano=轻档），彻底无 gpt-5.4/nano 残留。.env 已全档显式 opus，此为无 .env 兜底双保险。
         defaults: dict[str, str | None] = {
-            "analyze": "claude-opus-4-8",
+            "analyze": DEFAULT_OPUS_MODEL,
             "dna": self.LLM_MODEL_LIGHT,
-            "solve": "claude-opus-4-8",
-            "generate": "claude-opus-4-8",
+            "solve": DEFAULT_OPUS_MODEL,
+            "generate": DEFAULT_OPUS_MODEL,
             # 缺省回退 nano（与 dna 同档）；.env 显式切 gpt-5.4-mini（H2 甜点档）覆盖。
             "model_confirm": self.LLM_MODEL_LIGHT,
             # 🔴 PRD-C-017 F1 冗余护栏：母题档即使 override 被人误清空也绝不回退到 None/gpt-5.4。
             #   母题侧零机器验证（06-15 去 sympy）→ opus 必须真被调用是唯一安全网，宁可硬钉死。
-            "mother_solve_label": "claude-opus-4-8",
+            "mother_solve_label": DEFAULT_OPUS_MODEL,
         }
         return defaults.get(env)
 
@@ -446,7 +456,7 @@ settings = Settings()
 # 🔴 PRD-C-017 F1·G3 反性自检（启动期 fail-fast）：母题解题+打标必须真命中 opus，
 #   否则 variant_model 死键会让它静默退 gpt-5.4(5/9)——母题侧零机器验证（06-15 去 sympy），
 #   这是本卡核心价值的唯一安全网。进程起不来好过母题悄悄用错模型解出歪基准、下游全错查不到根因。
-MOTHER_SOLVE_MODEL_EXPECTED = "claude-opus-4-8"
+MOTHER_SOLVE_MODEL_EXPECTED = DEFAULT_OPUS_MODEL
 
 
 def assert_mother_solve_hits_opus(s: "Settings") -> str:

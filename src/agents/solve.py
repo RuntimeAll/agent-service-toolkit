@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 
 from agents import dna_extract, mother_opus
 from agents.recognize import parse_json_lax
+from core.settings import settings
 
 SOLVE_TIMEOUT_S = 180.0
 SOLVE_TEMPERATURE = 0.1
@@ -96,7 +97,7 @@ async def solve_one(
 
     raw = await invoke(
         [HumanMessage(content=f"{prompt}\n\n================ 待解题目 ================\n{question}")],
-        model="claude-opus-4-8",
+        model=settings.LLM_MODEL_HEAVY,
         temperature=SOLVE_TEMPERATURE,
         max_tokens=SOLVE_MAX_TOKENS,
         timeout=SOLVE_TIMEOUT_S,

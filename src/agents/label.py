@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 
 from agents import dna_extract, mother_opus
 from agents.recognize import parse_json_lax
+from core.settings import settings
 
 LABEL_TIMEOUT_S = 120.0
 LABEL_TEMPERATURE = 0.1
@@ -82,7 +83,7 @@ async def label_one(
 
     raw = await invoke(
         [HumanMessage(content=f"{build_label_prompt()}\n\n================ 待打标题目 ================\n{question}")],
-        model="claude-opus-4-8",
+        model=settings.LLM_MODEL_HEAVY,
         temperature=LABEL_TEMPERATURE,
         max_tokens=LABEL_MAX_TOKENS,
         timeout=LABEL_TIMEOUT_S,

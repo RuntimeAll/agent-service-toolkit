@@ -26,6 +26,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from agents import dna_extract, mother_opus
+from core.settings import settings
 
 # opus 读图调用上限（H4：带图可达数百秒；录题单题区图通常远小于母题整卷）。
 RECOGNIZE_TIMEOUT_S = 180.0
@@ -204,7 +205,7 @@ async def recognize(
 
     raw = await invoke(
         [msg],
-        model="claude-opus-4-8",
+        model=settings.LLM_MODEL_HEAVY,
         temperature=RECOGNIZE_TEMPERATURE,
         timeout=RECOGNIZE_TIMEOUT_S,
     )

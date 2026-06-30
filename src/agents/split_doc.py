@@ -27,6 +27,7 @@ from langchain_core.messages import HumanMessage
 
 from agents import dna_extract
 from agents.recognize import _loads_lax, parse_json_lax
+from core.settings import settings
 
 SPLIT_TIMEOUT_S = 240.0
 SPLIT_TEMPERATURE = 0.1
@@ -181,7 +182,7 @@ async def split_doc(
 
     raw = await invoke(
         [HumanMessage(content=content)],
-        model="claude-opus-4-8",
+        model=settings.LLM_MODEL_HEAVY,
         temperature=SPLIT_TEMPERATURE,
         max_tokens=SPLIT_MAX_TOKENS,
         timeout=SPLIT_TIMEOUT_S,

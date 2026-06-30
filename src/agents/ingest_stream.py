@@ -23,8 +23,9 @@ from langchain_core.messages import HumanMessage
 
 from agents import dna_extract
 from agents.recognize import _normalize_image_ref, parse_json_lax
+from core.settings import settings
 
-STREAM_MODEL = "claude-opus-4-8"
+STREAM_MODEL = settings.LLM_MODEL_HEAVY
 STREAM_TEMPERATURE = 0.1
 STREAM_TIMEOUT_S = 180.0
 SOLVE_MAX_TOKENS = 4096
