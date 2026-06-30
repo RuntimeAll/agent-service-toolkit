@@ -62,7 +62,22 @@ def _fill_degraded_label(
     kp_name: str | None,
     chapter_text: str | None,
 ) -> None:
-    """就地给 dna 补 tags + skeleton（仅当空时）。纯确定性、无 LLM。"""
+    """就地给 dna 补 tags + skeleton + 题型/考察类型/副考点占位（仅当空时）。纯确定性、无 LLM。
+
+    🔴 PRD-C-109/C-110·降级态维度残缺修：mother_endorsed override / 降级路径只该 override 主考点锚定，
+       不该清掉 opus 已产出的其余维度。本函数对**已有非空维度一律保留不动**（幂等），只在某维度真空时
+       补一个合理默认/占位，避免母题卡的题型/考察类型/副考点/标签/解法骨架显「空」。补的都是「检索/结构」
+       性占位（题型默认「解答题」、考察类型默认「综合应用」、副考点空数组占位），绝不编造数学事实/答案。
+    """
+    # ⓪ qtype 题型兜底：空 → 安全默认「解答题」（与 _bounded_degrade_to_chapter 同口径，待人审）。
+    if not str(dna.get("qtype") or "").strip():
+        dna["qtype"] = "解答题"
+    # ⓪′ exam_type 考察类型兜底：空 → 中性占位「综合应用」（闭集内合法值，避免 FE 显空）。
+    if not str(dna.get("exam_type") or "").strip():
+        dna["exam_type"] = "综合应用"
+    # ⓪″ secondary_kps 占位：缺键 → 给空数组（FE 渲染容空，至少不是 undefined/null 报错）。
+    if dna.get("secondary_kps") is None:
+        dna["secondary_kps"] = []
     # ① tags 兜底：考点名 + 章名 + 题型/考察类型（去重、非空、≤6）。这些都是已锚定真值，可作检索标签。
     cur_tags = [str(t).strip() for t in (dna.get("tags") or []) if str(t).strip()]
     if not cur_tags:
