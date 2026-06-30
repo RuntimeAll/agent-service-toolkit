@@ -26,6 +26,7 @@ from agents.qtype_format import (
     format_by_qtype,
 )
 from core import settings
+from core.contracts import QTYPE_TO_MISIKT  # 题型→misikt 入库码表（收口到契约模块）
 
 logger = logging.getLogger(__name__)
 
@@ -546,22 +547,10 @@ async def tag_pool_for_kp(kp_id: Any, client: RuoyiClient, limit: int = 300) -> 
 # ---------------------------------------------------------------------------
 # 入库 BO 构造 + 逐题落库（设计 §7：变式+解析经 RuoYi HTTP 写老师个人题库，只写不判）
 # ---------------------------------------------------------------------------
-# 题型中文 → CreateQuestionBo.questionType（1=选择 / 4=填空 / 5=简答；misikt 真实 3 种）
-QTYPE_MAP: dict[str, int] = {
-    "选择": 1,
-    "选择题": 1,
-    "填空": 4,
-    "填空题": 4,
-    "解答": 5,
-    "解答题": 5,
-    "简答": 5,
-    "简答题": 5,
-    "计算": 5,
-    "计算题": 5,
-    "证明": 5,
-    "证明题": 5,
-}
-DEFAULT_QTYPE = 5  # 拿不准 → 简答（最宽容）
+# 题型中文 → CreateQuestionBo.questionType（1=选择 / 4=填空 / 5=解答系；misikt 真实 3 种）。
+#   已收口 core.contracts.QTYPE_TO_MISIKT；本处 re-export，存量 QTYPE_MAP.get(s, DEFAULT_QTYPE) 引用不变。
+QTYPE_MAP = QTYPE_TO_MISIKT
+DEFAULT_QTYPE = 5  # 拿不准 → 解答系（最宽容）
 # 🔴 来源标记 = "举一反三"（与组卷服务 "AI-Orchestrator" 区分；之前照搬错标成组卷来源）
 IMPORT_SOURCE = "举一反三"
 REL_MOTHER = "原题(图)"  # 母题(从上传图抽出的原题)的 variant_relation

@@ -115,6 +115,7 @@ from agents.variant.shared.emit import (
 )
 from core import get_model, relay_pool, settings
 from core import difficulty  # 🔴 PRD-C-103 WS1：确定性难度判档（grade_observed，表反控的代码点）
+from core.contracts import QTYPE_ALIAS  # 题型别名归一表（收口到契约模块，与 dna_extract 同源）
 
 # DNA 三锚高置信门槛
 CONF_GATE = 0.75
@@ -1683,24 +1684,9 @@ def _context_block(facts: dict) -> str:
 # 🔴 抽取失败/解析失败 → knobs={} 回落默认，绝不卡死出题（G5）。
 # ---------------------------------------------------------------------------
 
-# 题型归一表（normalize_knobs 用）：只认 选择/填空/解答 三类
-_QTYPE_ALIAS: dict[str, str] = {
-    "选择": "选择",
-    "选择题": "选择",
-    "单选": "选择",
-    "单选题": "选择",
-    "填空": "填空",
-    "填空题": "填空",
-    "解答": "解答",
-    "解答题": "解答",
-    "计算": "解答",
-    "计算题": "解答",
-    "应用": "解答",
-    "应用题": "解答",
-    "证明": "解答",
-    "证明题": "解答",
-    "大题": "解答",
-}
+# 题型归一表（normalize_knobs 用）：只认 选择/填空/解答 三类。
+#   已收口 core.contracts.QTYPE_ALIAS（与 dna_extract._QTYPE_ALIAS 同源）；本处 re-export 供本模块 + generate.py 用。
+_QTYPE_ALIAS = QTYPE_ALIAS
 # 归一后要在 note 里保留语义的原始题型词（应用题 → 解答 + note "应用场景"）
 _QTYPE_NOTE_HINTS: dict[str, str] = {"应用": "应用场景", "应用题": "应用场景"}
 

@@ -30,12 +30,11 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from core import relay_pool, settings
-from core.contracts import EXAM_TYPES  # 收口到契约模块；re-export，存量 dna_extract.EXAM_TYPES 引用不变
+from core.contracts import EXAM_TYPES, QTYPES, QTYPE_ALIAS  # 收口到契约模块；re-export，存量引用不变
 
 # ---------------------------------------------------------------------------
-# 闭集 / 常量（22-SSOT §1）
+# 闭集 / 常量（22-SSOT §1）；EXAM_TYPES / QTYPES 已收口 core.contracts
 # ---------------------------------------------------------------------------
-QTYPES: list[str] = ["选择", "填空", "解答"]
 SECONDARY_KP_MAX = 3  # 副 kp ≤3（22-SSOT §1 #3）
 TAGS_MIN, TAGS_MAX = 3, 6  # 标签 3~6（22-SSOT §1 #9）
 SCENE_MAX_LEN = 64  # 场景 ≤64 字
@@ -78,13 +77,8 @@ def _is_review_id(pid: Any) -> bool:
     return any(s.startswith(p) for p in REVIEW_BOOK_PREFIXES)
 
 
-# 题型别名归一（与 variant_support.QTYPE_MAP 同口径的中文侧）
-_QTYPE_ALIAS: dict[str, str] = {
-    "选择": "选择", "选择题": "选择", "单选": "选择", "单选题": "选择",
-    "填空": "填空", "填空题": "填空",
-    "解答": "解答", "解答题": "解答", "计算": "解答", "计算题": "解答",
-    "应用": "解答", "应用题": "解答", "证明": "解答", "证明题": "解答", "大题": "解答",
-}
+# 题型别名归一已收口 core.contracts.QTYPE_ALIAS（与 variant/__init__._QTYPE_ALIAS 同源）；本处别名供 _norm_qtype 用
+_QTYPE_ALIAS = QTYPE_ALIAS
 
 # ---------------------------------------------------------------------------
 # prompt（语义搬自 e1_dna_probe.E1_PROMPT；难度改 rubric 断言 + 复用池可空兜底）
