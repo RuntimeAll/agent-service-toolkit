@@ -26,11 +26,15 @@ DSL_SYSTEM = r"""你是几何配图引擎的「中性 DSL 生成器」：把一�
 每个 object = { "id":"唯一标识", "type":"...", ...该 type 的参数, "label"?, "draggable"?, "style"? }
 🔴 引用别的对象一律用其 id 字符串（不要内联坐标），渲染器按 id 解析依赖、自动算派生坐标。
 🔴 自由点直接给 coords:[x,y]；派生点（中点/外接圆/交点/垂足）用对应 type 让引擎算，别手填坐标。
+🔴 边一律用 segment（三角形/四边形等的边、连两点的线段都是 segment，两端点落实际标注点）；line 只用于确需**无限延伸**的直线（对称轴/函数辅助线），ray 只用于射线。默认别用 line/ray 当边。
+🔴 点默认**静态**（不需可拖点）：除非题目本身是交互探究、确需拖动，否则**不要**给点加 draggable，配图默认 fixed。
 
 ================= 支持的 type 全集（白名单，只能用这些）=================
-· point        {coords:[x,y]}                  自由点；draggable:true 渲成红色可拖
-· segment      {points:[idA,idB]}              线段（line/ray/vector 同 points，分别=直线/射线/向量）
-· polygon      {points:[id,id,id...]}          多边形（自动浅填充）
+· point        {coords:[x,y]}                  点（默认静态，不需可拖点）。除非题目交互确需，别加 draggable
+· segment      {points:[idA,idB]}              线段（🔴 几何题的边、多边形的边一律用 segment，两端点落实际标注点）
+· line         {points:[idA,idB]}              直线（仅用于确需无限延伸的直线，如对称轴/函数辅助线）
+· ray          {points:[idA,idB]}              射线（仅用于确需射线语义时）
+· polygon      {points:[id,id,id...]}          多边形（自动浅填充；边天然按 segment 处理，不用 line）
 · midpoint     {points:[idA,idB]}              中点（派生，拖端点自动跟随）
 · circle       {center:id, through:id} 或 {center:id, r:数}   圆
 · circumcircle {points:[idA,idB,idC]}          三点外接圆
@@ -38,8 +42,8 @@ DSL_SYSTEM = r"""你是几何配图引擎的「中性 DSL 生成器」：把一�
 · parallel     {line:id, point:id}             过点作某线的平行线
 · anglebisector{points:[idA,idB,idC]}          ∠ABC 角平分线
 · intersection {of:[idA,idB], which?:0}        两对象交点
-· angle        {points:[idA,idB,idC], right?:true}  角弧（B 是顶点）；right 画直角小方块
-· glider       {on:id, coords:[x,y]}           约束在某对象上的可拖点
+· angle        {points:[idA,idB,idC], right?:true}  角的文字标注（B 是顶点，不画弧线）；直角用 right 画小方块
+· glider       {on:id, coords:[x,y]}           约束在某对象上的点（默认静态，无需可拖点）
 · tangent      {at:gliderId}                   过函数滑点的切线
 · functiongraph{expr:"x^2-2*x-3", from?:数, to?:数}  函数图象（expr 走数学白名单，仅 x 单变量+ + - * / ^ () 数字与 sin/cos/tan/sqrt/abs/exp/log/pi）
 · curve        {xs:[...], ys:[...], arrow?:true}     折线/参数曲线（s-t 行程图等）
