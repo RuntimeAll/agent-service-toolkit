@@ -558,8 +558,13 @@ async def generate(state: VariantState, config: RunnableConfig) -> VariantState:
             _facts_log.warning("generate fan-out: 第 %d 道异常，跳过", seq, exc_info=True)
             return seq, None
 
-    # 🔴 子件0 红线：节点内 asyncio.gather(Semaphore=3) fan-out，绝不用 LangGraph Send。
-    gathered = await asyncio.gather(*(_gen_one(s) for s in specs), return_exceptions=True)
+    # 🔴 PRD-C-110·改单 worker 串行（去并发池）：用户要求逐道顺序生成（不是降并发到 1，是逻辑串行
+    #   一个个轮询）。_gen_one 内部已 try/except 兜异常返 (seq, None)，串行后无需再包。进度帧
+    #   _emit_fanout_frame / _emit_stage / 结果装配都按 seq 归属、不依赖完成顺序，串行无破坏。
+    #   sem(Semaphore=3) / async with sem 留无害（串行下永不阻塞）。绝不用 LangGraph Send。
+    gathered: list[tuple[int, dict[str, Any] | None]] = []
+    for s in specs:
+        gathered.append(await _gen_one(s))
 
     # 按道序(seq)装配 → 一次性 return 全组（保 merge_items reducer「new=权威全集」语义）
     items: list[dict[str, Any]] = []
