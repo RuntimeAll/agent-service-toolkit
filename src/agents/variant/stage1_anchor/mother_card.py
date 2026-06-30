@@ -265,14 +265,21 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
         for m in (dna.get("models") or [])
         if isinstance(m, dict) and (m.get("id") or m.get("name"))
     ]
-    # 🔴 PRD-C-106 B1③·诚实三态展示态：去 M00 兜底后，无考模型 → models:[] + model_flag="no_model"。
-    #   把 flag 透传给 FE，让母题卡模型行渲染「无考模型」明示态（而非空白/报错）。有模型 → flag=None
-    #   → FE 渲染真模型 summary。model_flag 缺省（旧线程/库内母题无此键）→ None，FE 兼容兜底。
+    # 🔴 PRD-C-110·通用模型(待录入)透传：opus 认为用到、但库里没录的通用模型名 → temp_models
+    #   （[{"name","is_new":true}]）。FE 据它在 models 空时显「通用模型(待录入)」（而非「无考模型」）。
+    temp_models = [
+        {"name": str(m.get("name") or ""), "is_new": bool(m.get("is_new", True))}
+        for m in (dna.get("temp_models") or [])
+        if isinstance(m, dict) and str(m.get("name") or "").strip()
+    ]
+    # 🔴 PRD-C-106 B1③·诚实三态展示态（C-110 订正）：no_model 只在「models 与 temp_models 都空」时（真
+    #   无考模型）。models 空但 temp_models 非空（opus 提了库外通用模型名）→ FE 显「通用模型(待录入)」，
+    #   model_flag="temp_model"，**不是** no_model。把 flag 透传给 FE 渲染对应明示态（非空白/报错）。
     model_flag = dna.get("model_flag")
     if model_flag is None and not models:
-        # 兜底：无 flag 但 models 空（旧线程恢复 / 上游没写 flag）→ 视作无考模型态（不留模糊空白）。
-        model_flag = "no_model"
-    no_model = (model_flag == "no_model") or (not models)
+        # 兜底：无 flag 但 models 空（旧线程恢复 / 上游没写 flag）→ 据 temp_models 区分两态（不留模糊空白）。
+        model_flag = "temp_model" if temp_models else "no_model"
+    no_model = (not models) and (not temp_models)
 
     # 🔴 PRD-C-105 G1（D5）：母题难度改表驱动同源——优先读 mother_md_from_table(state) 算出的
     #   表驱动档（grade_observed，与变式侧 grade_variant_item 同源），不再显 dna.difficulty（opus dim8
@@ -347,7 +354,10 @@ def _build_mother_card(state: VariantState) -> dict[str, Any] | None:
             "hard_points": [str(h) for h in (dna.get("hard_points") or []) if str(h).strip()],
             "skeleton": skeleton or None,
             "models": models,
-            # 🔴 B1③·诚实三态：model_flag=no_model → FE 母题卡模型行出「无考模型」(非空白/非 M00)。
+            # 🔴 PRD-C-110·temp_models 透传：库外通用模型名（[{name,is_new}]），FE 在 models 空时显
+            #   「通用模型(待录入)」。models 非空显真模型；models/temp_models 都空才真 no_model。
+            "temp_models": temp_models,
+            # 🔴 B1③·诚实三态：model_flag=no_model → 母题卡模型行出「无考模型」；temp_model → 「通用模型(待录入)」。
             "model_flag": model_flag,
             "no_model": bool(no_model),
             "tags": [str(t) for t in (dna.get("tags") or []) if str(t).strip()],

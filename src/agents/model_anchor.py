@@ -482,9 +482,15 @@ def anchor_models_from_names(
 
     诚实三态（去 M00 兜底）：
       - 有考模型（名匹配到候选）→ models=[{id,name,tier_int,freq_int}]，model_flag=None。
-      - opus 给了名但候选集里匹配不到 → 视作池外 overflow 留痕（不硬塞 M00、不入正式维）；
-        若最终一个都没匹配到 → models=[] + model_flag="no_model"（明示「无考模型」，难度降级）。
-      - opus 没给任何模型名（modelCandidates 空）→ models=[] + model_flag="no_model"（真无考模型）。
+      - opus 给了名但候选集里匹配不到 → 视作池外 overflow 留痕（不硬塞 M00、不入正式维），
+        🔴 PRD-C-110 修：同时把这些「库外但 opus 认为用到的通用模型名」收进 temp_models
+        （[{"name","is_new":true}]，标未入库）→ 透传给 FE 显「通用模型(待录入)」；若最终一个正式
+        模型都没匹配到 → models=[] + temp_models 非空时 model_flag="temp_model"（不再误报 no_model）。
+      - opus 没给任何模型名（modelCandidates 空）→ models=[] + temp_models=[] + model_flag="no_model"
+        （真无考模型）。
+
+    🔴 PRD-C-110·no_model 语义订正：no_model 只在「models 与 temp_models **都空**」时置（真无考模型）。
+    models 空但 temp_models 非空（opus 提了库外通用模型名）→ FE 显「通用模型(待录入)」，**不是** no_model。
 
     candidates 给定 → 直接用（调用方已 toolbox_for_grade 备好，免二次查库，并保证与注入工具箱同集）；
     否则按 grade_code / leaf_codes 现查（chapter_scope=True 走按章 lookup_candidates）。
@@ -532,14 +538,21 @@ def anchor_models_from_names(
         if len(confirmed) >= MODELS_MAX:
             break
 
+    # 🔴 PRD-C-110·库外通用模型名 → temp_models（标 is_new，透传 FE 显「通用模型(待录入)」）。
+    #   overflow = opus 认为用到、但本年级候选集里没有的模型名 → 既留痕（上层 record_overflow_candidate
+    #   落待命名池供管理员审核录入），又收进 temp_models 挂到卡上（不再只丢个名）。
+    temp_models = [{"name": nm, "is_new": True} for nm in overflow]
+
     if not confirmed:
-        # 🔴 诚实三态：真无考模型（没给名 / 给了名全匹配不到）→ models:[] + no_model（绝不 M00）。
+        # 🔴 诚实三态（C-110 订正）：no_model 仅在 models 与 temp_models **都空**时（真无考模型）。
+        #   有库外通用模型名（temp_models 非空）→ model_flag="temp_model"，FE 显「通用模型(待录入)」。
         return {
-            "models": [], "temp_models": [], "model_overflow": overflow,
-            "model_warn": bool(overflow), "model_flag": NO_MODEL_FLAG,
+            "models": [], "temp_models": temp_models, "model_overflow": overflow,
+            "model_warn": bool(overflow),
+            "model_flag": ("temp_model" if temp_models else NO_MODEL_FLAG),
         }
     return {
-        "models": confirmed, "temp_models": [], "model_overflow": overflow,
+        "models": confirmed, "temp_models": temp_models, "model_overflow": overflow,
         "model_warn": bool(overflow), "model_flag": ("overflow" if overflow else None),
     }
 

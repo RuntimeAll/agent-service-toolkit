@@ -146,11 +146,20 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
         for m in (models_raw or [])
         if isinstance(m, dict) and (m.get("id") or m.get("name"))
     ]
-    # 🔴 PRD-C-106 B1③·诚实三态：去 M00 兜底后 models 可空 → 透传 model_flag/no_model 给 FE，
-    #   让变式卡模型行渲染「无考模型」(非空白)。item 级无独立 flag → 继承母题 DNA 的 flag。
+    # 🔴 PRD-C-110·temp_models 透传（库外通用模型名 [{name,is_new}]）：item 级覆盖优先，缺则母题 DNA。
+    #   models 空但 temp_models 非空 → FE 显「通用模型(待录入)」；两者都空才真 no_model。
+    temp_models_raw = it.get("temp_models") if it.get("temp_models") is not None else dna.get("temp_models")
+    temp_models = [
+        {"name": str(m.get("name") or ""), "is_new": bool(m.get("is_new", True))}
+        for m in (temp_models_raw or [])
+        if isinstance(m, dict) and str(m.get("name") or "").strip()
+    ]
+    # 🔴 PRD-C-106 B1③·诚实三态（C-110 订正）：models 可空 → 透传 model_flag/no_model 给 FE。
+    #   no_model 只在 models 与 temp_models **都空**时置（真无考模型）；有 temp_models → temp_model 态。
+    #   item 级无独立 flag → 继承母题 DNA 的 flag。
     model_flag = it.get("model_flag") if it.get("model_flag") is not None else dna.get("model_flag")
     if model_flag is None and not models:
-        model_flag = "no_model"
+        model_flag = "temp_model" if temp_models else "no_model"
     return {
         "main_kp": str(main_kp.get("name") or "") or None,
         "main_kp_id": str(main_kp.get("id") or "") or None,
@@ -162,8 +171,10 @@ def _item_dna(it: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
         "hard_points": hard_points,
         # 双轴模型维（批2→B1③ 诚实三态）：models 可空；no_model=True → FE 出「无考模型」明示态。
         "models": models,
+        # 🔴 PRD-C-110·库外通用模型名（FE 在 models 空时显「通用模型(待录入)」）。
+        "temp_models": temp_models,
         "model_flag": model_flag,
-        "no_model": bool(model_flag == "no_model" or not models),
+        "no_model": bool((not models) and (not temp_models)),
         "model_overflow": [str(x) for x in (dna.get("model_overflow") or []) if str(x).strip()],
         "model_warn": bool(dna.get("model_warn")),
         "manual_edited": bool(it.get("manual_edited")),
