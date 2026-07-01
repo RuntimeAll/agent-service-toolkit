@@ -53,14 +53,75 @@ REF_FIELDS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 高层「构件 DSL」(spec.build) 的浅校验（构件层 = book-ui/public/geo-engine/figure-builder.js）。
+#
+# 🔴 与低层 DSL 的分工：低层 objects 由本模块深校验（type/必填/引用/expr）；高层 build 的**几何深校验
+#    在前端 figure-builder（代码精确解坐标、几何不变量由 75 项 node 测保证）**，toolkit 侧无 JS 运行时、
+#    只做**结构浅校验**（每项恰有一个 shape/add/mark/transform 键 + 值在已知集合）——挡住"完全不对"的输出，
+#    深层几何交给 figure-builder。事实源 = figure-builder.js 的 expand 分发键 + system-prompt-figures.txt 白名单。
+# ---------------------------------------------------------------------------
+CONSTRUCT_SHAPES: set[str] = {
+    "triangle", "quad", "regular", "circle", "arc", "function", "solid", "chart",
+    "numberline", "angle", "parallelCut", "coordinate", "clock", "fractionBar",
+    "fractionCircle", "grid",
+}
+CONSTRUCT_ADDS: set[str] = {
+    "midpoint", "median", "altitude", "diagonal", "circumcircle", "incircle",
+    "intersection", "centroid",
+}
+CONSTRUCT_MARKS: set[str] = {"rightangle", "angle"}
+CONSTRUCT_TRANSFORMS: set[str] = {"reflect", "translate", "rotate", "central"}
+
+
+def validate_construct(spec: Any) -> tuple[bool, list[str]]:
+    """高层构件 DSL（spec.build）浅校验：build 是非空数组，每项恰含一个
+    shape/add/mark/transform 键且值在已知集合（几何深校验交前端 figure-builder）。
+
+    返回 (ok, errors)。errors 非空即结构不合（调用方据此降级）。
+    """
+    errs: list[str] = []
+    if not isinstance(spec, dict):
+        return False, ["顶层非 dict"]
+    build = spec.get("build")
+    if not isinstance(build, list) or not build:
+        return False, ["build 缺失或非数组"]
+    for i, it in enumerate(build):
+        if not isinstance(it, dict):
+            errs.append(f"build[{i}] 非对象")
+            continue
+        kinds = [k for k in ("shape", "add", "mark", "transform") if k in it]
+        if len(kinds) != 1:
+            errs.append(f"build[{i}] 须恰含一个 shape/add/mark/transform 键（现有: {kinds or '无'}）")
+            continue
+        key = kinds[0]
+        val = it.get(key)
+        allowed = {
+            "shape": CONSTRUCT_SHAPES, "add": CONSTRUCT_ADDS,
+            "mark": CONSTRUCT_MARKS, "transform": CONSTRUCT_TRANSFORMS,
+        }[key]
+        if val not in allowed:
+            errs.append(f"build[{i}] {key}='{val}' 不在白名单")
+        # 复合/标注/变换须指向已建图形 id（of）；基础图形(shape)无需 of。
+        if key in ("add", "mark", "transform") and not it.get("of"):
+            errs.append(f"build[{i}] {key} 须给 of（指向已建图形 id）")
+    return (len(errs) == 0), errs
+
+
 def validate_dsl(spec: Any) -> tuple[bool, list[str]]:
     """过 geo-engine schema 校验：type 白名单 + 必填字段齐 + 引用 id 可解析 + functiongraph 白名单。
+
+    🔴 双格式：spec 含 `build`（高层构件 DSL）→ 走 validate_construct（结构浅校验，几何交前端）；
+       否则按低层 DSL（objects）深校验。二者由调用方据 ok/errs 降级，行为一致。
 
     返回 (ok, errors)。errors 非空即不合 schema（调用方据此降级）。
     """
     errs: list[str] = []
     if not isinstance(spec, dict):
         return False, ["顶层非 dict"]
+    # 高层构件 DSL：有 build 且无 objects → 走构件浅校验。
+    if spec.get("build") and not spec.get("objects"):
+        return validate_construct(spec)
     objs = spec.get("objects")
     if spec.get("solid3d") and not objs:
         objs = []  # 纯 3D spec 允许无 objects
