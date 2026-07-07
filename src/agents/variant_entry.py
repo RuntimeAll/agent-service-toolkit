@@ -1046,8 +1046,17 @@ async def solve_and_label_resilient(
     返回 dict（成功）；彻底失败抛 _SolveLabelError（携带 last_exc / 是否纯解析失败），
     由 classify 接住走可前进的 needs_confirm 降级（不卡死、不无限回环）。
     on_progress(stage_text) 可选：用于喂阶段灯文案（与入口 _emit_stage 同节奏）。
+
+    🔴 2026-07-07 B线修·重锚图必须 base64 内嵌（与入口 1467 行同口径）：旧实现把 state.image_url
+       （OSS 远程 URL）原样透传给 mother_opus.solve_and_label → sui-xiang（kiro 逆向站）不抓远程图
+       URL、**静默丢图** → opus 无图、凭年级/章/叶子池 prompt 虚构一道"该章典型题" → 母题题面被
+       偷换且无任何告警（E2E 实测：化简求值母题确认章后被换成"商店卖鞋"编题）。_to_b64_data_url
+       幂等（data:/空串直返，下载失败回退原 URL 不破 aigeek 熔断兜底）。
     """
     from agents import mother_opus  # 局部 import（与 variant_entry 顶层一致风格）
+
+    if image_url:
+        image_url = await _to_b64_data_url(image_url)
 
     last_exc: Exception | None = None
     for _attempt in range(2):

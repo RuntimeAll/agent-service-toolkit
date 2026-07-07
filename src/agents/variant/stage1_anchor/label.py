@@ -376,6 +376,17 @@ async def classify(state: VariantState, config: RunnableConfig) -> VariantState:
         # (a)+(b) 合流：仅「换册」触发重解（空 fp / 同册一律复用，护 B2）。换册后首解锚定作废，
         #   连带覆盖「首解没锚牢」——新册重解一次更稳，且不在 B2 同册复用路径上，不会引死循环。
         _resolve_needed = bool(_fp) and bool(_new_book) and _new_book != _fp
+        # 🔴 2026-07-07 B线修·fp 同系比较闸（假"换册"根治）：fp 有两个来源系——低置信写点走
+        #   _grade_to_code **历史映射**（值域 3071/3072/3081/3082/3091/3092，旧区 KG 前缀），高置信
+        #   写点走 **live 库章前缀**（如 100004[:4]=1000，字典化重建树根=100/200/901…）。两系不可
+        #   互比：七上首解 fp=3071 vs 确认同册章前缀 1000 → 恒"换册"假阳性 → 丢成功首解全量重解
+        #   （E2E 实测踩中，叠加重解丢图=母题被偷换）。编码系不同源 → 视作**不可判定** → 按空 fp
+        #   策略处置（不判册变、走复用 + _reanchor graceful 降级），守 B2 红线「同册一律复用」。
+        if _resolve_needed:
+            from agents.variant import _GRADE_CN, _TERM_CN  # 运行期取（label↔facade 装载序照旧）
+            _legacy_fps = {g + t for g in _GRADE_CN.values() for t in _TERM_CN.values()}
+            if (_fp in _legacy_fps) != (_new_book in _legacy_fps):
+                _resolve_needed = False
     if _reuse_ok and not _resolve_needed:
         return await _reanchor_reuse_first_solve(
             # 🔴 B3·确认收口：把 endorse 终态注入 state，让闸3 一律放行（_reanchor 读 state.mother_endorsed）。
