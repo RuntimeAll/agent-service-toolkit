@@ -26,8 +26,10 @@ from langchain_core.messages import HumanMessage
 
 from agents import dna_extract
 
-# opus 母题调用上限（H4：纯文本 ~21s，带图可达数百秒；带图本卡 G13 打回不到此处）。
-MOTHER_OPUS_TIMEOUT_S = 180.0
+# opus 母题调用上限。原 180s 基于「带图打不到此处」的旧前提（H4）；现带图是主路
+# （book-ui / teacher-mcp 全喂图 URL），压轴长题(多小问+复杂公式)实测可超 3 分钟被掐
+# （PRD-O-005 D8 spike 复现，2026-07-07 用户反馈放宽）。420s < MCP 客户端 600s 预算。
+MOTHER_OPUS_TIMEOUT_S = 420.0
 MOTHER_OPUS_TEMPERATURE = 0.1
 
 # 10 维 DNA json_schema（B0 探针 MOTHER_SCHEMA，required 锁字段 = 不偷工不漏维硬保证）。
